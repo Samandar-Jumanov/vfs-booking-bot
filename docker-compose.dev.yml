@@ -1,0 +1,84 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vfsuser
+      POSTGRES_PASSWORD: vfspass
+      POSTGRES_DB: vfsdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vfsuser -d vfsdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - vfs-net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass redispass
+    ports:
+      - "6379:6379"
+    networks:
+      - vfs-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    shm_size: '512mb'
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://vfsuser:vfspass@postgres:5432/vfsdb
+      REDIS_URL: redis://:redispass@redis:6379
+      SESSION_DIR: /app/sessions
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      - ./backend/recordings:/app/recordings
+      - sessions-data:/app/sessions
+    command: sh -c "npx prisma migrate deploy && npm run dev"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - vfs-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_WS_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/tailwind.config.ts:/app/tailwind.config.ts
+      - ./frontend/postcss.config.js:/app/postcss.config.js
+      - ./frontend/package.json:/app/package.json
+    depends_on:
+      - backend
+    networks:
+      - vfs-net
+
+volumes:
+  postgres-data:
+  redis-data:
+  sessions-data:
+
+networks:
+  vfs-net:
+    driver: bridge

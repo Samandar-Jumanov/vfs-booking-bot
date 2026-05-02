@@ -1,0 +1,96 @@
+# 🛡️ VFS Global Appointment Booking Bot (Pro v2.1)
+
+A professional-grade, industrial automation solution for monitoring and booking VFS Global appointments. This project is engineered for speed, reliability, and security, featuring a deep-midnight aesthetic and advanced anti-blocking infrastructure.
+
+---
+
+## 🌟 Key Features & Capabilities
+
+### 1. 🔍 Monitoring & Slot Intelligence
+- **Real-Time Polling**: Highly efficient, multi-threaded monitoring engine.
+- **Adaptive Intervals**: Configurable intensity to balance speed and safety (avoiding IP blocks).
+- **Slot Tracking**: Keeps history of when slots appear to help predict future openings.
+
+### 2. 🛡️ Industrial Anti-Block System (WAF Bypass)
+- **Proxy Rotation**: Native support for **HTTP/HTTPS/SOCKS5** proxies. Automatically rotates if a block is detected.
+- **Browser Fingerprinting**: Rotates User-Agents, headers, and viewport settings to look like a real human.
+- **403 Resilience**: Built-in detector for "403 Forbidden" errors with automatic recovery wait-times.
+- **CAPTCHA Solving**: Integrated with **2Captcha API** for background resolution of image and hCaptcha challenges.
+
+### 3. 🤖 Telegram Command & Notification Center
+Stay in control anywhere. Use these Telegram commands:
+- `/start` - Launch the bot interface.
+- `/status` - View real-time monitor stats (Source, Destination, Visa Type, Slot Count).
+- `/profiles` - List all saved applicant profiles and their priorities.
+- `/stop_all` - Emergency command to immediately halt all active monitoring sessions.
+
+### 4. 👤 Pro Profile Management
+- **Full Compatibility**: Supports all VFS required fields (Passport Issue/Expiry, Gender, DOB).
+- **Fast Entry UI**: New year/month dropdowns—select birthdates from decades ago in seconds.
+- **Dossier Priority**: Mark specific applicants as "Turbo Acquisition" to prioritize them in the queue.
+
+### 5. 🎨 Dashboard Experience
+- **Deep Midnight Theme**: Premium, low-eye-strain design for night monitoring.
+- **Real-Time Stream**: Live diagnostic logs (Winston-based) visible directly from the browser.
+- **Theme Sync**: Zero-flicker theme engine for an instantaneous premium feel.
+
+---
+
+## 🏗️ Technical Architecture
+
+| Component | Responsibility | Technology |
+| :--- | :--- | :--- |
+| **Frontend** | User Interface & Management | Next.js 14, Framer Motion, Tailwind |
+| **Backend** | Automation Engine & API | Node.js, Express, TypeScript |
+| **Database** | Applicant Data & Event Logs | PostgreSQL (Prisma ORM) |
+| **Messaging** | Notifications & Remote Control | Telegraf (Telegram), Socket.io |
+| **Caching** | Task Queue & Session Storage | Redis |
+| **Infrastructure** | Deployment & Containment | Docker, Docker Compose |
+
+---
+
+## ⚙️ Quick Set-Up (3-Step Guide)
+
+### 1. Prerequisites
+- **Docker Desktop** installed and running.
+- **Telegram Bot**: Message [@BotFather](https://t.me/botfather) to get your token.
+- **Chat ID**: Message [@userinfobot](https://t.me/userinfobot) to get your personal ID.
+
+### 2. Configure Your Secrets
+Copy `.env.example` to `.env` and fill in:
+- `TELEGRAM_BOT_TOKEN`: From BotFather.
+- `TELEGRAM_CHAT_ID`: Your personal numeric ID.
+- `TWO_CAPTCHA_KEY`: (Optional) For automatic CAPTCHA solving.
+- `TELEGRAM_PROXY`: (Optional) If you are in a country where Telegram is blocked.
+
+### 3. Ignition
+Double-click `start_project.bat` (Windows) or run:
+```bash
+docker-compose -f docker-compose.dev.yml up --build
+```
+Access the dashboard at: `http://localhost:3000`
+
+---
+
+## 🛠️ Troubleshooting & Common Fixes
+
+### 🔴 Red Screen / "Failed to Launch"
+- **Solution**: Ensure Docker is running. If it persists, run `docker-compose down -v` to clear cache and restart.
+
+### 🚫 403 Forbidden / IP Blocked
+- **Reason**: VFS has detected too many requests from your IP.
+- **Solution**: Check your proxy settings. Increase the "Polling Intensity" (Latency) in the Dashboard to 30-60 seconds.
+
+### ⚠️ Failed to Launch Telegram Bot
+- **Solution**: Check your `TELEGRAM_BOT_TOKEN`. If you are behind a firewall, ensure `TELEGRAM_PROXY` is set correctly in `.env`.
+
+---
+
+## 📜 Maintenance
+- **Clean Logs**: Use the "Clear Logs" button in settings if the database becomes slow.
+- **Update Engine**: Pull the latest code and run `--build` again to apply security patches.
+
+---
+
+**Engineered with ❤️ for the Global Community.**  
+*Please use this software ethically and within the bounds of VFS Global's usage policies.*

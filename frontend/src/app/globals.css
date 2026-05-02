@@ -1,0 +1,147 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 1rem;
+  }
+
+  .dark {
+    --background: 222.2 47.4% 4.1%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 47.4% 4.1%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 47.4% 4.1%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+    box-sizing: border-box;
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-size: 16px; 
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: Outfit, Inter, ui-sans-serif;
+    letter-spacing: -0.025em;
+    font-weight: 700;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply backdrop-blur-md border;
+    background-color: hsl(var(--background) / 0.6);
+    border-color: hsl(var(--border) / 0.4);
+  }
+  
+  /* Redesigning existing utilities to match new system */
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 active:scale-95;
+  }
+
+  .btn-primary { 
+    @apply btn text-primary-foreground shadow-sm; 
+    background-color: hsl(var(--primary));
+  }
+  .btn-primary:hover {
+    background-color: hsl(var(--primary) / 0.9);
+  }
+
+  .btn-secondary { 
+    @apply btn border border-input hover:bg-accent hover:text-accent-foreground; 
+    background-color: hsl(var(--background));
+  }
+
+  .btn-danger { 
+    @apply btn text-destructive-foreground; 
+    background-color: hsl(var(--destructive));
+  }
+  .btn-danger:hover {
+    background-color: hsl(var(--destructive) / 0.9);
+  }
+
+  .input {
+    @apply flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .card { 
+    @apply rounded-xl border shadow-sm; 
+    background-color: hsl(var(--card));
+    color: hsl(var(--card-foreground));
+  }
+  .badge { 
+    @apply inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2; 
+  }
+  .badge-green { @apply badge border-transparent bg-green-500/10 text-green-500 hover:bg-green-500/20; }
+  .badge-red { @apply badge border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20; }
+  .badge-yellow { @apply badge border-transparent bg-yellow-500/10 text-yellow-500 hover:bg-yellow-500/20; }
+  .badge-blue { @apply badge border-transparent bg-blue-500/10 text-blue-500 hover:bg-blue-500/20; }
+}
+
+@layer utilities {
+  .animate-in {
+    animation-duration: 500ms;
+    animation-fill-mode: forwards;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .fade-in {
+    opacity: 0;
+    animation-name: fade-in;
+  }
+
+  .slide-in-from-bottom-4 {
+    transform: translateY(1rem);
+    animation-name: slide-in-from-bottom;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes slide-in-from-bottom {
+    from { transform: translateY(1rem); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+}
+

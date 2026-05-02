@@ -1,0 +1,22 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont openssl gcompat libc6-compat
+
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+
+COPY package.json ./
+COPY prisma ./prisma/
+
+RUN npm install
+RUN npx prisma generate
+
+COPY . .
+
+RUN mkdir -p /app/sessions
+
+EXPOSE 3001
+
+CMD ["npm", "run", "dev"]

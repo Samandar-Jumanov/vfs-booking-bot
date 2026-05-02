@@ -1,0 +1,185 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+}
+
+enum Priority {
+  HIGH
+  NORMAL
+}
+
+enum BookingStatus {
+  QUEUED
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+enum EventType {
+  SLOT_DETECTED
+  BOOKING_ATTEMPT
+  BOOKING_SUCCESS
+  BOOKING_FAILED
+  IP_BLOCKED
+  SESSION_EXPIRED
+  CAPTCHA_REQUIRED
+  CAPTCHA_SOLVED
+  MONITOR_STARTED
+  MONITOR_STOPPED
+}
+
+enum ProxyStatus {
+  ACTIVE
+  BLOCKED
+  DISABLED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model GlobalSettings {
+  id             String   @id @default("singleton")
+  proxyHost      String?
+  proxyPort      Int?
+  proxyUsername  String?
+  proxyPassword  String?
+  updatedAt      DateTime @updatedAt
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  passwordHash     String
+  role             Role      @default(ADMIN)
+  refreshTokenHash String?
+  pushSubscriptions PushSubscription[]
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@map("users")
+}
+
+model Profile {
+  id                 String    @id @default(cuid())
+  fullName           String
+  passportNumberEnc  String    // AES-256-GCM encrypted
+  dobEnc             String    // AES-256-GCM encrypted
+  passportExpiry     DateTime
+  nationality        String
+  email              String
+  phone              String
+  gender             Gender    @default(MALE)
+  passportIssueDate  DateTime?
+  vfsPasswordEnc     String?   // AES-256-GCM encrypted VFS portal login password
+  priority           Priority  @default(NORMAL)
+  isActive           Boolean   @default(true)
+  bookings           Booking[]
+  logs               Log[]
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@map("profiles")
+}
+
+model Booking {
+  id             String        @id @default(cuid())
+  profile        Profile       @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  profileId      String
+  destination    String        // "brazil" | "portugal"
+  visaType       String
+  slotDate       DateTime?
+  slotTime       String?
+  status         BookingStatus @default(QUEUED)
+  confirmationNo String?
+  proxyUsed      String?
+  attempt        Int           @default(1)
+  errorMessage   String?
+  jobId          String?       // BullMQ job ID
+  createdAt      DateTime      @default(now())
+  completedAt    DateTime?
+
+  @@index([profileId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("bookings")
+}
+
+model Log {
+  id          String     @id @default(cuid())
+  timestamp   DateTime   @default(now())
+  level       LogLevel
+  eventType   EventType
+  message     String
+  profile     Profile?   @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  profileId   String?
+  destination String?
+  result      String?
+  proxyUsed   String?
+  metadata    Json?
+
+  @@index([timestamp])
+  @@index([profileId])
+  @@index([eventType])
+  @@map("logs")
+}
+
+model Settings {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model Proxy {
+  id            String      @id @default(cuid())
+  host          String
+  port          Int
+  username      String
+  passwordEnc   String      // AES-256-GCM encrypted
+  provider      String
+  country       String      @default("AO")
+  status        ProxyStatus @default(ACTIVE)
+  blockCount    Int         @default(0)
+  lastUsedAt    DateTime?
+  lastBlockedAt DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@map("proxies")
+}
+
+model PushSubscription {
+  id         String   @id @default(cuid())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  endpoint   String   @unique
+  p256dh     String
+  auth       String
+  createdAt  DateTime @default(now())
+
+  @@map("push_subscriptions")
+}

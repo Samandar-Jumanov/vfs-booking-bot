@@ -1,0 +1,16 @@
+{
+  "name": "vfs-appointment-bot",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "docker-compose -f docker-compose.dev.yml up",
+    "prod": "docker-compose up -d",
+    "backend:dev": "npm run dev --workspace=backend",
+    "frontend:dev": "npm run dev --workspace=frontend",
+    "test": "npm run test --workspace=backend"
+  }
+}

@@ -1,0 +1,92 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vfsuser
+      POSTGRES_PASSWORD: vfspass
+      POSTGRES_DB: vfsdb
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vfsuser -d vfsdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - vfs-net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass redispass --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redispass", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - vfs-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    shm_size: 1gb
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://vfsuser:vfspass@postgres:5432/vfsdb
+      REDIS_URL: redis://:redispass@redis:6379
+      SESSION_DIR: /app/sessions
+    volumes:
+      - sessions-data:/app/sessions
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vfs-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: /api
+      NEXT_PUBLIC_WS_URL: /
+    depends_on:
+      - backend
+    networks:
+      - vfs-net
+
+  nginx:
+    image: nginx:1.25-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - vfs-net
+
+volumes:
+  postgres-data:
+  redis-data:
+  sessions-data:
+
+networks:
+  vfs-net:
+    driver: bridge
