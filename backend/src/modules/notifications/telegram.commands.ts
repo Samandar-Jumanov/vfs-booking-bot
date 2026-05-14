@@ -33,6 +33,10 @@ export function registerTelegramCommands(bot: Telegraf): void {
       await ctx.answerCbQuery('Unsupported action');
       return;
     }
+    if (data === 'dashboard:open') {
+      await ctx.answerCbQuery('Dashboard runs on operator localhost — open it manually');
+      return;
+    }
 
     const [action, monitorId, destination] = data.split(':');
 

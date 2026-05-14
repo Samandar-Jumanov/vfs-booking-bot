@@ -1,6 +1,8 @@
 import { getSetting } from '@modules/settings/settings.service';
 import { prisma } from '@config/database';
 import { env } from '@config/env';
+import { logEvent } from '@modules/logs/logger';
+import { EventType } from '@prisma/client';
 import { sendTelegram } from './telegram.bot';
 import { sendEmail } from './email';
 import { sendPushToAll } from './webPush';
@@ -56,11 +58,26 @@ function dashboardUrl(path = ''): string {
   return `${env.FRONTEND_URL.replace(/\/$/, '')}${path}`;
 }
 
+type InlineButton = { text: string; callback_data?: string; url?: string };
+
 function alertCallback(action: string, p: NotificationPayload): string {
   return [action, p.monitorId ?? '', p.destination ?? ''].join(':').slice(0, 64);
 }
 
-function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } } {
+function isLocalhostFrontendUrl(): boolean {
+  return env.FRONTEND_URL.startsWith('http://localhost')
+    || env.FRONTEND_URL.startsWith('http://127.')
+    || env.FRONTEND_URL.startsWith('http://[::1]');
+}
+
+function dashboardButton(): InlineButton {
+  if (isLocalhostFrontendUrl()) {
+    return { text: '📊 Dashboard', callback_data: 'dashboard:open' };
+  }
+  return { text: '📊 Dashboard', url: dashboardUrl('/dashboard') };
+}
+
+function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboard: InlineButton[][] } } {
   switch (p.event) {
     case 'SLOT_DETECTED':
       return {
@@ -68,7 +85,7 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
           inline_keyboard: [
             [
               { text: '🎯 Book now', callback_data: alertCallback('book_now', p) },
-              { text: '📊 Dashboard', url: dashboardUrl('/dashboard') },
+              dashboardButton(),
             ],
             [{ text: '⏸ Pause monitor', callback_data: alertCallback('pause_monitor', p) }],
           ],
@@ -79,7 +96,7 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
         reply_markup: {
           inline_keyboard: [[
             { text: '📥 Confirmation', callback_data: alertCallback('download_confirmation', p) },
-            { text: '📊 Dashboard', url: dashboardUrl('/dashboard') },
+            dashboardButton(),
           ]],
         },
       };
@@ -87,7 +104,7 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
       return {
         reply_markup: {
           inline_keyboard: [[
-            { text: '📊 Dashboard', url: dashboardUrl('/dashboard') },
+            dashboardButton(),
             { text: '🔁 Retry once', callback_data: alertCallback('retry_once', p) },
           ]],
         },
@@ -97,7 +114,7 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
         reply_markup: {
           inline_keyboard: [[
             { text: '🤖 Solve', callback_data: alertCallback('solve_captcha', p) },
-            { text: '📊 Dashboard', url: dashboardUrl('/dashboard') },
+            dashboardButton(),
           ]],
         },
       };
@@ -106,7 +123,7 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
         reply_markup: {
           inline_keyboard: [[
             { text: '🍪 Warm cookies', callback_data: alertCallback('warm_cookies', p) },
-            { text: '📊 Dashboard', url: dashboardUrl('/dashboard') },
+            dashboardButton(),
           ]],
         },
       };
@@ -114,12 +131,11 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
     case 'MONITOR_DEAD':
       return {
         reply_markup: {
-          inline_keyboard: [[{ text: '📊 Dashboard', url: dashboardUrl('/dashboard') }]],
+          inline_keyboard: [[dashboardButton()]],
         },
       };
   }
 }
-
 function formatTelegramMessage(p: NotificationPayload & { profileName?: string }): string {
   switch (p.event) {
     case 'SLOT_DETECTED':
@@ -176,27 +192,51 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
 
   const enriched = { ...payload, profileName };
 
-  await Promise.allSettled([
+  await Promise.all([
     (async () => {
-      const enabled = await getSetting<boolean>('notifications.telegram.enabled');
-      if (enabled || env.TELEGRAM_BOT_TOKEN) {
-        await sendTelegram(formatTelegramMessage(enriched), {
-          parse_mode: 'Markdown',
-          ...alertButtons(enriched),
+      try {
+        const enabled = await getSetting<boolean>('notifications.telegram.enabled');
+        if (enabled || env.TELEGRAM_BOT_TOKEN) {
+          await sendTelegram(formatTelegramMessage(enriched), {
+            parse_mode: 'Markdown',
+            ...alertButtons(enriched),
+          });
+        }
+      } catch (err: any) {
+        logEvent('error', EventType.BOOKING_FAILED, `Telegram notification failed: ${err.message ?? String(err)}`, {
+          channel: 'telegram',
+          event: enriched.event,
+          destination: enriched.destination,
         });
       }
     })(),
     (async () => {
-      const enabled = await getSetting<boolean>('notifications.email.enabled');
-      if (enabled) {
-        const { subject, html } = formatEmailHtml(enriched);
-        const adminEmail = await getSetting<string>('notifications.email.recipient');
-        if (adminEmail) await sendEmail(adminEmail, subject, html);
+      try {
+        const enabled = await getSetting<boolean>('notifications.email.enabled');
+        if (enabled) {
+          const { subject, html } = formatEmailHtml(enriched);
+          const adminEmail = await getSetting<string>('notifications.email.recipient');
+          if (adminEmail) await sendEmail(adminEmail, subject, html);
+        }
+      } catch (err: any) {
+        logEvent('error', EventType.BOOKING_FAILED, `Email notification failed: ${err.message ?? String(err)}`, {
+          channel: 'email',
+          event: enriched.event,
+          destination: enriched.destination,
+        });
       }
     })(),
     (async () => {
-      const enabled = await getSetting<boolean>('notifications.push.enabled');
-      if (enabled) await sendPushToAll(enriched);
+      try {
+        const enabled = await getSetting<boolean>('notifications.push.enabled');
+        if (enabled) await sendPushToAll(enriched);
+      } catch (err: any) {
+        logEvent('error', EventType.BOOKING_FAILED, `Push notification failed: ${err.message ?? String(err)}`, {
+          channel: 'push',
+          event: enriched.event,
+          destination: enriched.destination,
+        });
+      }
     })(),
   ]);
 }
