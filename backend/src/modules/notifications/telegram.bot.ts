@@ -4,6 +4,7 @@ import { env } from '@config/env';
 import { getMonitorStatus, stopMonitor } from '@modules/monitor/monitor.service';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
+import { registerTelegramCommands } from './telegram.commands';
 
 const escapeHTML = (str: string) => {
   if (!str) return '';
@@ -124,6 +125,8 @@ export function initTelegramBot(): Telegraf | null {
     } catch {}
   });
 
+  registerTelegramCommands(bot);
+
   const launchBot = async () => {
     try {
       await bot?.launch();
@@ -148,11 +151,7 @@ export function getBotInstance(): Telegraf | null {
   return bot;
 }
 
-export async function sendTelegram(message: string): Promise<void> {
-  if (!bot || !env.TELEGRAM_CHAT_ID) return;
-  try {
-    await bot.telegram.sendMessage(env.TELEGRAM_CHAT_ID, message, { parse_mode: 'HTML' });
-  } catch (err: unknown) {
-    // Retried by logger if critical
-  }
+export async function sendTelegram(message: string, options: Record<string, unknown> = {}): Promise<void> {
+  if (!bot || !env.TELEGRAM_CHAT_ID) throw new Error('Telegram bot is not configured');
+  await bot.telegram.sendMessage(env.TELEGRAM_CHAT_ID, message, { parse_mode: 'HTML', ...options });
 }
