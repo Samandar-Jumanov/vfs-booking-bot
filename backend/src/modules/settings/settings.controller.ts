@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as settingsService from './settings.service';
 import { AppError } from '@middleware/errorHandler';
+import { sendTelegram } from '@modules/notifications/telegram.bot';
 
 export async function getAll(req: Request, res: Response, next: NextFunction) {
   try {
@@ -15,6 +16,15 @@ export async function updateGlobal(req: Request, res: Response, next: NextFuncti
     await settingsService.updateGlobalSettings(req.body);
     res.json({ success: true });
   } catch (err) { next(err); }
+}
+
+export async function testNotifications(_req: Request, res: Response) {
+  try {
+    await sendTelegram('✅ VFS bot test ping', { parse_mode: 'Markdown' });
+    res.json({ ok: true, sentTo: ['telegram'] });
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err.message ?? 'Failed to send Telegram test ping' });
+  }
 }
 
 // Bulk update — body is { "key1": value1, "key2": value2, ... }

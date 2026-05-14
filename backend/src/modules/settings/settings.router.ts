@@ -4,6 +4,7 @@ import * as settingsController from './settings.controller';
 
 const router = Router();
 
+router.post('/notifications/test', settingsController.testNotifications);
 router.use(requireAuth);
 router.get('/', settingsController.getAll);
 router.post('/global', settingsController.updateGlobal);
