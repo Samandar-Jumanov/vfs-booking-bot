@@ -10,6 +10,7 @@ import { warmSessionWithBrowser, VfsCredentials } from './session.warmer';
 import { enqueueBooking } from '@modules/booking/booking.service';
 import { emitToAll } from '@modules/websocket/ws.server';
 import { dispatchNotification } from '@modules/notifications/notification.service';
+import { getRedis } from '@config/redis';
 
 // --- Types & Constants ---
 
@@ -216,6 +217,8 @@ export async function startMonitor(id: string): Promise<void> {
   if (!current || current.isRunning) return;
 
   setMonitor(id, { ...current, isRunning: true, isCoolingDown: false });
+  await getRedis().sadd('monitors:running', id);
+  await getRedis().set(`monitor:${id}:heartbeat`, Date.now().toString(), 'EX', 90);
   logEvent('info', EventType.MONITOR_STARTED, `Monitor started for ${current.sourceCountry.toUpperCase()} -> ${current.destination.toUpperCase()}`);
 
   const poll = async () => {
@@ -223,6 +226,7 @@ export async function startMonitor(id: string): Promise<void> {
     if (!config || !config.isRunning) return;
 
     try {
+      await getRedis().set(`monitor:${id}:heartbeat`, Date.now().toString(), 'EX', 90);
       const sourceCode = getSourceCode(config.sourceCountry);
       const destCode = getDestinationCode(config.destination);
       const creds = await getVfsCredentials(config.profileIds);
@@ -279,6 +283,7 @@ export async function startMonitor(id: string): Promise<void> {
         // Fire notification (best-effort, don't block polling)
         dispatchNotification({
           event: 'SLOT_DETECTED',
+          monitorId: id,
           profileId: config.profileIds[0],
           sourceCountry: config.sourceCountry,
           destination: config.destination,
@@ -336,6 +341,7 @@ export async function startMonitor(id: string): Promise<void> {
 
       logEvent('error', EventType.BOOKING_FAILED, `Monitor poll error: ${err.message}`);
       const retryPoll = setTimeout(poll, 60000);
+      await getRedis().del(`monitor:${id}:heartbeat`);
       monitorTimeouts.set(id, retryPoll);
     }
   };
@@ -376,6 +382,8 @@ export async function autoStartMonitors(): Promise<void> {
 export function stopMonitor(id: string): void {
   const current = getMonitor(id);
   if (current) setMonitor(id, { ...current, isRunning: false });
+  getRedis().srem('monitors:running', id).catch(() => {});
+  getRedis().del(`monitor:${id}:heartbeat`).catch(() => {});
   const timeout = monitorTimeouts.get(id);
   if (timeout) {
     clearTimeout(timeout);

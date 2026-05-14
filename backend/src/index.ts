@@ -13,6 +13,7 @@ import { initWebSocket } from '@modules/websocket/ws.server';
 import { startBookingWorker, stopBookingWorker } from '@modules/booking/booking.worker';
 import { initTelegramBot } from '@modules/notifications/telegram.bot';
 import { autoStartMonitors } from '@modules/monitor/monitor.service';
+import { startNotificationQueues, stopNotificationQueues } from '@modules/notifications/queues';
 
 
 async function bootstrap() {
@@ -34,6 +35,9 @@ async function bootstrap() {
   startBookingWorker();
   console.info('✅ Booking worker started');
 
+  await startNotificationQueues();
+  console.info('Notification queues started');
+
   // Interactive Telegram Bot
   initTelegramBot();
   
@@ -50,6 +54,7 @@ async function bootstrap() {
   async function shutdown(signal: string) {
     console.info(`\n${signal} received — shutting down gracefully…`);
     await stopBookingWorker();
+    await stopNotificationQueues();
     server.close(async () => {
       await disconnectDatabase();
       await disconnectRedis();
