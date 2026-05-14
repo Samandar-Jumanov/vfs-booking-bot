@@ -1,31 +1,10 @@
 import { create } from 'zustand';
+import type { LogEntryPayload, MonitorStatusPayload, SlotInfo as WsSlotInfo } from '@/types/ws-events';
 
-export interface SlotInfo {
-  date: string;
-  time: string;
-  destination: string;
-  visaType: string;
-}
+export type SlotInfo = WsSlotInfo;
 
-export interface LogEntry {
-  id?: string;
-  timestamp: string;
-  level: 'INFO' | 'WARN' | 'ERROR';
-  eventType: string;
-  message: string;
-  destination?: string;
-}
-
-interface MonitorStatus {
-  id: string;
-  destination: string;
-  visaType: string;
-  isRunning: boolean;
-  lastCheckedAt: string | null;
-  slotDetectedCount: number;
-  mode: string;
-  interval: number;
-}
+export type LogEntry = LogEntryPayload;
+export type MonitorStatus = MonitorStatusPayload;
 
 
 interface MonitorStore {

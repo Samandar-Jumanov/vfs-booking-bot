@@ -12,7 +12,12 @@ import {
   Zap,
   Send,
   ShieldCheck,
-  Code2
+  Code2,
+  Cookie,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  AlertTriangle,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { DashboardShell } from '@/components/layout/DashboardShell';
@@ -35,8 +40,37 @@ interface SettingComponentProps {
 
 function TelegramSettings({ settings, onSave, saving }: SettingComponentProps) {
   const [local, setLocal] = useState<Record<string, any>>({});
+  const [testStatus, setTestStatus] = useState<{ tone: 'idle' | 'success' | 'warn' | 'error'; message: string }>({ tone: 'idle', message: '' });
+  const [soundEnabled, setSoundEnabled] = useState(false);
   const v = (k: string) => local[k] !== undefined ? local[k] : settings?.[k];
   const set = (k: string, val: any) => setLocal((p: any) => ({ ...p, [k]: val }));
+
+  useEffect(() => {
+    setSoundEnabled(window.localStorage.getItem('vfs.slotSoundEnabled') === 'true');
+  }, []);
+
+  const handleSoundToggle = (enabled: boolean) => {
+    setSoundEnabled(enabled);
+    window.localStorage.setItem('vfs.slotSoundEnabled', enabled ? 'true' : 'false');
+  };
+
+  const handleTelegramTest = async () => {
+    setTestStatus({ tone: 'idle', message: 'Sending Telegram test...' });
+    try {
+      await api.post('/settings/notifications/test');
+      setTestStatus({ tone: 'success', message: `✓ Sent to Telegram at ${new Date().toLocaleTimeString()}` });
+    } catch (errorValue) {
+      const errorObject = errorValue as { response?: { status?: number; data?: { error?: string; message?: string } }; message?: string };
+      if (errorObject.response?.status === 404) {
+        setTestStatus({ tone: 'warn', message: '⚠ Endpoint not yet available - TRACK 4 not merged' });
+        return;
+      }
+      setTestStatus({
+        tone: 'error',
+        message: errorObject.response?.data?.error ?? errorObject.response?.data?.message ?? errorObject.message ?? 'Telegram test failed',
+      });
+    }
+  };
 
   return (
     <SettingsCard 
@@ -54,6 +88,12 @@ function TelegramSettings({ settings, onSave, saving }: SettingComponentProps) {
           checked={v('notifications.telegram.enabled') || false} 
           onChange={(val: boolean) => set('notifications.telegram.enabled', val)} 
         />
+        <SettingToggle
+          label="Slot Sound"
+          description="Play an optional browser sound when a slot is detected. Stored on this device only."
+          checked={soundEnabled}
+          onChange={handleSoundToggle}
+        />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
           <SettingInput 
             label="Bot Token" 
@@ -69,6 +109,34 @@ function TelegramSettings({ settings, onSave, saving }: SettingComponentProps) {
             onChange={(val: string) => set('notifications.telegram.chatId', val)} 
           />
         </div>
+        <div className="flex flex-col gap-3 rounded-2xl border border-white/5 bg-white/[0.02] p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-sm font-black uppercase tracking-widest text-white">Telegram delivery test</h3>
+            <p className="mt-1 text-xs text-muted-foreground">Sends one test ping to the configured chat.</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleTelegramTest}
+            className="h-12 rounded-xl bg-primary px-5 text-xs font-black uppercase tracking-widest text-primary-foreground transition-all hover:bg-primary/90 active:scale-95"
+          >
+            Send test Telegram
+          </button>
+        </div>
+        {testStatus.message && (
+          <div className={cn(
+            'flex items-center gap-3 rounded-xl border p-4 text-sm font-medium',
+            testStatus.tone === 'success' && 'border-green-500/30 bg-green-500/10 text-green-200',
+            testStatus.tone === 'warn' && 'border-amber-500/30 bg-amber-500/10 text-amber-200',
+            testStatus.tone === 'error' && 'border-red-500/30 bg-red-500/10 text-red-200',
+            testStatus.tone === 'idle' && 'border-blue-500/30 bg-blue-500/10 text-blue-200'
+          )}>
+            {testStatus.tone === 'success' && <CheckCircle2 className="h-5 w-5" />}
+            {testStatus.tone === 'warn' && <AlertTriangle className="h-5 w-5" />}
+            {testStatus.tone === 'error' && <XCircle className="h-5 w-5" />}
+            {testStatus.tone === 'idle' && <RefreshCcw className="h-5 w-5 animate-spin" />}
+            <span>{testStatus.message}</span>
+          </div>
+        )}
       </div>
     </SettingsCard>
   );
@@ -311,6 +379,142 @@ function SelectorsSettings({ settings, onSave, saving }: SettingComponentProps) 
   );
 }
 
+// ── Cookie Injection Panel ────────────────────────────────────────────────────
+
+function CookieInjectionSettings() {
+  const [destination, setDestination] = useState('prt');
+  const [cookieStr, setCookieStr] = useState('');
+  const [status, setStatus] = useState<'idle' | 'saving' | 'ok' | 'err'>('idle');
+  const [errMsg, setErrMsg] = useState('');
+
+  const { data: injected, refetch } = useQuery<Array<{ destination: string; setAt: string; expiresAt: string; cookieCount: number; valid: boolean }>>({
+    queryKey: ['injected-cookies'],
+    queryFn: () => api.get('/monitor/injected-cookies').then(r => r.data),
+    refetchInterval: 30000,
+  });
+
+  const handleInject = async () => {
+    if (!cookieStr.trim()) return;
+    setStatus('saving');
+    try {
+      await api.post('/monitor/inject-cookies', { destination, cookies: cookieStr });
+      setStatus('ok');
+      setCookieStr('');
+      refetch();
+      setTimeout(() => setStatus('idle'), 3000);
+    } catch (e: any) {
+      setStatus('err');
+      setErrMsg(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const destLabels: Record<string, string> = { prt: 'Portugal', tjk: 'Tajikistan', lva: 'Latvia' };
+
+  return (
+    <div className="bg-card/40 backdrop-blur-2xl border border-white/5 rounded-[2rem] overflow-hidden shadow-2xl">
+      <div className="p-10 space-y-8">
+        <div className="flex items-center gap-5">
+          <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center text-primary border border-primary/20">
+            <Cookie className="w-7 h-7" />
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-2xl font-black tracking-tight text-white uppercase">Session Cookie Injection</h2>
+            <p className="text-sm text-muted-foreground font-medium max-w-md">
+              Bypass bot detection — paste your real browser cookies directly into the monitor.
+            </p>
+          </div>
+        </div>
+
+        {/* Instructions */}
+        <div className="p-6 rounded-2xl bg-blue-500/10 border border-blue-500/20 space-y-3">
+          <p className="text-xs font-black uppercase tracking-widest text-blue-400">How to get cookies</p>
+          <ol className="text-xs text-blue-200/80 font-medium leading-relaxed space-y-1.5 list-decimal list-inside">
+            <li>Open Chrome and log into <span className="font-mono text-blue-300">visa.vfsglobal.com/uzb/prt/en/schedule-appointment</span></li>
+            <li>Open DevTools (F12) → <strong>Network</strong> tab</li>
+            <li>Click any request to <span className="font-mono text-blue-300">visa.vfsglobal.com</span></li>
+            <li>In <strong>Request Headers</strong>, find the <span className="font-mono text-blue-300">cookie:</span> line</li>
+            <li>Copy the entire value and paste it below</li>
+          </ol>
+        </div>
+
+        {/* Active injected cookies status */}
+        {injected && injected.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {injected.map(item => (
+              <div key={item.destination} className={cn(
+                "p-5 rounded-2xl border flex flex-col gap-2",
+                item.valid ? "bg-green-500/10 border-green-500/20" : "bg-zinc-800/40 border-white/5 opacity-50"
+              )}>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-black uppercase tracking-widest text-white">{destLabels[item.destination] || item.destination}</span>
+                  {item.valid
+                    ? <CheckCircle2 className="w-5 h-5 text-green-400" />
+                    : <XCircle className="w-5 h-5 text-zinc-500" />}
+                </div>
+                <p className="text-xs text-muted-foreground font-medium">{item.cookieCount} cookies</p>
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground/70">
+                  <Clock className="w-3 h-3" />
+                  <span>Expires {new Date(item.expiresAt).toLocaleTimeString()}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Injection form */}
+        <div className="space-y-6">
+          <div className="space-y-3">
+            <label className="text-xs font-black uppercase tracking-widest text-muted-foreground/60 pl-2">Destination</label>
+            <div className="grid grid-cols-3 gap-3">
+              {(['prt', 'tjk', 'lva'] as const).map(d => (
+                <button key={d} onClick={() => setDestination(d)} className={cn(
+                  "h-14 rounded-2xl border-2 transition-all font-black text-sm uppercase tracking-widest",
+                  destination === d
+                    ? "bg-primary/10 border-primary text-primary"
+                    : "bg-white/5 border-white/5 text-muted-foreground hover:bg-white/10"
+                )}>
+                  {destLabels[d]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-xs font-black uppercase tracking-widest text-muted-foreground/60 pl-2">Cookie Header Value</label>
+            <textarea
+              value={cookieStr}
+              onChange={e => setCookieStr(e.target.value)}
+              placeholder="VFS-SESSION=abc123; .ASPXAUTH=xyz; XSRF-TOKEN=token123; ..."
+              spellCheck={false}
+              className="w-full h-40 bg-black/40 border border-white/10 rounded-2xl p-5 text-sm text-green-300 placeholder:text-zinc-700 focus:ring-4 focus:ring-primary/10 focus:border-primary/50 transition-all outline-none font-mono leading-relaxed"
+            />
+          </div>
+
+          {status === 'err' && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300 font-mono">{errMsg}</div>
+          )}
+
+          <button
+            onClick={handleInject}
+            disabled={!cookieStr.trim() || status === 'saving'}
+            className={cn(
+              "h-14 px-10 rounded-xl font-black uppercase tracking-widest text-sm transition-all active:scale-95 flex items-center gap-3",
+              cookieStr.trim() && status !== 'saving'
+                ? "bg-primary text-primary-foreground shadow-lg shadow-primary/30 hover:bg-primary/90"
+                : "bg-white/5 text-muted-foreground cursor-not-allowed grayscale"
+            )}
+          >
+            {status === 'saving' && <RefreshCcw className="w-5 h-5 animate-spin" />}
+            {status === 'ok' && <CheckCircle2 className="w-5 h-5 text-green-400" />}
+            {(status === 'idle' || status === 'err') && <Cookie className="w-5 h-5" />}
+            {status === 'ok' ? 'Injected!' : status === 'saving' ? 'Injecting...' : 'Inject Cookies'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Atomic UI Components ──────────────────────────────────────────────────────
 
 function SettingsCard({ title, description, children, onSave, saving, isDirty, icon: Icon }: {
@@ -491,6 +695,7 @@ function SettingsContent() {
     { id: 'network', label: 'Network Proxy', icon: ShieldCheck },
     { id: 'engine', label: 'Agent Mode', icon: Zap },
     { id: 'selectors', label: 'VFS Selectors', icon: Code2 },
+    { id: 'cookies', label: 'Session Cookies', icon: Cookie },
   ];
 
   const handleSave = (newData: any) => {
@@ -572,6 +777,10 @@ function SettingsContent() {
 
             {activeTab === 'selectors' && (
               <SelectorsSettings settings={settings} onSave={handleSave} saving={mutation.isPending} />
+            )}
+
+            {activeTab === 'cookies' && (
+              <CookieInjectionSettings />
             )}
           </motion.div>
         </AnimatePresence>

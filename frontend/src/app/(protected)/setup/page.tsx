@@ -27,7 +27,7 @@ export default function SetupPage() {
   const { setMonitors } = useMonitorStore();
 
   const [sourceCountry, setSourceCountry] = useState<'uzbekistan' | 'tajikistan' | 'latvia'>('uzbekistan');
-  const [destination, setDestination] = useState<'portugal' | 'brazil'>('portugal');
+  const [destination, setDestination] = useState<'portugal' | 'brazil' | 'latvia' | 'tajikistan'>('latvia');
   const [visaType, setVisaType] = useState('SCH');
   const [intervalMs, setIntervalMs] = useState(10000);
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
@@ -116,6 +116,8 @@ export default function SetupPage() {
                   value={destination}
                   onChange={(val: any) => setDestination(val)}
                   options={[
+                    { value: 'latvia', label: 'Latvia' },
+                    { value: 'tajikistan', label: 'Tajikistan' },
                     { value: 'portugal', label: 'Portugal' },
                     { value: 'brazil', label: 'Brazil' },
                   ]}
@@ -227,7 +229,7 @@ export default function SetupPage() {
 
               {/* Trigger Button */}
               <button
-                disabled={startMutation.isPending || selectedProfileIds.length === 0}
+                disabled={startMutation.isPending || (mode === 'auto' && selectedProfileIds.length === 0)}
                 onClick={() => startMutation.mutate()}
                 className="w-full btn-primary h-14 rounded-2xl gap-3 text-lg font-bold shadow-xl shadow-primary/20 disabled:grayscale hover:scale-[1.01] active:scale-[0.98] transition-all"
               >
