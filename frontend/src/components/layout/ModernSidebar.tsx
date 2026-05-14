@@ -6,6 +6,7 @@ import {
   Users, 
   Activity, 
   Settings, 
+  Wand2,
   LogOut, 
   Terminal,
   ShieldCheck,
@@ -19,6 +20,7 @@ import { motion } from 'framer-motion';
 const menuItems = [
   { group: 'Operations', items: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { label: 'Setup', href: '/setup', icon: Wand2 },
     { label: 'Monitoring', href: '/setup', icon: Activity },
     { label: 'Activity Logs', href: '/logs', icon: Terminal },
   ]},
@@ -56,7 +58,7 @@ export function ModernSidebar() {
                 const isActive = pathname === item.href;
                 return (
                   <Link
-                    key={item.href}
+                    key={`${item.label}-${item.href}`}
                     href={item.href}
                     className={cn(
                       "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 group relative",
