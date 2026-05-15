@@ -78,6 +78,12 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
   }
 
   const headless = process.env.BROWSER_HEADLESS === 'false' ? false : true;
+  const {
+    PROXY_HOST,
+    PROXY_PORT,
+    PROXY_USERNAME,
+    PROXY_PASSWORD,
+  } = process.env;
   const context = await chromium.launchPersistentContext(getBrowserProfileDir(destinationCode), {
     headless,
     executablePath: resolveChromeExecutablePath(),
@@ -88,6 +94,13 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
     geolocation: { latitude: 41.2995, longitude: 69.2401 },
     permissions: ['geolocation'],
     ignoreHTTPSErrors: true,
+    ...(PROXY_HOST && PROXY_PORT && {
+      proxy: {
+        server: `http://${PROXY_HOST}:${PROXY_PORT}`,
+        username: PROXY_USERNAME ?? undefined,
+        password: PROXY_PASSWORD ?? undefined,
+      },
+    }),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
