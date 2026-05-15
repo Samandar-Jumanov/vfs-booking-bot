@@ -134,8 +134,14 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
   });
 
   const playwrightCookies = parseSetCookieArrayToPlaywright(cookies);
-  if (playwrightCookies.length) {
-    await context.addCookies(playwrightCookies);
+  const skipNames = new Set(['__cf_bm', '_cfuvid']);
+  const filteredCookies = playwrightCookies.filter(c => !skipNames.has(c.name));
+  if (filteredCookies.length) {
+    try {
+      await context.addCookies(filteredCookies);
+    } catch (e: any) {
+      console.warn('addCookies partial failure: ' + e.message);
+    }
   }
 
   const page = await context.newPage();
