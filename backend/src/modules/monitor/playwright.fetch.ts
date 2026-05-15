@@ -84,32 +84,47 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
     PROXY_USERNAME,
     PROXY_PASSWORD,
   } = process.env;
-  const context = await chromium.launchPersistentContext(getBrowserProfileDir(destinationCode), {
-    headless,
-    executablePath: resolveChromeExecutablePath(),
-    userAgent: userAgent || UA,
-    viewport: { width: 1280, height: 720 },
-    locale: 'uz-UZ',
-    timezoneId: 'Asia/Tashkent',
-    geolocation: { latitude: 41.2995, longitude: 69.2401 },
-    permissions: ['geolocation'],
-    ignoreHTTPSErrors: true,
-    ...(PROXY_HOST && PROXY_PORT && {
-      proxy: {
-        server: `http://${PROXY_HOST}:${PROXY_PORT}`,
-        username: PROXY_USERNAME ?? undefined,
-        password: PROXY_PASSWORD ?? undefined,
-      },
-    }),
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-notifications',
-      '--mute-audio',
-      '--window-size=1280,720',
-    ],
-  });
+  let context: BrowserContext;
+
+  if (process.env.BRIGHTDATA_WS) {
+    const browser = await chromium.connectOverCDP(process.env.BRIGHTDATA_WS);
+    context = browser.contexts()[0] ?? await browser.newContext({
+      userAgent: userAgent || UA,
+      viewport: { width: 1280, height: 720 },
+      locale: 'uz-UZ',
+      timezoneId: 'Asia/Tashkent',
+      geolocation: { latitude: 41.2995, longitude: 69.2401 },
+      permissions: ['geolocation'],
+      ignoreHTTPSErrors: true,
+    });
+  } else {
+    context = await chromium.launchPersistentContext(getBrowserProfileDir(destinationCode), {
+      headless,
+      executablePath: resolveChromeExecutablePath(),
+      userAgent: userAgent || UA,
+      viewport: { width: 1280, height: 720 },
+      locale: 'uz-UZ',
+      timezoneId: 'Asia/Tashkent',
+      geolocation: { latitude: 41.2995, longitude: 69.2401 },
+      permissions: ['geolocation'],
+      ignoreHTTPSErrors: true,
+      ...(PROXY_HOST && PROXY_PORT && {
+        proxy: {
+          server: `http://${PROXY_HOST}:${PROXY_PORT}`,
+          username: PROXY_USERNAME ?? undefined,
+          password: PROXY_PASSWORD ?? undefined,
+        },
+      }),
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-notifications',
+        '--mute-audio',
+        '--window-size=1280,720',
+      ],
+    });
+  }
 
   // Block heavy resources to save bandwidth
   await context.route('**/*', (route) => {
