@@ -135,12 +135,28 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
 
   const playwrightCookies = parseSetCookieArrayToPlaywright(cookies);
   const skipNames = new Set(['__cf_bm', '_cfuvid']);
-  const filteredCookies = playwrightCookies.filter(c => !skipNames.has(c.name));
+  const filteredCookies = playwrightCookies
+    .filter(c => !skipNames.has(c.name))
+    .map(c => ({
+      name: c.name,
+      value: c.value,
+      url: 'https://visa.vfsglobal.com',
+      httpOnly: c.httpOnly,
+      secure: c.secure,
+      sameSite: c.sameSite,
+      expires: c.expires,
+    }));
+
   if (filteredCookies.length) {
+    try {
+      await context.clearCookies();  // Wipe BrightData's pre-set cookies first
+    } catch (e: any) {
+      console.warn('clearCookies failed (continuing):', e.message);
+    }
     try {
       await context.addCookies(filteredCookies);
     } catch (e: any) {
-      console.warn('addCookies partial failure: ' + e.message);
+      console.warn('addCookies partial failure:', e.message);
     }
   }
 
