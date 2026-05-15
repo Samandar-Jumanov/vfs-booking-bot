@@ -4,7 +4,7 @@ import { sleep } from '@utils/retry';
 
 const BASE = 'https://2captcha.com';
 const POLL_INTERVAL_MS = 5000;
-const MAX_WAIT_MS = 120_000;
+const MAX_WAIT_MS = 45_000;
 
 async function submitAndPoll(submitParams: Record<string, string | number>): Promise<string> {
   if (!env.TWOCAPTCHA_API_KEY) {
@@ -38,7 +38,7 @@ async function submitAndPoll(submitParams: Record<string, string | number>): Pro
     }
   }
 
-  throw new Error('2Captcha solve timeout after 120s');
+  throw new Error('2Captcha solve timeout after 45s');
 }
 
 export async function solveTwoCaptcha(siteKey: string, pageUrl: string): Promise<string> {
@@ -59,4 +59,44 @@ export async function solveTurnstile(
   if (action) params.action = action;
   if (cdata) params.data = cdata;
   return submitAndPoll(params);
+}
+
+export async function solveTurnstileWithCapMonster(siteKey: string, pageUrl: string): Promise<string> {
+  if (!env.CAPMONSTER_KEY) {
+    throw new Error('CAPMONSTER_KEY is not configured');
+  }
+
+  const create = await axios.post('https://api.capmonster.cloud/createTask', {
+    clientKey: env.CAPMONSTER_KEY,
+    task: {
+      type: 'TurnstileTaskProxyless',
+      websiteURL: pageUrl,
+      websiteKey: siteKey,
+    },
+  }, { timeout: 30_000 });
+
+  if (create.data.errorId) {
+    throw new Error(`CapMonster createTask failed: ${create.data.errorDescription ?? create.data.errorCode}`);
+  }
+
+  const taskId = create.data.taskId;
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    await sleep(3000);
+    const poll = await axios.post('https://api.capmonster.cloud/getTaskResult', {
+      clientKey: env.CAPMONSTER_KEY,
+      taskId,
+    }, { timeout: 15_000 });
+
+    if (poll.data.errorId) {
+      throw new Error(`CapMonster poll failed: ${poll.data.errorDescription ?? poll.data.errorCode}`);
+    }
+    if (poll.data.status === 'ready') {
+      const token = poll.data.solution?.token;
+      if (!token) throw new Error('CapMonster returned no token');
+      return token;
+    }
+  }
+
+  throw new Error('CapMonster solve timeout after 45s');
 }

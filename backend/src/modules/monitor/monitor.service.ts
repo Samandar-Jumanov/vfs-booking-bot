@@ -1,15 +1,19 @@
 import os from 'os';
 import axios from 'axios';
 import https from 'https';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { prisma } from '@config/database';
 import { env } from '@config/env';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
 import { decrypt } from '@utils/crypto';
-import { warmSessionWithBrowser, VfsCredentials } from './session.warmer';
+import { warmSessionWithBrowser, keepSessionAlive, VfsCredentials } from './session.warmer';
+import { fetchSlotsViaBrowser, disposeContextFor } from './playwright.fetch';
 import { enqueueBooking } from '@modules/booking/booking.service';
 import { emitToAll } from '@modules/websocket/ws.server';
 import { dispatchNotification } from '@modules/notifications/notification.service';
+import { getProxy } from '@modules/proxy/proxy.service';
+import { getSetting, setSetting } from '@modules/settings/settings.service';
 import { getRedis } from '@config/redis';
 
 // --- Types & Constants ---
@@ -51,6 +55,131 @@ const monitorTimeouts = new Map<string, NodeJS.Timeout>();
 // Internal Proxy Cache to prevent DB bottlenecks
 const proxyCache = new Map<string, { config: any, expiresAt: number }>();
 const CACHE_TTL = 300000; // 5 minutes
+
+// Manual cookie injection store — keyed by destCode (e.g. 'prt', 'tjk', 'lva')
+// TTL: 8 hours (session keep-alive extends VFS sessions this long)
+const MANUAL_COOKIE_TTL = 28800000;
+
+// Keep-alive cancel functions — one per destCode
+const keepAliveHandles = new Map<string, () => void>();
+interface InjectedCookies { cookies: string[]; setAt: Date; userAgent?: string }
+const injectedCookiesStore = new Map<string, InjectedCookies>();
+
+function extractLtSnExpiresAt(rawCookieStr: string, fallback?: string): string | undefined {
+  if (fallback) return fallback;
+  const trimmed = rawCookieStr.trim();
+  if (!trimmed.startsWith('[')) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as Array<{ name?: string; expirationDate?: number; expires?: number }>;
+    const ltSn = parsed.find((c) => c.name === 'lt_sn');
+    const expires = ltSn?.expirationDate ?? ltSn?.expires;
+    return expires && expires > 0 ? new Date(expires * 1000).toISOString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function savePersistedCookies(destCode: string, rawCookieStr: string, userAgent?: string, ltSnExpiresAt?: string): Promise<void> {
+  try {
+    await setSetting(`cookies.${destCode}`, JSON.stringify({
+      raw: rawCookieStr,
+      userAgent,
+      savedAt: new Date().toISOString(),
+      ltSnExpiresAt: extractLtSnExpiresAt(rawCookieStr, ltSnExpiresAt),
+    }));
+    await getRedis().del(`cookie-alerted:${destCode}`);
+  } catch (e: any) {
+    logEvent('warn', EventType.MONITOR_STARTED, `[Cookies] Failed to persist cookies for ${destCode}: ${e.message}`);
+  }
+}
+
+export async function loadPersistedCookies(): Promise<void> {
+  const destCodes = ['prt', 'lva', 'tjk', 'bra'];
+  for (const destCode of destCodes) {
+    try {
+      const stored = await getSetting<string>(`cookies.${destCode}`);
+      if (!stored) continue;
+      const { raw, userAgent, savedAt } = JSON.parse(stored as string);
+      const savedMs = new Date(savedAt).getTime();
+      if ((Date.now() - savedMs) >= MANUAL_COOKIE_TTL) {
+        logEvent('info', EventType.MONITOR_STARTED, `[Cookies] Persisted cookies for ${destCode} expired — skipping`);
+        continue;
+      }
+      // Re-use the same parsing logic as injectManualCookies
+      const trimmed = (raw as string).trim();
+      let cookies: string[];
+      if (trimmed.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(trimmed) as Array<{ name: string; value: string }>;
+          cookies = parsed.filter(c => c.name && c.value !== undefined).map(c => `${c.name}=${c.value}`);
+        } catch {
+          cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
+        }
+      } else {
+        cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
+      }
+      injectedCookiesStore.set(destCode, { cookies, setAt: new Date(savedAt), userAgent });
+      logEvent('info', EventType.MONITOR_STARTED,
+        `[Cookies] Restored ${cookies.length} persisted cookies for ${destCode} (saved ${savedAt})`);
+    } catch (e: any) {
+      logEvent('warn', EventType.MONITOR_STARTED, `[Cookies] Failed to load persisted cookies for ${destCode}: ${e.message}`);
+    }
+  }
+}
+
+export function injectManualCookies(destination: string, cookieStr: string, userAgent?: string): void {
+  const destCode = getDestinationCode(destination);
+
+  // Accept either JSON array from EditThisCookie/Cookie-Editor or raw "name=value; ..." header string
+  let cookies: string[];
+  const trimmed = cookieStr.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Array<{ name: string; value: string }>;
+      cookies = parsed.filter(c => c.name && c.value !== undefined).map(c => `${c.name}=${c.value}`);
+    } catch {
+      cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
+    }
+  } else {
+    cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
+  }
+  injectedCookiesStore.set(destCode, { cookies, setAt: new Date(), userAgent });
+  savePersistedCookies(destCode, cookieStr, userAgent).catch(() => {});
+  getRedis().del(`cookie-alerted:${destCode}`).catch(() => {});
+  logEvent('info', EventType.MONITOR_STARTED,
+    `[Warmer] Manual cookies injected for ${destCode} (${cookies.length} cookies, valid 8h)`);
+  // Propagate to any running monitor for this destination so it picks them up immediately
+  for (const [id, state] of monitors.entries()) {
+    const stateDest = getDestinationCode(state.destination);
+    if (stateDest === destCode) {
+      setMonitor(id, {
+        ...state,
+        cookies,
+        cookiesSetAt: new Date(),
+        cookiesValid: true,
+        userAgent: userAgent || state.userAgent,
+      });
+    }
+  }
+  // Start keep-alive for manually injected cookies too
+  const prev = keepAliveHandles.get(destCode);
+  if (prev) prev();
+  keepAliveHandles.set(destCode, keepSessionAlive(
+    'uzb', destCode,
+    () => injectedCookiesStore.get(destCode)?.cookies,
+    undefined,
+  ));
+}
+
+export function getInjectedCookiesStatus(): Array<{ destination: string; setAt: Date; expiresAt: Date; cookieCount: number; valid: boolean }> {
+  return Array.from(injectedCookiesStore.entries()).map(([dest, v]) => ({
+    destination: dest,
+    setAt: v.setAt,
+    expiresAt: new Date(v.setAt.getTime() + MANUAL_COOKIE_TTL),
+    cookieCount: v.cookies.length,
+    valid: (Date.now() - v.setAt.getTime()) < MANUAL_COOKIE_TTL,
+  }));
+}
 
 // --- Helper Functions ---
 
@@ -94,24 +223,47 @@ function pickFirstSlot(slots: any[]): { date?: string; time?: string } {
 }
 
 function buildAvailabilityUrl(source: string, dest: string): string {
-  return `https://visa.vfsglobal.com/${source}/${dest}/en/schedule-appointment/get-slots`;
+  return `https://visa.vfsglobal.com/${source}/en/${dest}/schedule-appointment/get-slots`;
 }
 
 async function getProxyConfig(id: string) {
     const cached = proxyCache.get(id);
     if (cached && cached.expiresAt > Date.now()) return cached.config;
 
-    // Use ENV priority for Proxyrack
+    // Prefer DB proxy pool (Global Settings / added via API) over env vars
+    try {
+        const dbProxy = await getProxy();
+        if (dbProxy) {
+            const auth = `${dbProxy.username}:${dbProxy.password}@`;
+            const config = {
+                host: dbProxy.server.split(':')[0],
+                port: Number(dbProxy.server.split(':')[1]),
+                auth: { username: dbProxy.username, password: dbProxy.password },
+                url: `http://${auth}${dbProxy.server}`,
+            };
+            proxyCache.set(id, { config, expiresAt: Date.now() + CACHE_TTL });
+            return config;
+        }
+    } catch {}
+
+    // Fall back to env vars
     if (env.PROXY_HOST && env.PROXY_PORT) {
+        const auth = env.PROXY_USERNAME ? `${env.PROXY_USERNAME}:${env.PROXY_PASSWORD}@` : '';
         const config = {
             host: env.PROXY_HOST,
             port: Number(env.PROXY_PORT),
-            auth: env.PROXY_USERNAME ? { username: env.PROXY_USERNAME, password: env.PROXY_PASSWORD } : undefined
+            auth: env.PROXY_USERNAME ? { username: env.PROXY_USERNAME, password: env.PROXY_PASSWORD } : undefined,
+            url: `http://${auth}${env.PROXY_HOST}:${env.PROXY_PORT}`,
         };
         proxyCache.set(id, { config, expiresAt: Date.now() + CACHE_TTL });
         return config;
     }
     return null;
+}
+
+function makeHttpsAgent(proxyConfig: any): https.Agent {
+    if (proxyConfig?.url) return new HttpsProxyAgent(proxyConfig.url) as any;
+    return new https.Agent({ rejectUnauthorized: false });
 }
 
 /**
@@ -120,10 +272,47 @@ async function getProxyConfig(id: string) {
  */
 async function warmSession(id: string, sourceCode: string, destinationCode: string, visaType: string, credentials?: VfsCredentials): Promise<string[] | undefined> {
   const state = getMonitor(id);
-  if (state?.cookiesValid && state.cookies && state.cookiesSetAt && (Date.now() - state.cookiesSetAt.getTime() < 1800000)) {
+  if (state?.cookiesValid && state.cookies && state.cookiesSetAt && (Date.now() - state.cookiesSetAt.getTime() < 28800000)) {
     return state.cookies;
   }
 
+  // Check manual injection store — user's real-browser cookies bypass headless detection entirely
+  const injected = injectedCookiesStore.get(destinationCode);
+  if (injected && (Date.now() - injected.setAt.getTime()) < MANUAL_COOKIE_TTL) {
+    logEvent('info', EventType.MONITOR_STARTED, `[Warmer] Using manually injected cookies for ${destinationCode}`);
+    setMonitor(id, {
+      ...getMonitor(id)!,
+      cookies: injected.cookies,
+      cookiesSetAt: injected.setAt,
+      cookiesValid: true,
+      userAgent: injected.userAgent || state?.userAgent,
+    });
+    return injected.cookies;
+  }
+
+  // If credentials are available, always use browser warming — plain HTTP GET only gets
+  // Cloudflare tracking cookies, not an authenticated VFS session (slot API returns 402).
+  if (credentials) {
+    logEvent('info', EventType.MONITOR_STARTED, `[Warmer] Browser login warm for ${destinationCode}...`);
+    const proxyConfig = await getProxyConfig(id);
+    const result = await warmSessionWithBrowser(sourceCode, destinationCode, credentials, proxyConfig as any);
+    if (result?.cookies) {
+      setMonitor(id, { ...getMonitor(id)!, cookies: result.cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: result.userAgent, secChUa: result.secChUa, lastHttpStatus: 200 });
+      await savePersistedCookies(destinationCode, result.cookies.join('; '), result.userAgent, result.ltSnExpiresAt);
+      // Start keep-alive so one login lasts ~8 hours
+      const prev = keepAliveHandles.get(destinationCode);
+      if (prev) prev();
+      keepAliveHandles.set(destinationCode, keepSessionAlive(
+        sourceCode, destinationCode,
+        () => getMonitor(id)?.cookies,
+        proxyConfig?.url ? { url: proxyConfig.url } : undefined,
+      ));
+      return result.cookies;
+    }
+    throw new Error('Browser session warming returned no cookies');
+  }
+
+  // No credentials — fall back to plain HTTP warm (public endpoints only)
   const agent = {
     ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
     ch: '"Google Chrome";v="134", "Chromium";v="134", "Not:A-Brand";v="24"'
@@ -131,13 +320,11 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
 
   try {
     const proxyConfig = await getProxyConfig(id);
-    const httpProxy = proxyConfig ? { host: proxyConfig.host, port: proxyConfig.port, auth: proxyConfig.auth } : null;
-
-    const response = await axios.get(`https://visa.vfsglobal.com/${sourceCode}/${destinationCode}/en/login`, {
+    const response = await axios.get(`https://visa.vfsglobal.com/${sourceCode}/en/${destinationCode}/login`, {
       timeout: 180000,
       headers: { 'User-Agent': agent.ua, 'sec-ch-ua': agent.ch },
-      proxy: httpProxy || undefined,
-      ...(httpProxy && { httpsAgent: new https.Agent({ rejectUnauthorized: false }) }),
+      httpsAgent: makeHttpsAgent(proxyConfig),
+      proxy: false,
     });
 
     const cookies = response.headers['set-cookie'];
@@ -146,16 +333,6 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
       return cookies;
     }
   } catch (err: any) {
-    const status = err.response?.status;
-    if (status === 403 && credentials) {
-      logEvent('warn', EventType.IP_BLOCKED, `403 Forbidden on standard fetch. Attempting Browser Warming for ${destinationCode}...`);
-      const proxyConfig = await getProxyConfig(id);
-      const result = await warmSessionWithBrowser(sourceCode, destinationCode, credentials, proxyConfig as any);
-      if (result && result.cookies) {
-         setMonitor(id, { ...getMonitor(id)!, cookies: result.cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: result.userAgent, secChUa: result.secChUa, lastHttpStatus: 200 });
-         return result.cookies;
-      }
-    }
     throw err;
   }
   return undefined;
@@ -166,11 +343,21 @@ function parseSetCookieToCookieHeader(setCookieHeaders: string[]): string {
 }
 
 async function getVfsCredentials(profileIds: string[]): Promise<VfsCredentials | undefined> {
-  if (!profileIds.length) return undefined;
-  try {
-    const profile = await prisma.profile.findUnique({ where: { id: profileIds[0] }, select: { email: true, vfsPasswordEnc: true } });
-    if (profile?.email && profile?.vfsPasswordEnc) return { email: profile.email, password: decrypt(profile.vfsPasswordEnc) };
-  } catch {}
+  // Try per-profile VFS credentials first
+  if (profileIds.length) {
+    try {
+      const profile = await prisma.profile.findUnique({ where: { id: profileIds[0] }, select: { email: true, vfsPasswordEnc: true } });
+      if (profile?.email && profile?.vfsPasswordEnc) {
+        return { email: profile.email, password: decrypt(profile.vfsPasswordEnc) };
+      }
+    } catch {}
+  }
+
+  // Fall back to global VFS account from .env (agent booking on behalf of clients)
+  if (env.VFS_EMAIL && env.VFS_PASSWORD) {
+    return { email: env.VFS_EMAIL, password: env.VFS_PASSWORD };
+  }
+
   return undefined;
 }
 
@@ -234,27 +421,25 @@ export async function startMonitor(id: string): Promise<void> {
       const cookies = await warmSession(id, sourceCode, destCode, config.visaType, creds);
       if (!cookies) throw new Error('Failed to acquire VFS session.');
 
-      const proxyConfig = await getProxyConfig(id);
-      const httpProxy = proxyConfig ? { host: proxyConfig.host, port: proxyConfig.port, auth: proxyConfig.auth } : null;
-
-      const response = await axios.post(buildAvailabilityUrl(sourceCode, destCode), 
-        { visaCategory: config.visaType, country: sourceCode.toUpperCase() }, 
-        {
-          timeout: 180000,
-          headers: {
-            'Cookie': parseSetCookieToCookieHeader(cookies),
-            'User-Agent': config.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-            'X-XSRF-TOKEN': cookies.find(c => c.includes('XSRF-TOKEN'))?.split('=')[1]?.split(';')[0] || '',
-            'Content-Type': 'application/json',
-            'Referer': `https://visa.vfsglobal.com/${sourceCode}/${destCode}/en/schedule-appointment`,
-          },
-          proxy: httpProxy || undefined,
-          ...(httpProxy && { httpsAgent: new https.Agent({ rejectUnauthorized: false }) }),
-        }
+      // Fetch slots through a real Chromium context (bypasses Cloudflare WAF
+      // that rejects raw axios). The context is reused across polls and only
+      // re-created when cookies change or after 30 min.
+      const browserResult = await fetchSlotsViaBrowser(
+        sourceCode,
+        destCode,
+        config.visaType,
+        cookies,
+        config.userAgent,
       );
 
-      const slots = response.data || [];
-      const count = Array.isArray(slots) ? slots.length : 0;
+      if (browserResult.status >= 400) {
+        const err: any = new Error(`Slot fetch HTTP ${browserResult.status}: ${browserResult.rawText.slice(0, 200)}`);
+        err.response = { status: browserResult.status };
+        throw err;
+      }
+
+      const slots = Array.isArray(browserResult.data) ? browserResult.data : [];
+      const count = slots.length;
       const signature = buildSlotSignature(slots);
       const previousSignature = config.lastSlotSignature || '';
 
@@ -325,24 +510,46 @@ export async function startMonitor(id: string): Promise<void> {
       monitorTimeouts.set(id, nextPoll);
 
     } catch (err: any) {
-      const isTimeout = err.message.includes('Timeout') || err.message.includes('timeout');
-      const status = isTimeout ? 408 : (err.response?.status || (err.message.includes('403') ? 403 : 500));
-      
+      if (err.message.includes('CAPTCHA_MANUAL_NEEDED')) {
+        logEvent('warn', EventType.IP_BLOCKED, `[Monitor] Pausing ${config.destination} for manual captcha intervention`);
+        emitToAll('CAPTCHA_MANUAL_NEEDED', {
+          monitorId: id,
+          destination: config.destination,
+          reason: err.message,
+          timestamp: Date.now(),
+        });
+        setMonitor(id, { ...config, isRunning: false, lastCheckedAt: new Date(), lastHttpStatus: 409 });
+        await getRedis().del(`monitor:${id}:heartbeat`);
+        return;
+      }
+
+      const isBotDetected = err.message.includes('VFS_BOT_DETECTED');
+      const isTimeout = !isBotDetected && (err.message.includes('Timeout') || err.message.includes('timeout'));
+      const status = isBotDetected ? 403 : (isTimeout ? 408 : (err.response?.status || (err.message.includes('403') ? 403 : 500)));
+
+      // 402 = VFS rejected our session (not authenticated). Invalidate cookies and retry quickly.
+      if (status === 402) {
+        logEvent('warn', EventType.IP_BLOCKED, `[Monitor] 402 Auth Required for ${config.destination} — session invalidated, re-warming in 30s`);
+        setMonitor(id, { ...config, cookiesValid: false, cookies: undefined, lastCheckedAt: new Date(), lastHttpStatus: 402 });
+        const retryPoll = setTimeout(poll, 30000);
+        monitorTimeouts.set(id, retryPoll);
+        return;
+      }
+
       if (status === 403 || status === 408) {
         const typeStr = status === 403 ? 'IP BLOCKED' : 'VFS SERVER SLOW (TIMEOUT)';
         const cooldownMs = status === 403 ? 600000 : 300000; // 10m for 403, 5m for Timeout
-        
+
         logEvent('warn', EventType.IP_BLOCKED, `${typeStr} for ${config.destination}. COOLDOWN: ${cooldownMs/1000}s`);
         setMonitor(id, { ...config, isRunning: false, isCoolingDown: true, lastCheckedAt: new Date(), lastHttpStatus: status });
-        
+
         setTimeout(() => { if (getMonitor(id)) startMonitor(id); }, cooldownMs);
         return;
       }
 
       logEvent('error', EventType.BOOKING_FAILED, `Monitor poll error: ${err.message}`);
-      const retryPoll = setTimeout(poll, 60000);
+      setMonitor(id, { ...config, isRunning: false, lastCheckedAt: new Date(), lastHttpStatus: status });
       await getRedis().del(`monitor:${id}:heartbeat`);
-      monitorTimeouts.set(id, retryPoll);
     }
   };
 
@@ -350,6 +557,7 @@ export async function startMonitor(id: string): Promise<void> {
 }
 
 export async function autoStartMonitors(): Promise<void> {
+  await loadPersistedCookies();
   try {
     const activeBookings = await prisma.booking.findMany({
       where: { status: { in: ['QUEUED', 'RUNNING'] } },
@@ -389,4 +597,12 @@ export function stopMonitor(id: string): void {
     clearTimeout(timeout);
     monitorTimeouts.delete(id);
   }
+}
+
+export async function restartMonitor(id: string): Promise<void> {
+  const current = getMonitor(id);
+  if (!current) return;
+  stopMonitor(id);
+  setMonitor(id, { ...current, isRunning: false, isCoolingDown: false });
+  await startMonitor(id);
 }

@@ -1,4 +1,4 @@
-import { Page, BrowserContext } from 'playwright';
+import { Page, BrowserContext } from 'rebrowser-playwright';
 import { getSelectors } from './vfs.selectors';
 import { fillApplicantForm } from './vfs.formFiller';
 import { solveCaptcha } from '@modules/captcha/captcha.service';
@@ -7,6 +7,8 @@ import { clickWithHover, humanDelay, randomScroll } from '../humanBehavior';
 import { isSessionExpired } from '../sessionStore';
 import { AppError } from '@middleware/errorHandler';
 import { SlotInfo } from '@t/index';
+import { handleVfsInterstitials } from './vfs.interstitials';
+import { attachDiagnostics, dumpBlockDiagnostics } from './vfs.diagnostics';
 
 const VFS_BASE = 'https://visa.vfsglobal.com';
 
@@ -53,6 +55,7 @@ export async function runBookingFlow(
   opts: NavigatorOptions
 ): Promise<string> {
   const page = await context.newPage();
+  attachDiagnostics(page);
   const sel = getSelectors();
   let state: NavState = 'START';
 
@@ -60,12 +63,20 @@ export async function runBookingFlow(
     // ── Navigate to VFS ──────────────────────────────────────────────────────
     state = 'START';
     const src = SOURCE_CODES[(opts.sourceCountry || 'uzbekistan').toLowerCase()] ?? SOURCE_CODES.uzbekistan;
-    await page.goto(`${VFS_BASE}/${src.url}/${opts.destination.toLowerCase()}/en/entry`, {
+    await page.goto(`${VFS_BASE}/${src.url}/en/${opts.destination.toLowerCase()}/login`, {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     });
 
-    await humanDelay(1000, 2000);
+    // Dismiss cookie consent + handle country selector when accessed from a
+    // non-source-country IP (VFS detects IP and shows these overlays first)
+    await handleVfsInterstitials(
+      page,
+      opts.sourceCountry ?? 'uzbekistan',
+      opts.destination,
+    );
+
+    await humanDelay(800, 1_500);
     await checkForBlock(page, opts.sessionId);
 
     // ── Login (skip if session already active) ───────────────────────────────
@@ -134,6 +145,18 @@ export async function runBookingFlow(
       await humanDelay(0, opts.manualOverrideWindowMs);
     }
 
+    // ── Demo dry-run: stop before final submit, screenshot the review page.
+    // CLAUDE.md insurance for live demos when no real slot is available — proves
+    // the bot reaches the final review state without consuming a test booking.
+    if (process.env.DEMO_DRY_RUN === 'true') {
+      const fs = await import('fs');
+      fs.mkdirSync('recordings', { recursive: true });
+      const dryRunPath = `recordings/dry_run_review_${Date.now()}.png`;
+      await page.screenshot({ path: dryRunPath, fullPage: true }).catch(() => {});
+      state = 'DONE';
+      return `DRY_RUN_OK (review screenshot: ${dryRunPath})`;
+    }
+
     // ── Submit ────────────────────────────────────────────────────────────────
     state = 'SUBMIT';
     await checkForBlock(page, opts.sessionId);
@@ -155,7 +178,10 @@ export async function runBookingFlow(
     const confirmationNo = await extractConfirmationNumber(page);
     return confirmationNo;
   } catch (err) {
-    throw new AppError(500, `Booking failed at state [${state}]: ${(err as Error).message}`, 'BOOKING_FAILED');
+    const message = (err as Error).message;
+    const diagDir = await dumpBlockDiagnostics(page, `state=${state} :: ${message}`, opts.sessionId);
+    const suffix = diagDir ? ` (diagnostics: ${diagDir})` : '';
+    throw new AppError(500, `Booking failed at state [${state}]: ${message}${suffix}`, 'BOOKING_FAILED');
   } finally {
     await page.close();
   }

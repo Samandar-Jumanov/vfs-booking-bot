@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { BrowserContext } from 'playwright';
+import { BrowserContext } from 'rebrowser-playwright';
 import { env } from '@config/env';
 
 function getSessionPath(profileId: string): string {

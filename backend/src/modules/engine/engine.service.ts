@@ -1,4 +1,5 @@
 import { BookingJobPayload } from '@t/index';
+import { env } from '@config/env';
 import { getProxy, reportBlock } from '@modules/proxy/proxy.service';
 import { getProfileForBooking } from '@modules/profiles/profiles.service';
 import { getSetting } from '@modules/settings/settings.service';
@@ -10,6 +11,8 @@ import { withRetry } from '@utils/retry';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
 import { AppError } from '@middleware/errorHandler';
+import { accountPoolService } from '@modules/accounts/accountPool.service';
+import { decrypt } from '@utils/crypto';
 
 export interface BookingResult {
   success: boolean;
@@ -25,11 +28,38 @@ export async function runBooking(job: BookingJobPayload): Promise<BookingResult>
   // Load profile (fully decrypted)
   const profile = await getProfileForBooking(job.profileId);
 
-  const vfsEmail = profile.email;
-  const vfsPassword = profile.vfsPassword ?? '';
+  // Resolve VFS credentials:
+  //   1. Per-profile credentials take priority (profile.vfsPassword is already decrypted by getProfileForBooking)
+  //   2. Otherwise pull the least-recently-used ACTIVE account from the pool
+  //   3. If the pool is empty, fall back to env.VFS_EMAIL / VFS_PASSWORD so the
+  //      system keeps working without a populated pool
+  let vfsEmail: string;
+  let vfsPassword: string;
+  let accountId: string | undefined;
+
+  if (profile.vfsPassword) {
+    // getProfileForBooking already decrypts this field
+    vfsEmail = profile.email || '';
+    vfsPassword = profile.vfsPassword;
+  } else {
+    try {
+      const poolAccount = await accountPoolService.getAvailableAccount();
+      vfsEmail = poolAccount.email;
+      vfsPassword = decrypt(poolAccount.encryptedPassword);
+      accountId = poolAccount.id;
+    } catch (poolErr) {
+      logEvent('warn', EventType.BOOKING_ATTEMPT,
+        `Account pool exhausted for profile ${profile.fullName} — falling back to env credentials`,
+        { profileId: job.profileId, error: String(poolErr) },
+      );
+      vfsEmail = env.VFS_EMAIL || '';
+      vfsPassword = env.VFS_PASSWORD || '';
+    }
+  }
+
   if (!vfsPassword) {
     logEvent('warn', EventType.BOOKING_ATTEMPT,
-      `No VFS password set for profile ${profile.fullName} — booking will fail at login`,
+      `No VFS password for profile ${profile.fullName} and no VFS_PASSWORD in .env — booking will fail at login`,
       { profileId: job.profileId },
     );
   }
@@ -104,6 +134,25 @@ export async function runBooking(job: BookingJobPayload): Promise<BookingResult>
 
     if (message.includes('session') || message.includes('login')) {
       await clearSession(job.profileId);
+
+      // Session/auth errors suggest the VFS account needs a cooldown
+      if (accountId) {
+        await accountPoolService.markCooldown(accountId, 30).catch((e: unknown) =>
+          logEvent('warn', EventType.BOOKING_ATTEMPT, `Failed to set cooldown on account ${accountId}`, { error: String(e) }),
+        );
+      }
+    }
+
+    // If the error signals the account is outright blocked/banned, mark it permanently
+    if (accountId && (
+      message.toLowerCase().includes('blocked') ||
+      message.toLowerCase().includes('banned') ||
+      message.toLowerCase().includes('suspended') ||
+      message.toLowerCase().includes('account disabled')
+    )) {
+      await accountPoolService.markBlocked(accountId).catch((e: unknown) =>
+        logEvent('warn', EventType.BOOKING_ATTEMPT, `Failed to mark account ${accountId} as blocked`, { error: String(e) }),
+      );
     }
 
     logEvent('error', EventType.BOOKING_FAILED, `Booking failed: ${message}`, {
@@ -131,7 +180,7 @@ async function runSingleAttempt(
 
   // Each tab gets its own session to avoid cookie conflicts on parallel runs
   const cookieState = tabIndex === 0 ? await loadSession(job.profileId) : undefined;
-  const context = await createBrowserContext(proxy, cookieState ?? undefined);
+  const context = await createBrowserContext(proxy, cookieState ?? undefined, job.destination);
 
   try {
     const confirmationNo = await runBookingFlow(context, {

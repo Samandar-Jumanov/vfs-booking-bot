@@ -1,4 +1,4 @@
-import { Page, Response as PlaywrightResponse } from 'playwright';
+import { Page, Response as PlaywrightResponse } from 'rebrowser-playwright';
 import { BlockSignal } from '@t/index';
 
 const BLOCK_URL_PATTERNS = ['/blocked', '/error', '/captcha', '/access-denied', '/rate-limit'];

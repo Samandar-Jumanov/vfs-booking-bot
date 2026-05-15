@@ -46,10 +46,12 @@ export interface VfsSelectors {
 }
 
 export const DEFAULT_SELECTORS: VfsSelectors = {
-  // Login — Angular Material mat-input sequential IDs (confirmed across VFS global deployments)
-  loginEmail:    'input[id="mat-input-0"]',
-  loginPassword: 'input[id="mat-input-1"]',
-  loginSubmit:   'button[type="submit"]',
+  // Login — formcontrolname is the most stable selector on current VFS (confirmed
+  // 2026-05-08 via real Chrome). The mat-input-N IDs are sequential and depend on
+  // mount order; keep them as fallbacks.
+  loginEmail:    'input[formcontrolname="username"], input[id="mat-input-0"], input[type="email"]',
+  loginPassword: 'input[formcontrolname="password"], input[id="mat-input-1"], input[type="password"]',
+  loginSubmit:   'button[type="submit"], button:has-text("Sign in"), button:has-text("Sign In")',
 
   // Country / visa selection — Angular Material mat-select
   countryOfResidenceDropdown: 'mat-select#mat-select-0, mat-select:nth-of-type(1)',

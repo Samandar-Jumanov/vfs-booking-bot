@@ -1,4 +1,4 @@
-import { chromium } from 'playwright';
+import { chromium } from 'rebrowser-playwright';
 import { prisma } from './config/database';
 import { env } from './config/env';
 

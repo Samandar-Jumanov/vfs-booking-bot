@@ -1,4 +1,4 @@
-import { Page } from 'playwright';
+import { Page } from 'rebrowser-playwright';
 import { randomInt } from '@utils/crypto';
 import { sleep } from '@utils/retry';
 

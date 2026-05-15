@@ -1,4 +1,4 @@
-import { Page } from 'playwright';
+import { Page } from 'rebrowser-playwright';
 import { typeText, selectOption, humanDelay } from '../humanBehavior';
 import { getSelectors } from './vfs.selectors';
 
