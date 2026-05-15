@@ -156,7 +156,26 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
     try {
       await context.addCookies(filteredCookies);
     } catch (e: any) {
-      console.warn('addCookies partial failure:', e.message);
+      console.warn('addCookies failed, trying raw CDP:', e.message);
+      try {
+        const tmpPage = await context.newPage();
+        const cdp = await context.newCDPSession(tmpPage);
+        for (const c of filteredCookies) {
+          await cdp.send('Network.setCookie', {
+            name: c.name,
+            value: c.value,
+            domain: '.vfsglobal.com',
+            path: '/',
+            httpOnly: c.httpOnly,
+            secure: c.secure,
+            sameSite: (c.sameSite === 'Strict' || c.sameSite === 'Lax' || c.sameSite === 'None') ? c.sameSite : undefined,
+            expires: c.expires,
+          }).catch((err: any) => console.warn('CDP setCookie failed for', c.name, ':', err.message));
+        }
+        await tmpPage.close();
+      } catch (e2: any) {
+        console.warn('Raw CDP cookie set also failed:', e2.message);
+      }
     }
   }
 
