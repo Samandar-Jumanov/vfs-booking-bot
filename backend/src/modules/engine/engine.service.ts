@@ -1,214 +1,321 @@
-import { BookingJobPayload } from '@t/index';
+import fs from 'fs/promises';
+import path from 'path';
+import { Page } from 'rebrowser-playwright';
 import { env } from '@config/env';
-import { getProxy, reportBlock } from '@modules/proxy/proxy.service';
 import { getProfileForBooking } from '@modules/profiles/profiles.service';
 import { getSetting } from '@modules/settings/settings.service';
-import { loadSession, saveSession, clearSession } from './sessionStore';
-import { createBrowserContext } from './browser.factory';
-import { runBookingFlow } from './vfs/vfs.navigator';
-import { applyOverrides, VfsSelectors } from './vfs/vfs.selectors';
-import { withRetry } from '@utils/retry';
+import { getReusableContextFor } from '@modules/monitor/playwright.fetch';
+import { fillApplicantForm } from './vfs/vfs.formFiller';
+import { getSelectors, applyOverrides, VfsSelectors } from './vfs/vfs.selectors';
+import { clickWithHover, humanDelay } from './humanBehavior';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
-import { AppError } from '@middleware/errorHandler';
-import { accountPoolService } from '@modules/accounts/accountPool.service';
-import { decrypt } from '@utils/crypto';
+import { BookingJobPayload } from '@t/index';
+import { sleep } from '@utils/retry';
 
 export interface BookingResult {
   success: boolean;
   confirmationNo?: string;
+  screenshotPath?: string;
+  dryRun?: boolean;
   error?: string;
+  errorClass?: 'transient' | 'permanent';
 }
 
-export async function runBooking(job: BookingJobPayload): Promise<BookingResult> {
-  // Load selector overrides from Settings
+class ClassifiedBookingError extends Error {
+  constructor(
+    message: string,
+    readonly reason: string,
+    readonly errorClass: 'transient' | 'permanent',
+  ) {
+    super(message);
+  }
+}
+
+function destinationCode(destination: string): string {
+  const map: Record<string, string> = {
+    latvia: 'lva',
+    tajikistan: 'tjk',
+    portugal: 'prt',
+    brazil: 'bra',
+    lva: 'lva',
+    tjk: 'tjk',
+    prt: 'prt',
+    bra: 'bra',
+  };
+  return map[destination.toLowerCase()] ?? destination.toLowerCase().slice(0, 3);
+}
+
+function sourceCode(sourceCountry?: string): string {
+  const map: Record<string, string> = {
+    uzbekistan: 'uzb',
+    tajikistan: 'tjk',
+    latvia: 'lva',
+    uzb: 'uzb',
+    tjk: 'tjk',
+    lva: 'lva',
+  };
+  return map[(sourceCountry ?? 'uzbekistan').toLowerCase()] ?? 'uzb';
+}
+
+function parseSlotDateTime(job: BookingJobPayload): Date | undefined {
+  if (!job.slot.date) return undefined;
+  const raw = job.slot.time ? `${job.slot.date} ${job.slot.time}` : job.slot.date;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? new Date(job.slot.date) : parsed;
+}
+
+function isTimeoutError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /timeout|timed out/i.test(message);
+}
+
+async function hasVisibleText(page: Page, patterns: RegExp[]): Promise<string | undefined> {
+  const text = await page.locator('body').innerText({ timeout: 5_000 }).catch(() => '');
+  return patterns.find((pattern) => pattern.test(text))?.source;
+}
+
+async function assertStillAuthenticated(page: Page): Promise<void> {
+  const url = page.url().toLowerCase();
+  const bodyMatch = await hasVisibleText(page, [/session expired/i, /sign in/i, /turnstile/i, /captcha/i]);
+  if (bodyMatch && /turnstile|captcha/i.test(bodyMatch)) {
+    throw new ClassifiedBookingError('Captcha appeared during booking flow', 'CAPTCHA_MANUAL_NEEDED', 'permanent');
+  }
+  if (url.includes('/login') || (bodyMatch && /session expired|sign in/i.test(bodyMatch))) {
+    throw new ClassifiedBookingError('VFS session expired during booking flow', 'SESSION_EXPIRED', 'permanent');
+  }
+}
+
+async function assertNoPermanentPageError(page: Page): Promise<void> {
+  const match = await hasVisibleText(page, [
+    /slot no longer available/i,
+    /appointment is no longer available/i,
+    /already booked/i,
+    /mandatory field/i,
+    /required field/i,
+    /invalid/i,
+  ]);
+  if (!match) return;
+  const reason = /slot|appointment|already/i.test(match) ? 'SLOT_NO_LONGER_AVAILABLE' : 'FORM_VALIDATION_ERROR';
+  throw new ClassifiedBookingError(`Permanent booking error detected: ${reason}`, reason, 'permanent');
+}
+
+async function waitForResponseContaining(page: Page, fragments: string[], timeout = 30_000) {
+  try {
+    const response = await page.waitForResponse(
+      (res) => fragments.some((fragment) => res.url().toLowerCase().includes(fragment.toLowerCase())),
+      { timeout },
+    );
+    if (response.status() >= 500) {
+      throw new ClassifiedBookingError(`VFS returned HTTP ${response.status()}`, 'HTTP_5XX', 'transient');
+    }
+    return response;
+  } catch (err) {
+    if (err instanceof ClassifiedBookingError) throw err;
+    if (isTimeoutError(err)) {
+      throw new ClassifiedBookingError('Timed out waiting for VFS network response', 'NETWORK_TIMEOUT', 'transient');
+    }
+    throw err;
+  }
+}
+
+async function clickAndMaybeWaitForResponse(page: Page, selector: string, fragments: string[]): Promise<void> {
+  const responseWait = waitForResponseContaining(page, fragments).catch((err) => {
+    if (err instanceof ClassifiedBookingError && err.reason === 'NETWORK_TIMEOUT') return undefined;
+    throw err;
+  });
+  await clickWithHover(page, selector);
+  await responseWait;
+}
+
+async function selectEarliestVisibleSlot(page: Page, slot: BookingJobPayload['slot']): Promise<void> {
+  const sel = getSelectors();
+
+  const exactDate = slot.date
+    ? page.locator(`td[data-date="${slot.date}"]:not(.disabled):not(.unavailable)`)
+    : undefined;
+  if (exactDate && await exactDate.count()) {
+    await exactDate.first().click();
+  } else {
+    const availableDates = page.locator(`td[data-date]:not(.disabled):not(.unavailable):not(.past), ${sel.slotDateCell}`);
+    if (await availableDates.count() === 0) {
+      throw new ClassifiedBookingError('No available date cells were visible', 'SLOT_NO_LONGER_AVAILABLE', 'permanent');
+    }
+    await availableDates.first().click();
+  }
+
+  const slotResponse = waitForResponseContaining(page, ['slot', 'appointment'], 30_000).catch((err) => {
+    if (err instanceof ClassifiedBookingError && err.reason === 'NETWORK_TIMEOUT') return undefined;
+    throw err;
+  });
+  await slotResponse;
+
+  const timeButtons = page.locator(sel.slotTimeButton);
+  const count = await timeButtons.count();
+  if (count === 0) {
+    throw new ClassifiedBookingError('No available time slots were visible', 'SLOT_NO_LONGER_AVAILABLE', 'permanent');
+  }
+
+  if (slot.time) {
+    for (let i = 0; i < count; i++) {
+      const button = timeButtons.nth(i);
+      const text = await button.innerText().catch(() => '');
+      if (text.includes(slot.time) && await button.isEnabled().catch(() => false)) {
+        await button.click();
+        return;
+      }
+    }
+  }
+
+  for (let i = 0; i < count; i++) {
+    const button = timeButtons.nth(i);
+    if (await button.isEnabled().catch(() => false)) {
+      await button.click();
+      return;
+    }
+  }
+
+  throw new ClassifiedBookingError('All visible time slots were disabled', 'SLOT_NO_LONGER_AVAILABLE', 'permanent');
+}
+
+async function captureReviewScreenshot(page: Page, bookingId: string): Promise<string> {
+  const recordingsDir = path.resolve(process.cwd(), 'recordings');
+  await fs.mkdir(recordingsDir, { recursive: true });
+  const filePath = path.join(recordingsDir, `booking_${bookingId}_review_${Date.now()}.png`);
+  await page.screenshot({ path: filePath, fullPage: true });
+  return filePath;
+}
+
+async function extractConfirmationNumber(page: Page): Promise<string> {
+  const sel = getSelectors();
+  const selectorText = await page.locator(sel.confirmationNumber).first().innerText({ timeout: 10_000 }).catch(() => '');
+  const text = selectorText || await page.locator('body').innerText({ timeout: 10_000 }).catch(() => '');
+  const match = text.match(/(?:reference|confirmation|booking|appointment)[^\w]*([A-Z0-9-]{6,30})/i);
+  return match?.[1] ?? (text.trim().slice(0, 64) || 'UNKNOWN');
+}
+
+async function runBookingAttempt(job: BookingJobPayload, bookingId: string): Promise<BookingResult> {
   const selectorOverrides = await getSetting<Partial<VfsSelectors>>('vfs.selectors');
   if (selectorOverrides) applyOverrides(selectorOverrides);
 
-  // Load profile (fully decrypted)
+  const dest = destinationCode(job.destination);
+  const context = getReusableContextFor(dest);
+  if (!context) {
+    throw new ClassifiedBookingError(
+      `No reusable monitor browser context found for ${dest}`,
+      'NO_REUSABLE_CONTEXT',
+      'permanent',
+    );
+  }
+
   const profile = await getProfileForBooking(job.profileId);
-
-  // Resolve VFS credentials:
-  //   1. Per-profile credentials take priority (profile.vfsPassword is already decrypted by getProfileForBooking)
-  //   2. Otherwise pull the least-recently-used ACTIVE account from the pool
-  //   3. If the pool is empty, fall back to env.VFS_EMAIL / VFS_PASSWORD so the
-  //      system keeps working without a populated pool
-  let vfsEmail: string;
-  let vfsPassword: string;
-  let accountId: string | undefined;
-
-  if (profile.vfsPassword) {
-    // getProfileForBooking already decrypts this field
-    vfsEmail = profile.email || '';
-    vfsPassword = profile.vfsPassword;
-  } else {
-    try {
-      const poolAccount = await accountPoolService.getAvailableAccount();
-      vfsEmail = poolAccount.email;
-      vfsPassword = decrypt(poolAccount.encryptedPassword);
-      accountId = poolAccount.id;
-    } catch (poolErr) {
-      logEvent('warn', EventType.BOOKING_ATTEMPT,
-        `Account pool exhausted for profile ${profile.fullName} — falling back to env credentials`,
-        { profileId: job.profileId, error: String(poolErr) },
-      );
-      vfsEmail = env.VFS_EMAIL || '';
-      vfsPassword = env.VFS_PASSWORD || '';
-    }
-  }
-
-  if (!vfsPassword) {
-    logEvent('warn', EventType.BOOKING_ATTEMPT,
-      `No VFS password for profile ${profile.fullName} and no VFS_PASSWORD in .env — booking will fail at login`,
-      { profileId: job.profileId },
-    );
-  }
-
-  logEvent('info', EventType.BOOKING_ATTEMPT, `Starting booking for profile ${profile.fullName}`, {
-    profileId: job.profileId,
-    destination: job.destination,
-  });
-
-  // How many parallel tabs to race (configurable via Settings; default 2)
-  const parallelTabs = Math.min(
-    Math.max(1, (await getSetting<number>('booking.parallelTabs')) ?? 2),
-    4, // hard cap — more than 4 tabs rarely helps and wastes RAM
-  );
-
-  let lastProxyId: string | undefined;
+  const page = await context.newPage();
+  const sel = getSelectors();
 
   try {
-    const result = await withRetry(
-      async () => {
-        // ── Launch N parallel browser attempts, take first success ─────────
-        const attempts = Array.from({ length: parallelTabs }, (_, i) =>
-          runSingleAttempt(i, job, profile, vfsEmail, vfsPassword)
-        );
+    const scheduleUrl = `https://visa.vfsglobal.com/${sourceCode(job.sourceCountry)}/en/${dest}/schedule-appointment`;
+    await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await assertStillAuthenticated(page);
 
-        // Race: first fulfilled (successful booking) wins.
-        // If ALL fail, throw the last error so withRetry can retry the whole round.
-        const results = await Promise.allSettled(attempts);
-        const winner = results.find(
-          (r): r is PromiseFulfilledResult<{ confirmationNo: string; proxyId?: string }> =>
-            r.status === 'fulfilled'
-        );
+    if (await page.locator(sel.bookAppointmentLink).count()) {
+      await clickAndMaybeWaitForResponse(page, sel.bookAppointmentLink, ['schedule-appointment', 'appointment']);
+    }
 
-        if (winner) {
-          lastProxyId = winner.value.proxyId;
-          return winner.value.confirmationNo;
-        }
+    await selectEarliestVisibleSlot(page, job.slot);
+    await assertNoPermanentPageError(page);
 
-        // All tabs failed — collect errors and throw the first one for retry logic
-        const errors = results
-          .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-          .map((r) => String(r.reason));
-        throw new Error(errors[0] ?? 'All parallel booking attempts failed');
-      },
-      {
-        maxAttempts: job.attempt ?? 3,
-        backoffMs: 2000,
-        factor: 2,
-        onRetry: (attempt, err) => {
-          logEvent('warn', EventType.BOOKING_ATTEMPT, `Retry ${attempt} for profile ${job.profileId}`, {
-            profileId: job.profileId,
-            error: String(err),
-          });
-        },
-      }
-    );
+    await clickAndMaybeWaitForResponse(page, sel.continueButton, ['slot-hold', 'applicant', 'appointment']);
+    await assertStillAuthenticated(page);
 
-    logEvent('info', EventType.BOOKING_SUCCESS, `Booking successful: ${result}`, {
-      profileId: job.profileId,
-      destination: job.destination,
-      result,
+    await fillApplicantForm(page, {
+      fullName: profile.fullName,
+      passportNumber: profile.passportNumber,
+      dob: profile.dob,
+      passportExpiry: profile.passportExpiry.toISOString(),
+      nationality: profile.nationality,
+      email: profile.email,
+      phone: profile.phone,
     });
+    await assertNoPermanentPageError(page);
 
-    return { success: true, confirmationNo: result };
+    await clickAndMaybeWaitForResponse(page, sel.continueButton, ['review', 'applicant', 'appointment']);
+    await assertNoPermanentPageError(page);
+
+    const screenshotPath = await captureReviewScreenshot(page, bookingId);
+    if (env.BOOKING_DRY_RUN) {
+      logEvent('info', EventType.BOOKING_ATTEMPT, `Dry-run booking reached review screen for ${profile.fullName}`, {
+        profileId: profile.id,
+        destination: job.destination,
+        result: screenshotPath,
+      });
+      return { success: true, dryRun: true, screenshotPath };
+    }
+
+    await assertStillAuthenticated(page);
+    const confirmResponse = waitForResponseContaining(page, ['confirm', 'appointment-detail'], 30_000);
+    await clickWithHover(page, sel.submitButton);
+    await confirmResponse;
+
+    if (await page.locator(sel.confirmButton).count()) {
+      const finalResponse = waitForResponseContaining(page, ['confirm', 'appointment-detail'], 30_000);
+      await clickWithHover(page, sel.confirmButton);
+      await finalResponse;
+    }
+
+    const confirmationNo = await extractConfirmationNumber(page);
+    return { success: true, confirmationNo, screenshotPath };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const isBlock = err instanceof AppError && err.code === 'IP_BLOCKED';
-
-    if (isBlock && lastProxyId) {
-      await reportBlock(lastProxyId);
+    if (err instanceof ClassifiedBookingError) throw err;
+    if (isTimeoutError(err)) {
+      throw new ClassifiedBookingError('Network timeout during booking flow', 'NETWORK_TIMEOUT', 'transient');
     }
-
-    if (message.includes('session') || message.includes('login')) {
-      await clearSession(job.profileId);
-
-      // Session/auth errors suggest the VFS account needs a cooldown
-      if (accountId) {
-        await accountPoolService.markCooldown(accountId, 30).catch((e: unknown) =>
-          logEvent('warn', EventType.BOOKING_ATTEMPT, `Failed to set cooldown on account ${accountId}`, { error: String(e) }),
-        );
-      }
-    }
-
-    // If the error signals the account is outright blocked/banned, mark it permanently
-    if (accountId && (
-      message.toLowerCase().includes('blocked') ||
-      message.toLowerCase().includes('banned') ||
-      message.toLowerCase().includes('suspended') ||
-      message.toLowerCase().includes('account disabled')
-    )) {
-      await accountPoolService.markBlocked(accountId).catch((e: unknown) =>
-        logEvent('warn', EventType.BOOKING_ATTEMPT, `Failed to mark account ${accountId} as blocked`, { error: String(e) }),
-      );
-    }
-
-    logEvent('error', EventType.BOOKING_FAILED, `Booking failed: ${message}`, {
-      profileId: job.profileId,
-      destination: job.destination,
-      proxyUsed: lastProxyId,
-      result: 'FAILED',
-    });
-
-    return { success: false, error: message };
-  }
-}
-
-// ── Single browser attempt (one tab) ──────────────────────────────────────────
-
-async function runSingleAttempt(
-  tabIndex: number,
-  job: BookingJobPayload,
-  profile: Awaited<ReturnType<typeof getProfileForBooking>>,
-  vfsEmail: string,
-  vfsPassword: string,
-): Promise<{ confirmationNo: string; proxyId?: string }> {
-  const proxy = await getProxy(job.destination);
-  const proxyId = proxy?.id;
-
-  // Each tab gets its own session to avoid cookie conflicts on parallel runs
-  const cookieState = tabIndex === 0 ? await loadSession(job.profileId) : undefined;
-  const context = await createBrowserContext(proxy, cookieState ?? undefined, job.destination);
-
-  try {
-    const confirmationNo = await runBookingFlow(context, {
-      sessionId: `${job.profileId}-tab${tabIndex}`,
-      sourceCountry: job.sourceCountry,
-      destination: job.destination,
-      visaType: job.visaType,
-      slot: job.slot,
-      profile: {
-        fullName: profile.fullName,
-        passportNumber: profile.passportNumber,
-        dob: profile.dob,
-        passportExpiry: profile.passportExpiry,
-        nationality: profile.nationality,
-        email: profile.email,
-        phone: profile.phone,
-        vfsEmail,
-        vfsPassword,
-      },
-    });
-
-    // Only persist session cookies from the winning tab (tab 0 = primary)
-    if (tabIndex === 0) {
-      await saveSession(job.profileId, context);
-    }
-
-    return { confirmationNo, proxyId };
+    throw err;
   } finally {
-    await context.close();
+    await page.close().catch(() => {});
   }
 }
+
+export async function runBooking(job: BookingJobPayload, bookingId = job.profileId): Promise<BookingResult> {
+  const maxAttempts = Math.max(1, env.BOOKING_MAX_RETRIES);
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await runBookingAttempt(job, bookingId);
+    } catch (err) {
+      lastError = err;
+      const classified = err instanceof ClassifiedBookingError
+        ? err
+        : new ClassifiedBookingError(err instanceof Error ? err.message : String(err), 'UNKNOWN', 'permanent');
+
+      logEvent(
+        classified.errorClass === 'transient' ? 'warn' : 'error',
+        EventType.BOOKING_ATTEMPT,
+        `Booking attempt ${attempt}/${maxAttempts} failed (${classified.errorClass}): ${classified.reason}`,
+        {
+          profileId: job.profileId,
+          destination: job.destination,
+          result: classified.message,
+        },
+      );
+
+      if (classified.errorClass === 'permanent' || attempt >= maxAttempts) {
+        return {
+          success: false,
+          error: classified.reason,
+          errorClass: classified.errorClass,
+        };
+      }
+
+      await sleep(1000 * Math.pow(2, attempt - 1));
+    }
+  }
+
+  return {
+    success: false,
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+    errorClass: 'permanent',
+  };
+}
+
+export { parseSlotDateTime };

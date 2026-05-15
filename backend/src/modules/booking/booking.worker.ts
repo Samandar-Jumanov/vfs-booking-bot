@@ -8,76 +8,125 @@ import { BookingJobPayload } from '@t/index';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
 import { dispatchNotification } from '@modules/notifications/notification.service';
+import { getRedis } from '@config/redis';
 
 const QUEUE_NAME = 'booking-queue';
 let worker: Worker | null = null;
 
+export async function processBookingJob(job: Job<BookingJobPayload>) {
+  const payload = job.data;
+  const lockKey = `booking-lock:${payload.destination}`;
+  const lock = await getRedis().set(lockKey, '1', 'EX', 300, 'NX');
+
+  if (lock !== 'OK') {
+    logEvent('warn', EventType.BOOKING_ATTEMPT, `Booking already running for ${payload.destination}`, {
+      profileId: payload.profileId,
+      destination: payload.destination,
+    });
+    emitToAll('BOOKING_FAILED', {
+      jobId: job.id,
+      profileId: payload.profileId,
+      destination: payload.destination,
+      reason: 'BOOKING_ALREADY_RUNNING',
+    });
+    return { success: false, error: 'BOOKING_ALREADY_RUNNING', errorClass: 'permanent' };
+  }
+
+  try {
+    await prisma.booking.updateMany({
+      where: { jobId: job.id },
+      data: { status: BookingStatus.RUNNING, attempt: job.attemptsMade + 1 },
+    });
+
+    emitToAll('BOOKING_PROGRESS', { jobId: job.id, profileId: payload.profileId, status: 'RUNNING' });
+
+    const result = await runBooking(payload, String(job.id ?? payload.profileId));
+
+    if (result.success && result.dryRun) {
+      await prisma.booking.updateMany({
+        where: { jobId: job.id },
+        data: {
+          status: BookingStatus.SUCCESS,
+          errorMessage: result.screenshotPath ? `DRY_RUN_OK screenshot=${result.screenshotPath}` : 'DRY_RUN_OK',
+          completedAt: null,
+        },
+      });
+
+      emitToAll('BOOKING_DRY_RUN_OK', {
+        jobId: job.id,
+        profileId: payload.profileId,
+        destination: payload.destination,
+        slotDateTime: payload.slot.date,
+        screenshotPath: result.screenshotPath,
+      });
+
+      return result;
+    }
+
+    if (result.success) {
+      await prisma.booking.updateMany({
+        where: { jobId: job.id },
+        data: {
+          status: BookingStatus.SUCCESS,
+          confirmationNo: result.confirmationNo,
+          completedAt: new Date(),
+        },
+      });
+
+      emitToAll('BOOKING_SUCCESS', {
+        jobId: job.id,
+        profileId: payload.profileId,
+        destination: payload.destination,
+        confirmationNo: result.confirmationNo,
+        screenshotPath: result.screenshotPath,
+      });
+
+      await dispatchNotification({
+        event: 'BOOKING_SUCCESS',
+        profileId: payload.profileId,
+        destination: payload.destination,
+        confirmationNo: result.confirmationNo,
+        slotDate: payload.slot.date,
+      });
+    } else {
+      const reason = result.error ?? 'UNKNOWN';
+      await prisma.booking.updateMany({
+        where: { jobId: job.id },
+        data: {
+          status: BookingStatus.FAILED,
+          errorMessage: reason,
+          completedAt: null,
+        },
+      });
+
+      const eventName = reason === 'CAPTCHA_MANUAL_NEEDED' ? 'CAPTCHA_MANUAL_NEEDED' : 'BOOKING_FAILED';
+      emitToAll(eventName, {
+        jobId: job.id,
+        profileId: payload.profileId,
+        destination: payload.destination,
+        reason,
+        errorClass: result.errorClass,
+      });
+
+      await dispatchNotification({
+        event: eventName === 'CAPTCHA_MANUAL_NEEDED' ? 'CAPTCHA_MANUAL_NEEDED' : 'BOOKING_FAILED',
+        profileId: payload.profileId,
+        destination: payload.destination,
+        reason,
+        errorMessage: reason,
+      });
+    }
+
+    return result;
+  } finally {
+    await getRedis().del(lockKey);
+  }
+}
+
 export function startBookingWorker(): Worker {
   worker = new Worker<BookingJobPayload>(
     QUEUE_NAME,
-    async (job: Job<BookingJobPayload>) => {
-      const payload = job.data;
-
-      // Update booking status to RUNNING
-      await prisma.booking.updateMany({
-        where: { jobId: job.id },
-        data: { status: BookingStatus.RUNNING, attempt: job.attemptsMade + 1 },
-      });
-
-      emitToAll('BOOKING_PROGRESS', { jobId: job.id, profileId: payload.profileId, status: 'RUNNING' });
-
-      const result = await runBooking(payload);
-
-      if (result.success) {
-        await prisma.booking.updateMany({
-          where: { jobId: job.id },
-          data: {
-            status: BookingStatus.SUCCESS,
-            confirmationNo: result.confirmationNo,
-            completedAt: new Date(),
-          },
-        });
-
-        emitToAll('BOOKING_SUCCESS', {
-          jobId: job.id,
-          profileId: payload.profileId,
-          destination: payload.destination,
-          confirmationNo: result.confirmationNo,
-        });
-
-        await dispatchNotification({
-          event: 'BOOKING_SUCCESS',
-          profileId: payload.profileId,
-          destination: payload.destination,
-          confirmationNo: result.confirmationNo,
-          slotDate: payload.slot.date,
-        });
-      } else {
-        await prisma.booking.updateMany({
-          where: { jobId: job.id },
-          data: {
-            status: BookingStatus.FAILED,
-            errorMessage: result.error,
-            completedAt: new Date(),
-          },
-        });
-
-        emitToAll('BOOKING_FAILED', {
-          jobId: job.id,
-          profileId: payload.profileId,
-          error: result.error,
-        });
-
-        await dispatchNotification({
-          event: 'BOOKING_FAILED',
-          profileId: payload.profileId,
-          destination: payload.destination,
-          errorMessage: result.error,
-        });
-      }
-
-      return result;
-    },
+    processBookingJob,
     {
       connection: { url: env.REDIS_URL },
       concurrency: env.BOOKING_CONCURRENCY,

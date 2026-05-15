@@ -54,6 +54,7 @@ const envSchema = z.object({
   EMAIL_DOMAIN: z.string().optional(),
 
   BOOKING_CONCURRENCY: z.coerce.number().default(3),
+  BOOKING_DRY_RUN: z.string().transform((v) => v !== 'false').default('true'),
   MONITOR_DEFAULT_INTERVAL_MS: z.coerce.number().default(10000),
   SESSION_DIR: z.string().default('/app/sessions'),
   BOOKING_MAX_RETRIES: z.coerce.number().default(3),

@@ -199,6 +199,10 @@ export async function fetchSlotsViaBrowser(
   return { status: result.status, data: result.parsed, rawText: result.text };
 }
 
+export function getReusableContextFor(destinationCode: string): BrowserContext | undefined {
+  return contexts.get(destinationCode)?.context;
+}
+
 /**
  * Force tear-down of a destination's context. Call on monitor stop or
  * when cookies are explicitly invalidated.
