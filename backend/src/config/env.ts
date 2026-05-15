@@ -20,13 +20,17 @@ const envSchema = z.object({
   PROFILE_ENCRYPTION_KEY: z.string().length(64, 'PROFILE_ENCRYPTION_KEY must be a 64-char hex string (32 bytes)'),
 
   TWOCAPTCHA_API_KEY: z.string().optional(),
+  CAPMONSTER_KEY: z.string().optional(),
   CAPTCHA_SOLVER: z.enum(['twocaptcha', 'manual']).default('manual'),
+
+  SMS_ACTIVATE_API_KEY: z.string().optional(),
 
   PROXY_DEFAULT_PROVIDER: z.string().default('brightdata'),
   PROXY_HOST: z.string().optional(),
   PROXY_PORT: z.coerce.number().optional(),
   PROXY_USERNAME: z.string().optional(),
   PROXY_PASSWORD: z.string().optional(),
+  BRIGHTDATA_WS: z.string().optional(),
 
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
@@ -42,6 +46,12 @@ const envSchema = z.object({
   VAPID_PUBLIC_KEY: z.string().optional(),
   VAPID_PRIVATE_KEY: z.string().optional(),
   VAPID_SUBJECT: z.string().default('mailto:admin@example.com'),
+
+  VFS_EMAIL: z.string().optional(),
+  VFS_PASSWORD: z.string().optional(),
+
+  MAILSAC_API_KEY: z.string().optional(),
+  EMAIL_DOMAIN: z.string().optional(),
 
   BOOKING_CONCURRENCY: z.coerce.number().default(3),
   MONITOR_DEFAULT_INTERVAL_MS: z.coerce.number().default(10000),
