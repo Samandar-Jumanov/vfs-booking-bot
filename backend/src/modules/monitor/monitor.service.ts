@@ -226,6 +226,12 @@ function buildAvailabilityUrl(source: string, dest: string): string {
   return `https://visa.vfsglobal.com/${source}/en/${dest}/schedule-appointment/get-slots`;
 }
 
+function getScrapingProviderMode(): 'local' | 'brightdata' | 'scraperapi' {
+  if (process.env.BRIGHTDATA_WS) return 'brightdata';
+  if (process.env.SCRAPER_API) return 'scraperapi';
+  return 'local';
+}
+
 async function getProxyConfig(id: string) {
     const cached = proxyCache.get(id);
     if (cached && cached.expiresAt > Date.now()) return cached.config;
@@ -407,6 +413,7 @@ export async function startMonitor(id: string): Promise<void> {
   await getRedis().sadd('monitors:running', id);
   await getRedis().set(`monitor:${id}:heartbeat`, Date.now().toString(), 'EX', 90);
   logEvent('info', EventType.MONITOR_STARTED, `Monitor started for ${current.sourceCountry.toUpperCase()} -> ${current.destination.toUpperCase()}`);
+  logEvent('info', EventType.MONITOR_STARTED, `[Monitor] Provider: ${getScrapingProviderMode()}`);
 
   const poll = async () => {
     const config = getMonitor(id);

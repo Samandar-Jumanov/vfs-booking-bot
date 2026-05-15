@@ -15,6 +15,7 @@
  */
 import { chromium, BrowserContext, Page } from 'rebrowser-playwright';
 import { getBrowserProfileDir, resolveChromeExecutablePath } from '@modules/engine/browser.factory';
+import { fetchViaScraperApi } from '@modules/proxy/scraperapi.provider';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 
@@ -232,6 +233,10 @@ export async function fetchSlotsViaBrowser(
   userAgent?: string,
   opts: { vacCode?: string; loginUser?: string; roleName?: string } = {},
 ): Promise<{ status: number; data: SlotCheckResponse | null; rawText: string }> {
+  if (!process.env.BRIGHTDATA_WS && process.env.SCRAPER_API) {
+    return fetchSlotsViaScraperApi(sourceCode, destinationCode, visaCategoryCode, cookies, opts);
+  }
+
   const bundle = await ensureContext(destinationCode, sourceCode, cookies, userAgent);
 
   const body: SlotCheckRequest = {
@@ -266,6 +271,44 @@ export async function fetchSlotsViaBrowser(
   }, { url: SLOT_API, body });
 
   return { status: result.status, data: result.parsed, rawText: result.text };
+}
+
+async function fetchSlotsViaScraperApi(
+  sourceCode: string,
+  destinationCode: string,
+  visaCategoryCode: string,
+  cookies: string[],
+  opts: { vacCode?: string; loginUser?: string; roleName?: string } = {},
+): Promise<{ status: number; data: SlotCheckResponse | null; rawText: string }> {
+  const body: SlotCheckRequest = {
+    countryCode: sourceCode,
+    missionCode: destinationCode,
+    vacCode: opts.vacCode || 'TAS',
+    visaCategoryCode,
+    roleName: opts.roleName || 'Individual',
+    loginUser: opts.loginUser || '',
+    payCode: '',
+  };
+
+  const response = await fetchViaScraperApi({
+    url: SLOT_API,
+    method: 'POST',
+    cookies: cookies.map((cookie) => cookie.split(';')[0].trim()).filter(Boolean).join('; '),
+    headers: {
+      'Content-Type': 'application/json;charset=UTF-8',
+      Accept: 'application/json, text/plain, */*',
+      Origin: 'https://visa.vfsglobal.com',
+      Referer: `https://visa.vfsglobal.com/${sourceCode}/en/${destinationCode}/schedule-appointment`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  let parsed: SlotCheckResponse | null = null;
+  try {
+    parsed = JSON.parse(response.body) as SlotCheckResponse;
+  } catch {}
+
+  return { status: response.status, data: parsed, rawText: response.body };
 }
 
 export function getReusableContextFor(destinationCode: string): BrowserContext | undefined {

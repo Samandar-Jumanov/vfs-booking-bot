@@ -31,6 +31,10 @@ const envSchema = z.object({
   PROXY_USERNAME: z.string().optional(),
   PROXY_PASSWORD: z.string().optional(),
   BRIGHTDATA_WS: z.string().optional(),
+  SCRAPER_API: z.string().optional(),
+  SCRAPER_API_PREMIUM: z.string().transform((v) => v !== 'false').default('true'),
+  SCRAPER_API_COUNTRY: z.string().default('uz'),
+  SCRAPER_API_MAX_REQUESTS_PER_HOUR: z.coerce.number().default(200),
 
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
