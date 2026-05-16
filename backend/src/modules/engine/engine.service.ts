@@ -4,7 +4,7 @@ import { Page } from 'rebrowser-playwright';
 import { env } from '@config/env';
 import { getProfileForBooking } from '@modules/profiles/profiles.service';
 import { getSetting } from '@modules/settings/settings.service';
-import { getReusableContextFor } from '@modules/monitor/playwright.fetch';
+import { findPageForProfile, getReusableContextFor } from '@modules/monitor/playwright.fetch';
 import { fillApplicantForm } from './vfs/vfs.formFiller';
 import { getSelectors, applyOverrides, VfsSelectors } from './vfs/vfs.selectors';
 import { clickWithHover, humanDelay } from './humanBehavior';
@@ -199,21 +199,44 @@ async function runBookingAttempt(job: BookingJobPayload, bookingId: string): Pro
   if (selectorOverrides) applyOverrides(selectorOverrides);
 
   const dest = destinationCode(job.destination);
-  const context = getReusableContextFor(dest);
-  if (!context) {
-    throw new ClassifiedBookingError(
-      `No reusable monitor browser context found for ${dest}`,
-      'NO_REUSABLE_CONTEXT',
-      'permanent',
-    );
+  const source = sourceCode(job.sourceCountry);
+  const profile = await getProfileForBooking(job.profileId);
+  let closePageOnFinish = true;
+  let page: Page;
+
+  if (env.CDP_ENDPOINT) {
+    const cdpPage = await findPageForProfile(job.profileId, source, dest);
+    if (!cdpPage) {
+      throw new ClassifiedBookingError(
+        `No reusable monitor browser context found for ${dest}`,
+        'NO_REUSABLE_CONTEXT',
+        'permanent',
+      );
+    }
+
+    page = cdpPage;
+    closePageOnFinish = false;
+    logEvent('info', EventType.BOOKING_ATTEMPT, `[Booking] Using CDP page for ${job.profileId} on the CDP branch`, {
+      profileId: job.profileId,
+      destination: job.destination,
+    });
+  } else {
+    const context = getReusableContextFor(dest);
+    if (!context) {
+      throw new ClassifiedBookingError(
+        `No reusable monitor browser context found for ${dest}`,
+        'NO_REUSABLE_CONTEXT',
+        'permanent',
+      );
+    }
+
+    page = await context.newPage();
   }
 
-  const profile = await getProfileForBooking(job.profileId);
-  const page = await context.newPage();
   const sel = getSelectors();
 
   try {
-    const scheduleUrl = `https://visa.vfsglobal.com/${sourceCode(job.sourceCountry)}/en/${dest}/schedule-appointment`;
+    const scheduleUrl = `https://visa.vfsglobal.com/${source}/en/${dest}/schedule-appointment`;
     await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await assertStillAuthenticated(page);
 
@@ -271,7 +294,9 @@ async function runBookingAttempt(job: BookingJobPayload, bookingId: string): Pro
     }
     throw err;
   } finally {
-    await page.close().catch(() => {});
+    if (closePageOnFinish) {
+      await page.close().catch(() => {});
+    }
   }
 }
 
