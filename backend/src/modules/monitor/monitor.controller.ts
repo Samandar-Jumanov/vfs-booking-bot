@@ -36,7 +36,7 @@ export function statusHandler(_req: Request, res: Response) {
 
 /**
  * POST /api/monitor/inject-cookies
- * Body: { destination: 'prt' | 'tjk' | 'lva', cookies: '<full cookie header string>', userAgent?: string }
+ * Body: { profileId: string, destination: 'prt' | 'tjk' | 'lva', cookies: '<full cookie header string>', userAgent?: string }
  *
  * How to get cookies from your browser:
  *   1. Log into https://visa.vfsglobal.com/uzb/prt/en/schedule-appointment in Chrome/Firefox
@@ -46,14 +46,19 @@ export function statusHandler(_req: Request, res: Response) {
  */
 export function injectCookiesHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    const { destination, cookies, userAgent } = req.body;
+    const { profileId, destination, cookies, userAgent } = req.body;
+    // TODO: Thread the selected profileId from the frontend cookie wizard.
+    // Use profileId "*" only for the legacy global-destination fallback.
+    if (!profileId || typeof profileId !== 'string') {
+      return res.status(400).json({ error: 'profileId is required (use "*" only for legacy global destination cookies)' });
+    }
     if (!destination || typeof destination !== 'string') {
       return res.status(400).json({ error: 'destination is required (e.g. "prt", "tjk", "lva")' });
     }
     if (!cookies || typeof cookies !== 'string' || cookies.trim().length === 0) {
       return res.status(400).json({ error: 'cookies string is required' });
     }
-    injectManualCookies(destination, cookies, userAgent);
+    injectManualCookies(profileId, destination, cookies, userAgent);
     const status = getInjectedCookiesStatus();
     return res.json({ message: 'Cookies injected — monitors will use them immediately', injectedCookies: status });
   } catch (err) { next(err); }

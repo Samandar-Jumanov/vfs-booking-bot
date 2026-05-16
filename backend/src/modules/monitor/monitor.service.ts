@@ -13,7 +13,7 @@ import { enqueueBooking } from '@modules/booking/booking.service';
 import { emitToAll } from '@modules/websocket/ws.server';
 import { dispatchNotification } from '@modules/notifications/notification.service';
 import { getProxy } from '@modules/proxy/proxy.service';
-import { getSetting, setSetting } from '@modules/settings/settings.service';
+import { setSetting } from '@modules/settings/settings.service';
 import { getRedis } from '@config/redis';
 
 // --- Types & Constants ---
@@ -65,6 +65,44 @@ const keepAliveHandles = new Map<string, () => void>();
 interface InjectedCookies { cookies: string[]; setAt: Date; userAgent?: string }
 const injectedCookiesStore = new Map<string, InjectedCookies>();
 
+function getCookieStoreKey(profileId: string, destCode: string): string {
+  return profileId === '*' ? destCode : `${profileId}:${destCode}`;
+}
+
+function getPersistedCookieKey(profileId: string, destCode: string): string {
+  return profileId === '*' ? `cookies.${destCode}` : `cookies.${profileId}.${destCode}`;
+}
+
+function parsePersistedCookieKey(key: string): { profileId: string; destCode: string } | undefined {
+  const parts = key.split('.');
+  if (parts[0] !== 'cookies') return undefined;
+  if (parts.length === 2) return { profileId: '*', destCode: parts[1] };
+  if (parts.length === 3) return { profileId: parts[1], destCode: parts[2] };
+  return undefined;
+}
+
+function parseCookieStoreKey(key: string): { profileId: string; destCode: string } {
+  const separatorIndex = key.indexOf(':');
+  if (separatorIndex < 0) return { profileId: '*', destCode: key };
+  return {
+    profileId: key.slice(0, separatorIndex),
+    destCode: key.slice(separatorIndex + 1),
+  };
+}
+
+function parseCookieString(cookieStr: string): string[] {
+  const trimmed = cookieStr.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Array<{ name: string; value: string }>;
+      return parsed.filter(c => c.name && c.value !== undefined).map(c => `${c.name}=${c.value}`);
+    } catch {
+      return trimmed.split(';').map(c => c.trim()).filter(Boolean);
+    }
+  }
+  return trimmed.split(';').map(c => c.trim()).filter(Boolean);
+}
+
 function extractLtSnExpiresAt(rawCookieStr: string, fallback?: string): string | undefined {
   if (fallback) return fallback;
   const trimmed = rawCookieStr.trim();
@@ -79,79 +117,65 @@ function extractLtSnExpiresAt(rawCookieStr: string, fallback?: string): string |
   }
 }
 
-async function savePersistedCookies(destCode: string, rawCookieStr: string, userAgent?: string, ltSnExpiresAt?: string): Promise<void> {
+async function savePersistedCookies(profileId: string, destCode: string, rawCookieStr: string, userAgent?: string, ltSnExpiresAt?: string): Promise<void> {
+  const storeKey = getCookieStoreKey(profileId, destCode);
+  const persistedKey = getPersistedCookieKey(profileId, destCode);
   try {
-    await setSetting(`cookies.${destCode}`, JSON.stringify({
+    await setSetting(persistedKey, JSON.stringify({
       raw: rawCookieStr,
       userAgent,
       savedAt: new Date().toISOString(),
       ltSnExpiresAt: extractLtSnExpiresAt(rawCookieStr, ltSnExpiresAt),
     }));
-    await getRedis().del(`cookie-alerted:${destCode}`);
+    await getRedis().del(`cookie-alerted:${storeKey}`);
   } catch (e: any) {
-    logEvent('warn', EventType.MONITOR_STARTED, `[Cookies] Failed to persist cookies for ${destCode}: ${e.message}`);
+    logEvent('warn', EventType.MONITOR_STARTED, `[Cookies] Failed to persist cookies for ${profileId}/${destCode}: ${e.message}`);
   }
 }
 
 export async function loadPersistedCookies(): Promise<void> {
-  const destCodes = ['prt', 'lva', 'tjk', 'bra'];
-  for (const destCode of destCodes) {
+  const rows = await prisma.settings.findMany({
+    where: { key: { startsWith: 'cookies.' } },
+  });
+  for (const row of rows) {
+    const parsedKey = parsePersistedCookieKey(row.key);
+    if (!parsedKey) continue;
+    const { profileId, destCode } = parsedKey;
+    const storeKey = getCookieStoreKey(profileId, destCode);
     try {
-      const stored = await getSetting<string>(`cookies.${destCode}`);
-      if (!stored) continue;
-      const { raw, userAgent, savedAt } = JSON.parse(stored as string);
+      const { raw, userAgent, savedAt } = JSON.parse(row.value as string);
       const savedMs = new Date(savedAt).getTime();
       if ((Date.now() - savedMs) >= MANUAL_COOKIE_TTL) {
         logEvent('info', EventType.MONITOR_STARTED, `[Cookies] Persisted cookies for ${destCode} expired — skipping`);
         continue;
       }
       // Re-use the same parsing logic as injectManualCookies
-      const trimmed = (raw as string).trim();
-      let cookies: string[];
-      if (trimmed.startsWith('[')) {
-        try {
-          const parsed = JSON.parse(trimmed) as Array<{ name: string; value: string }>;
-          cookies = parsed.filter(c => c.name && c.value !== undefined).map(c => `${c.name}=${c.value}`);
-        } catch {
-          cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
-        }
-      } else {
-        cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
-      }
-      injectedCookiesStore.set(destCode, { cookies, setAt: new Date(savedAt), userAgent });
+      const cookies = parseCookieString(raw as string);
+      injectedCookiesStore.set(storeKey, { cookies, setAt: new Date(savedAt), userAgent });
       logEvent('info', EventType.MONITOR_STARTED,
-        `[Cookies] Restored ${cookies.length} persisted cookies for ${destCode} (saved ${savedAt})`);
+        `[Cookies] Restored ${cookies.length} persisted cookies for ${profileId}/${destCode} (saved ${savedAt})`);
     } catch (e: any) {
-      logEvent('warn', EventType.MONITOR_STARTED, `[Cookies] Failed to load persisted cookies for ${destCode}: ${e.message}`);
+      logEvent('warn', EventType.MONITOR_STARTED, `[Cookies] Failed to load persisted cookies for ${profileId}/${destCode}: ${e.message}`);
     }
   }
 }
 
-export function injectManualCookies(destination: string, cookieStr: string, userAgent?: string): void {
+export function injectManualCookies(profileId: string, destination: string, cookieStr: string, userAgent?: string): void {
   const destCode = getDestinationCode(destination);
+  const storeKey = getCookieStoreKey(profileId, destCode);
 
   // Accept either JSON array from EditThisCookie/Cookie-Editor or raw "name=value; ..." header string
-  let cookies: string[];
-  const trimmed = cookieStr.trim();
-  if (trimmed.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(trimmed) as Array<{ name: string; value: string }>;
-      cookies = parsed.filter(c => c.name && c.value !== undefined).map(c => `${c.name}=${c.value}`);
-    } catch {
-      cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
-    }
-  } else {
-    cookies = trimmed.split(';').map(c => c.trim()).filter(Boolean);
-  }
-  injectedCookiesStore.set(destCode, { cookies, setAt: new Date(), userAgent });
-  savePersistedCookies(destCode, cookieStr, userAgent).catch(() => {});
-  getRedis().del(`cookie-alerted:${destCode}`).catch(() => {});
+  const cookies = parseCookieString(cookieStr);
+  injectedCookiesStore.set(storeKey, { cookies, setAt: new Date(), userAgent });
+  savePersistedCookies(profileId, destCode, cookieStr, userAgent).catch(() => {});
+  getRedis().del(`cookie-alerted:${storeKey}`).catch(() => {});
   logEvent('info', EventType.MONITOR_STARTED,
-    `[Warmer] Manual cookies injected for ${destCode} (${cookies.length} cookies, valid 8h)`);
+    `[Warmer] Manual cookies injected for ${profileId}/${destCode} (${cookies.length} cookies, valid 8h)`);
   // Propagate to any running monitor for this destination so it picks them up immediately
   for (const [id, state] of monitors.entries()) {
     const stateDest = getDestinationCode(state.destination);
-    if (stateDest === destCode) {
+    const stateProfileId = state.profileIds[0] ?? '*';
+    if (stateDest === destCode && (profileId === '*' || stateProfileId === profileId)) {
       setMonitor(id, {
         ...state,
         cookies,
@@ -162,23 +186,27 @@ export function injectManualCookies(destination: string, cookieStr: string, user
     }
   }
   // Start keep-alive for manually injected cookies too
-  const prev = keepAliveHandles.get(destCode);
+  const prev = keepAliveHandles.get(storeKey);
   if (prev) prev();
-  keepAliveHandles.set(destCode, keepSessionAlive(
+  keepAliveHandles.set(storeKey, keepSessionAlive(
     'uzb', destCode,
-    () => injectedCookiesStore.get(destCode)?.cookies,
+    () => injectedCookiesStore.get(storeKey)?.cookies,
     undefined,
   ));
 }
 
-export function getInjectedCookiesStatus(): Array<{ destination: string; setAt: Date; expiresAt: Date; cookieCount: number; valid: boolean }> {
-  return Array.from(injectedCookiesStore.entries()).map(([dest, v]) => ({
-    destination: dest,
-    setAt: v.setAt,
-    expiresAt: new Date(v.setAt.getTime() + MANUAL_COOKIE_TTL),
-    cookieCount: v.cookies.length,
-    valid: (Date.now() - v.setAt.getTime()) < MANUAL_COOKIE_TTL,
-  }));
+export function getInjectedCookiesStatus(): Array<{ profileId: string; destination: string; setAt: Date; expiresAt: Date; cookieCount: number; valid: boolean }> {
+  return Array.from(injectedCookiesStore.entries()).map(([key, v]) => {
+    const { profileId, destCode } = parseCookieStoreKey(key);
+    return {
+      profileId,
+      destination: destCode,
+      setAt: v.setAt,
+      expiresAt: new Date(v.setAt.getTime() + MANUAL_COOKIE_TTL),
+      cookieCount: v.cookies.length,
+      valid: (Date.now() - v.setAt.getTime()) < MANUAL_COOKIE_TTL,
+    };
+  });
 }
 
 // --- Helper Functions ---
@@ -188,6 +216,7 @@ function getSourceCode(name: string): string {
     uzbekistan: 'uzb',
     tajikistan: 'tjk',
     latvia: 'lva',
+    turkmenistan: 'tkm',
   };
   return map[name.toLowerCase()] || 'uzb';
 }
@@ -281,11 +310,13 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
   if (state?.cookiesValid && state.cookies && state.cookiesSetAt && (Date.now() - state.cookiesSetAt.getTime() < 28800000)) {
     return state.cookies;
   }
+  const sessionProfileId = state?.profileIds[0] ?? '*';
+  const storeKey = getCookieStoreKey(sessionProfileId, destinationCode);
 
   // Check manual injection store — user's real-browser cookies bypass headless detection entirely
-  const injected = injectedCookiesStore.get(destinationCode);
+  const injected = injectedCookiesStore.get(storeKey);
   if (injected && (Date.now() - injected.setAt.getTime()) < MANUAL_COOKIE_TTL) {
-    logEvent('info', EventType.MONITOR_STARTED, `[Warmer] Using manually injected cookies for ${destinationCode}`);
+    logEvent('info', EventType.MONITOR_STARTED, `[Warmer] Using manually injected cookies for ${sessionProfileId}/${destinationCode}`);
     setMonitor(id, {
       ...getMonitor(id)!,
       cookies: injected.cookies,
@@ -304,11 +335,11 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
     const result = await warmSessionWithBrowser(sourceCode, destinationCode, credentials, proxyConfig as any);
     if (result?.cookies) {
       setMonitor(id, { ...getMonitor(id)!, cookies: result.cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: result.userAgent, secChUa: result.secChUa, lastHttpStatus: 200 });
-      await savePersistedCookies(destinationCode, result.cookies.join('; '), result.userAgent, result.ltSnExpiresAt);
+      await savePersistedCookies(sessionProfileId, destinationCode, result.cookies.join('; '), result.userAgent, result.ltSnExpiresAt);
       // Start keep-alive so one login lasts ~8 hours
-      const prev = keepAliveHandles.get(destinationCode);
+      const prev = keepAliveHandles.get(storeKey);
       if (prev) prev();
-      keepAliveHandles.set(destinationCode, keepSessionAlive(
+      keepAliveHandles.set(storeKey, keepSessionAlive(
         sourceCode, destinationCode,
         () => getMonitor(id)?.cookies,
         proxyConfig?.url ? { url: proxyConfig.url } : undefined,
