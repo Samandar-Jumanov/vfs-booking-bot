@@ -327,30 +327,39 @@ async function prepareCdpSession(profileId: string, sourceCode: string, destinat
 
   startKeepAliveWatcher(page, profileId);
   const currentUrl = page.url().toLowerCase();
-
-  if (currentUrl.includes('/login')) {
-    if (!credentials) {
-      logEvent('warn', EventType.SESSION_EXPIRED, `[AutoLogin] No VFS credentials available for ${profileId}`);
-      return;
-    }
-    const ok = await autoReLogin(page, credentials);
-    if (ok) {
-      emitToAll('SESSION_REFRESHED', { profileId, destination: destinationCode, timestamp: Date.now() });
-      await sendTelegram(`SESSION_REFRESHED - ${profileId}/${destinationCode}`).catch(() => {});
-    }
-    return;
-  }
-
   const profile = profileId === '*' ? null : await prisma.profile.findUnique({
     where: { id: profileId },
     select: { id: true, fullName: true, email: true, phone: true, dobEnc: true, passportNumberEnc: true, vfsPasswordEnc: true },
   });
 
   if (!profile) return;
-  if (!currentUrl.includes('/register') && profile.vfsPasswordEnc) return;
 
-  const generatedPassword = profile.vfsPasswordEnc ? decrypt(profile.vfsPasswordEnc) : `VfsDemo-${randomBytes(9).toString('base64url')}1!`;
-  if (!profile.vfsPasswordEnc) {
+  const hasPassword = !!profile.vfsPasswordEnc;
+  const loginUrl = `https://visa.vfsglobal.com/${sourceCode}/en/${destinationCode}/login`;
+
+  if (hasPassword && credentials) {
+    if (!currentUrl.includes('/login') && !currentUrl.includes('/dashboard')) {
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+    }
+
+    const ok = await autoReLogin(page, credentials, loginUrl);
+    if (ok) {
+      emitToAll('SESSION_REFRESHED', { profileId, destination: destinationCode, timestamp: Date.now() });
+      await sendTelegram(`SESSION_REFRESHED - ${profileId}/${destinationCode}`).catch(() => {});
+    } else {
+      logEvent('warn', EventType.SESSION_EXPIRED, `[AutoLogin] Failed for ${profileId}`);
+    }
+    return;
+  }
+
+  if (hasPassword && !credentials) {
+    logEvent('warn', EventType.SESSION_EXPIRED, `[AutoLogin] No VFS credentials available for ${profileId}`);
+    return;
+  }
+
+  const generatedPassword = `VfsDemo-${randomBytes(9).toString('base64url')}1!`;
+  if (!hasPassword) {
     await prisma.profile.update({
       where: { id: profile.id },
       data: { vfsPasswordEnc: encrypt(generatedPassword) },
@@ -359,8 +368,8 @@ async function prepareCdpSession(profileId: string, sourceCode: string, destinat
 
   const names = splitFullName(profile.fullName);
   const result = await autoRegister(page, {
-    email: profile.email || 'samandarjumanov055@gmail.com',
-    phone: profile.phone || '+998904044431',
+    email: profile.email,
+    phone: profile.phone,
     password: generatedPassword,
     firstName: names.firstName || 'TEST_FIRSTNAME',
     lastName: names.lastName || 'TEST_LASTNAME',
@@ -370,6 +379,8 @@ async function prepareCdpSession(profileId: string, sourceCode: string, destinat
 
   if (result.ok) {
     logEvent('info', EventType.MONITOR_STARTED, `[AutoRegister] VFS account ready for ${result.vfsAccountEmail ?? profile.email}`);
+  } else {
+    logEvent('warn', EventType.CAPTCHA_REQUIRED, `[AutoRegister] Failed for ${profile.email} - VFS web register may be blocked by Datadome`);
   }
 }
 
@@ -562,7 +573,8 @@ export async function startMonitor(id: string): Promise<void> {
       if (env.CDP_ENDPOINT && browserResult.status === 401 && creds) {
         const profileId = config.profileIds[0] ?? '*';
         const page = await findPageForProfile(profileId, sourceCode, destCode);
-        const refreshed = page ? await autoReLogin(page, creds) : false;
+        const loginUrl = `https://visa.vfsglobal.com/${sourceCode}/en/${destCode}/login`;
+        const refreshed = page ? await autoReLogin(page, creds, loginUrl) : false;
         if (refreshed) {
           emitToAll('SESSION_REFRESHED', { profileId, destination: destCode, timestamp: Date.now() });
           await sendTelegram(`SESSION_REFRESHED - ${profileId}/${destCode}`).catch(() => {});

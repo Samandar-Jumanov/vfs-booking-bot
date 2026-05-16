@@ -63,11 +63,21 @@ async function solveTurnstileIfPresent(page: Page): Promise<void> {
   logEvent('info', EventType.CAPTCHA_SOLVED, '[AutoLogin] Turnstile token injected');
 }
 
-export async function autoReLogin(page: Page, profile: { email: string; password: string }): Promise<boolean> {
-  const loginUrl = `${routeBaseFromUrl(page.url())}/login`;
+export async function autoReLogin(page: Page, profile: { email: string; password: string }, loginUrl?: string): Promise<boolean> {
+  const resolvedLoginUrl = loginUrl ?? `${routeBaseFromUrl(page.url())}/login`;
   logEvent('info', EventType.SESSION_EXPIRED, `[AutoLogin] Re-login started for ${profile.email}`);
 
-  await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+  const startingUrl = page.url().toLowerCase();
+  if (startingUrl.includes('/dashboard')) {
+    logEvent('info', EventType.MONITOR_STARTED, `[AutoLogin] Already on dashboard for ${profile.email}: ${page.url()}`);
+    return true;
+  }
+
+  if (!startingUrl.includes('/login')) {
+    await page.goto(resolvedLoginUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+  }
+
   await page.waitForSelector('input[type="email"], input[name="email"], input[formcontrolname="username"], input[formcontrolname="email"]', { timeout: 30_000 });
 
   const emailOk = await fillFirstVisible(page, [
@@ -95,9 +105,12 @@ export async function autoReLogin(page: Page, profile: { email: string; password
   ], 'submit');
   if (!clicked) return false;
 
-  await page.waitForURL((url) => !url.pathname.toLowerCase().includes('/login'), { timeout: 60_000 }).catch(() => {});
+  await page.waitForURL((url) => {
+    const path = url.pathname.toLowerCase();
+    return path.includes('/dashboard') || !path.includes('/login');
+  }, { timeout: 60_000 }).catch(() => {});
   const finalUrl = page.url().toLowerCase();
-  const ok = !finalUrl.includes('/login') && !finalUrl.includes('/error') && !finalUrl.includes('/page-not-found');
+  const ok = finalUrl.includes('/dashboard') || (!finalUrl.includes('/login') && !finalUrl.includes('/error') && !finalUrl.includes('/page-not-found'));
   logEvent(ok ? 'info' : 'warn', ok ? EventType.MONITOR_STARTED : EventType.BOOKING_FAILED, `[AutoLogin] Re-login ${ok ? 'succeeded' : 'failed'} for ${profile.email}: ${page.url()}`);
   return ok;
 }
