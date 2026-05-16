@@ -56,10 +56,28 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     return { ok: true };
   }
   if (message.type === 'EXT_SESSION_SYNC') {
+    // Augment with HttpOnly cookies (datadome + session) via chrome.cookies API.
+    // document.cookie in the content script cannot see HttpOnly cookies, which
+    // are exactly the ones Datadome uses for trust tokens.
+    const allCookies: chrome.cookies.Cookie[] = await chrome.cookies.getAll({ domain: 'vfsglobal.com' }).catch(() => [] as chrome.cookies.Cookie[]);
+    const serialized = allCookies
+      .map((c: chrome.cookies.Cookie) => `${c.name}=${c.value}`)
+      .join('; ');
+    const cookieJar = allCookies.map((c: chrome.cookies.Cookie) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+      secure: c.secure,
+      httpOnly: c.httpOnly,
+      sameSite: c.sameSite,
+      expirationDate: c.expirationDate,
+    }));
     sendEvent({
       type: 'EXT_SESSION_SYNC',
       url: String(message.url ?? ''),
-      cookies: String(message.cookies ?? ''),
+      cookies: serialized || String(message.cookies ?? ''),
+      cookieJar,
       email: typeof message.email === 'string' ? message.email : undefined,
       timestamp: String(message.timestamp ?? new Date().toISOString()),
     });

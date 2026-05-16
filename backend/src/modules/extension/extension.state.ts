@@ -99,21 +99,33 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
     const url = String(event.url ?? '');
     const email = String(event.email ?? '');
     const cookies = String(event.cookies ?? '');
-    if (!email || !cookies) return;
+    const cookieJar = Array.isArray(event.cookieJar) ? event.cookieJar : null;
+    if (!email || (!cookies && !cookieJar)) return;
     const acc = await prisma.vfsAccount.findFirst({ where: { email } });
     if (!acc) {
       console.info(`[EXT_SESSION_SYNC] No account row for ${email}; skipping (operator must add)`);
       return;
     }
+    // Validate we actually have a Datadome trust cookie before marking the
+    // account warm — without it, bookings will hit lift-api 403.
+    const hasDatadome = cookieJar?.some((c: any) => /datadome/i.test(String(c?.name ?? ''))) ?? /datadome/i.test(cookies);
     await prisma.vfsAccount.update({
       where: { id: acc.id },
       data: {
-        cookieStore: { raw: cookies, capturedAt: new Date().toISOString() },
+        cookieStore: {
+          raw: cookies,
+          jar: cookieJar,
+          hasDatadome,
+          capturedAt: new Date().toISOString(),
+        },
         tabUrl: url,
-        lastWarmedAt: new Date(),
-        status: AccountStatus.ACTIVE,
+        lastWarmedAt: hasDatadome ? new Date() : acc.lastWarmedAt,
+        status: hasDatadome ? AccountStatus.ACTIVE : acc.status,
       },
     });
+    if (!hasDatadome) {
+      console.warn(`[EXT_SESSION_SYNC] ${email} synced but no datadome cookie present; account NOT marked warm`);
+    }
     return;
   }
 

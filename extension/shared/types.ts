@@ -74,7 +74,23 @@ export type ExtensionEvent =
   | { type: 'EXT_SESSION_LOST'; destination?: string; reason?: string }
   | { type: 'EXT_LOGGED_IN'; email?: string }
   | { type: 'EXT_POLL_RESULT'; destination: string; status: number; data?: unknown }
-  | { type: 'EXT_SESSION_SYNC'; url: string; cookies: string; email?: string; timestamp: string };
+  | {
+      type: 'EXT_SESSION_SYNC';
+      url: string;
+      cookies: string;
+      cookieJar?: Array<{
+        name: string;
+        value: string;
+        domain: string;
+        path: string;
+        secure: boolean;
+        httpOnly: boolean;
+        sameSite?: chrome.cookies.SameSiteStatus;
+        expirationDate?: number;
+      }>;
+      email?: string;
+      timestamp: string;
+    };
 
 export type ContentCommand =
   | { type: 'POLL_SLOT'; monitor: MonitorConfig }
