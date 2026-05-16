@@ -35,15 +35,22 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
+
     restart: unless-stopped
     shm_size: 1gb
-    env_file: .env
+    env_file:
+      - .env
+      - backend/.env
     environment:
       DATABASE_URL: postgresql://vfsuser:vfspass@postgres:5432/vfsdb
       REDIS_URL: redis://:redispass@redis:6379
       SESSION_DIR: /app/sessions
+      # Disable boot-time auto-spawn of DB-stored monitors so background polling
+      # doesn't drain the proxy GB budget between intentional tests.
+      # Remove this line (or set to "true") for production demo runs.
+      MONITOR_AUTO_START: "false"
     volumes:
       - sessions-data:/app/sessions
     depends_on:

@@ -37,6 +37,11 @@ interface MonitorCardModel extends MonitorStatus {
   cookieStatus?: InjectedCookieStatus;
 }
 
+interface ExtensionStatus {
+  connected: boolean;
+  lastHeartbeatAt?: string;
+}
+
 type WizardStep = 'explain' | 'open' | 'paste' | 'inject';
 type InjectState = 'idle' | 'saving' | 'success' | 'error';
 
@@ -149,6 +154,12 @@ export default function DashboardPage() {
   const { data: injectedCookies = [], refetch: refetchCookies } = useQuery<InjectedCookieStatus[]>({
     queryKey: ['injected-cookies'],
     queryFn: () => api.get<InjectedCookieStatus[]>('/monitor/injected-cookies').then((response) => response.data),
+    refetchInterval: 5000,
+  });
+
+  const { data: extensionStatus } = useQuery<ExtensionStatus>({
+    queryKey: ['extension-status'],
+    queryFn: () => api.get<ExtensionStatus>('/extension/status').then((response) => response.data),
     refetchInterval: 5000,
   });
 
@@ -308,6 +319,7 @@ export default function DashboardPage() {
                 key={monitor.id}
                 monitor={monitor}
                 now={now}
+                extensionStatus={extensionStatus}
                 stopping={stopMutation.isPending}
                 onStop={() => stopMutation.mutate(monitor)}
                 onWarm={() => setWizardDestination(destinationCode(monitor.destination))}
@@ -426,9 +438,10 @@ function SummaryCard({ label, value, icon: Icon }: { label: string; value: strin
   );
 }
 
-function MonitorCard({ monitor, now, stopping, onStop, onWarm }: {
+function MonitorCard({ monitor, now, extensionStatus, stopping, onStop, onWarm }: {
   monitor: MonitorCardModel;
   now: number;
+  extensionStatus?: ExtensionStatus;
   stopping: boolean;
   onStop: () => void;
   onWarm: () => void;
@@ -436,6 +449,8 @@ function MonitorCard({ monitor, now, stopping, onStop, onWarm }: {
   const meta = destinationMeta(monitor.destination);
   const tone = expiryTone(monitor.cookieStatus?.expiresAt, now);
   const statusTone = monitor.isRunning ? 'bg-green-400' : monitor.isCoolingDown ? 'bg-amber-400' : 'bg-red-400';
+  const extensionLastSeenMs = extensionStatus?.lastHeartbeatAt ? new Date(extensionStatus.lastHeartbeatAt).getTime() : 0;
+  const extensionStale = !extensionLastSeenMs || now - extensionLastSeenMs > 5 * 60_000;
 
   return (
     <article className={cn(
@@ -456,6 +471,29 @@ function MonitorCard({ monitor, now, stopping, onStop, onWarm }: {
           {monitor.isRunning ? 'running' : monitor.isCoolingDown ? 'warming' : 'stopped'}
         </div>
       </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <span className={cn(
+          'rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-widest',
+          extensionStatus?.connected ? 'border-green-500/30 bg-green-500/10 text-green-600' : 'border-zinc-500/30 bg-zinc-500/10 text-zinc-500'
+        )}>
+          Connection mode: {extensionStatus?.connected ? "Extension (customer's Chrome)" : 'Local Bot'}
+        </span>
+        {extensionStatus?.connected && (
+          <span className={cn(
+            'rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-widest',
+            extensionStale ? 'border-red-500/30 bg-red-500/10 text-red-500' : 'border-green-500/30 bg-green-500/10 text-green-600'
+          )}>
+            Last extension heartbeat: {relativeTime(extensionStatus.lastHeartbeatAt, now)}
+          </span>
+        )}
+      </div>
+
+      {extensionStatus?.connected && extensionStale && (
+        <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs font-bold text-red-600">
+          Extension has not pinged in over 5 minutes.
+        </div>
+      )}
 
       <dl className="mt-5 grid grid-cols-2 gap-3 text-sm">
         <div className="rounded-lg bg-accent/40 p-3">
