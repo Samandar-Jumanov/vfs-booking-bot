@@ -2,8 +2,16 @@ import { Page } from 'rebrowser-playwright';
 import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const DEFAULT_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
+const SUBMIT_SELECTORS = [
+  'button:has-text("Sign In")',
+  'button:has-text("Login")',
+  'button:has-text("Log In")',
+  'button[type="submit"]',
+];
 
 function routeBaseFromUrl(currentUrl: string): string {
   try {
@@ -59,8 +67,31 @@ async function solveTurnstileIfPresent(page: Page): Promise<void> {
     input.value = captchaToken;
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const widget = document.querySelector('.cf-turnstile, [data-sitekey]') as HTMLElement | null;
+    const callbackName = widget?.dataset.callback;
+    if (!callbackName) return;
+
+    const callback = callbackName.split('.').reduce<unknown>((target, key) => {
+      if (!target || typeof target !== 'object') return undefined;
+      return (target as Record<string, unknown>)[key];
+    }, window);
+    if (typeof callback === 'function') {
+      callback(captchaToken);
+    }
   }, token);
   logEvent('info', EventType.CAPTCHA_SOLVED, '[AutoLogin] Turnstile token injected');
+
+  await page.waitForFunction(() => {
+    const labels = ['sign in', 'login', 'log in'];
+    for (const button of Array.from(document.querySelectorAll('button'))) {
+      const htmlButton = button as HTMLButtonElement;
+      const text = (htmlButton.textContent || '').trim().toLowerCase();
+      const isSubmit = htmlButton.type === 'submit' || labels.some((label) => text.includes(label));
+      if (isSubmit && !htmlButton.disabled) return true;
+    }
+    return false;
+  }, undefined, { timeout: 15_000 });
 }
 
 export async function autoReLogin(page: Page, profile: { email: string; password: string }, loginUrl?: string): Promise<boolean> {
@@ -97,18 +128,32 @@ export async function autoReLogin(page: Page, profile: { email: string; password
 
   await solveTurnstileIfPresent(page);
 
-  const clicked = await clickFirstVisible(page, [
-    'button:has-text("Sign In")',
-    'button:has-text("Login")',
-    'button:has-text("Log In")',
-    'button[type="submit"]',
-  ], 'submit');
+  const clicked = await clickFirstVisible(page, SUBMIT_SELECTORS, 'submit');
   if (!clicked) return false;
+
+  await Promise.race([
+    page.waitForURL((url) => {
+      const path = url.pathname.toLowerCase();
+      return path.includes('/dashboard') || !path.includes('/login');
+    }, { timeout: 30_000 }).then(() => 'url').catch(() => null),
+    page.waitForResponse((response) => {
+      const request = response.request();
+      const url = response.url().toLowerCase();
+      return request.method() === 'POST'
+        && (url.includes('/login') || url.includes('/auth') || url.includes('/token') || url.includes('/session'));
+    }, { timeout: 30_000 }).then(() => 'response').catch(() => null),
+  ]);
+
+  if (page.url().toLowerCase().includes('/login')) {
+    const screenshotPath = path.join('recordings', `autologin_fail_${Date.now()}.png`);
+    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+  }
 
   await page.waitForURL((url) => {
     const path = url.pathname.toLowerCase();
     return path.includes('/dashboard') || !path.includes('/login');
-  }, { timeout: 60_000 }).catch(() => {});
+  }, { timeout: 30_000 }).catch(() => {});
   const finalUrl = page.url().toLowerCase();
   const ok = finalUrl.includes('/dashboard') || (!finalUrl.includes('/login') && !finalUrl.includes('/error') && !finalUrl.includes('/page-not-found'));
   logEvent(ok ? 'info' : 'warn', ok ? EventType.MONITOR_STARTED : EventType.BOOKING_FAILED, `[AutoLogin] Re-login ${ok ? 'succeeded' : 'failed'} for ${profile.email}: ${page.url()}`);
