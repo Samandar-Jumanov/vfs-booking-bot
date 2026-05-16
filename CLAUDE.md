@@ -223,3 +223,61 @@ PUT    /api/settings/captcha
 - Appointment booked within seconds of slot release
 - Minimal IP bans / session blocks during operation
 - Non-technical operators can run the system with zero CLI interaction
+
+---
+
+## Demo Preparation — Client Demo Sunday 2026-05-10
+
+### Target routes
+- **UZB → Tajikistan** (`uzb/tjk`)
+- **UZB → Latvia** (`uzb/lva`)
+
+Source country is Uzbekistan. VFS test passports (UZB) and a VFS test account are available. Demo runs locally on developer laptop, screen-shared. Goal: end-to-end booking on the test account (real submit OK; account will be cancelled afterward).
+
+### Root cause of "blocking" (current hypothesis)
+Symptom is redirect to `/page-not-found` on `goto`. This is **VFS's standard response when the visiting IP is not in the source country** — not bot detection. Bot has only been tested without a UZ-targeted residential exit. Fix the geo-mismatch first before any fingerprint hardening.
+
+### Proxy setup — IPRoyal residential with UZ country pin
+
+Credentials live in `backend/.env`. Required vars (already supported by `backend/src/config/env.ts:27-31`):
+
+```
+PROXY_HOST=geo.iproyal.com
+PROXY_PORT=12321
+PROXY_USERNAME=<iproyal_username>_country-uz_session-vfsdemo
+PROXY_PASSWORD=<iproyal_password>
+```
+
+The `_country-uz_session-vfsdemo` suffix on the username pins the exit to Uzbekistan with a sticky session (~30 min on same IP). Match the exact separator (`-` vs `_`) shown in IPRoyal's dashboard.
+
+### Verification commands (run before touching code)
+
+**1. Confirm UZ country tag in username:**
+```powershell
+cd backend
+node -e "require('dotenv').config(); const u=process.env.PROXY_USERNAME; console.log('Username has country-uz tag:', /country[-_]uz/i.test(u||'')); console.log('Host:', process.env.PROXY_HOST, 'Port:', process.env.PROXY_PORT);"
+```
+
+**2. Confirm proxy actually exits in Uzbekistan:**
+```powershell
+cd backend
+node -e "require('dotenv').config(); const{HttpsProxyAgent}=require('https-proxy-agent'); const axios=require('axios'); const u=encodeURIComponent(process.env.PROXY_USERNAME); const p=encodeURIComponent(process.env.PROXY_PASSWORD); const url=`http://${u}:${p}@${process.env.PROXY_HOST}:${process.env.PROXY_PORT}`; axios.get('https://ipinfo.io', {httpsAgent: new HttpsProxyAgent(url), proxy:false}).then(r=>console.log(r.data)).catch(e=>console.log('ERR:', e.message));"
+```
+
+Expected: `country: "UZ"`, city in Uzbekistan.
+
+**3. Confirm VFS renders normally through the UZ proxy** — install FoxyProxy in real Chrome, route through IPRoyal UZ proxy, open `https://visa.vfsglobal.com/uzb/en/ltv/login` and `https://visa.vfsglobal.com/uzb/en/tjk/login`. Should see the login form, not page-not-found.
+
+### Plan once UZ proxy verified
+
+1. Wire UZ proxy as the default in `backend/src/modules/engine/browser.factory.ts` and `backend/src/modules/monitor/session.warmer.ts` (already reads from env / DB pool).
+2. Align fingerprint timezone to `Asia/Tashkent` and locale to `uz-UZ` / `ru-RU` in `browser.factory.ts:78` (currently hardcoded to `Europe/London` / `en-US`).
+3. Add diagnostics: on block, dump final URL, response headers (`x-dd-b`, `cf-mitigated`), screenshot, first 2KB of HTML — so we know *which* vendor flagged us if it ever happens again.
+4. Run end-to-end test on UZB test account against test profile data.
+5. Build a "demo dry-run" mode that runs the full flow up to final submit and screenshots the review screen — insurance if no real slot is available during the demo.
+
+### Constraints / decisions
+- Manual cookie injection path (already built — `injectManualCookies` in `monitor.service.ts:65`) is **not acceptable** — bot must work end-to-end on its own.
+- Do not touch the proxy/account-pool architecture before Sunday. Single sticky UZ session for the demo run is enough.
+- Do not introduce `playwright-extra` or rewrite the stealth layer this week. Surgical fixes only.
+- BrightData is available as fallback if IPRoyal UZ pool is unstable (KYC may delay activation).
