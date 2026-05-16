@@ -58,6 +58,11 @@ function sourceCode(sourceCountry?: string): string {
   return map[(sourceCountry ?? 'uzbekistan').toLowerCase()] ?? 'uzb';
 }
 
+function extractSourceDestFromUrl(url: string): { source: string; dest: string } {
+  const match = url.match(/\/([a-z]{3})\/en\/([a-z]{3})\//i);
+  return match ? { source: match[1].toLowerCase(), dest: match[2].toLowerCase() } : { source: 'uzb', dest: 'lva' };
+}
+
 function parseSlotDateTime(job: BookingJobPayload): Date | undefined {
   if (!job.slot.date) return undefined;
   const raw = job.slot.time ? `${job.slot.date} ${job.slot.time}` : job.slot.date;
@@ -143,7 +148,12 @@ async function clickAndSettle(page: Page, locator: ReturnType<Page['locator']>):
 async function navigateFromDashboardToCalendar(page: Page, visaType: string): Promise<void> {
   const sel = getSelectors();
 
-  if (!page.url().toLowerCase().includes('/dashboard')) return;
+  if (!page.url().toLowerCase().includes('/dashboard')) {
+    const sourceDest = extractSourceDestFromUrl(page.url());
+    const dashboardUrl = `https://visa.vfsglobal.com/${sourceDest.source}/en/${sourceDest.dest}/dashboard`;
+    await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+  }
 
   try {
     const startBooking = page.locator('button:has-text("Start New Booking")').first();
