@@ -1,0 +1,201 @@
+'use client';
+
+import { useMemo } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake } from 'lucide-react';
+import { DashboardShell } from '@/components/layout/DashboardShell';
+import { api } from '@/lib/api';
+import { cn } from '@/lib/utils';
+
+interface PoolItem {
+  id: string;
+  email: string;
+  status: 'ACTIVE' | 'BLOCKED' | 'COOLDOWN';
+  cookieFresh: boolean;
+  lastWarmedAt: string | null;
+  tabUrl: string | null;
+  lastUsedAt: string | null;
+  cooldownUntil: string | null;
+  profileCount: number;
+  loginUrl: string;
+}
+
+interface PoolSummary {
+  total: number;
+  active: number;
+  fresh: number;
+  stale: number;
+  blocked: number;
+  cooldown: number;
+}
+
+interface PoolResponse {
+  summary: PoolSummary;
+  items: PoolItem[];
+}
+
+export default function AccountPoolPage() {
+  const qc = useQueryClient();
+
+  const poolQuery = useQuery<PoolResponse>({
+    queryKey: ['account-pool'],
+    queryFn: () => api.get<PoolResponse>('/accounts/warmup-status').then((r) => r.data),
+    refetchInterval: 5000,
+  });
+
+  const blockMutation = useMutation({
+    mutationFn: (id: string) => api.put(`/accounts/${id}/block`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['account-pool'] }),
+  });
+
+  const cooldownMutation = useMutation({
+    mutationFn: ({ id, minutes }: { id: string; minutes: number }) => api.put(`/accounts/${id}/cooldown`, { minutes }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['account-pool'] }),
+  });
+
+  const summary = poolQuery.data?.summary ?? { total: 0, active: 0, fresh: 0, stale: 0, blocked: 0, cooldown: 0 };
+  const items = poolQuery.data?.items ?? [];
+
+  const staleAccounts = useMemo(() => items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh), [items]);
+
+  const openLoginTab = (loginUrl: string) => {
+    window.open(loginUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const openAllStale = () => {
+    for (const acc of staleAccounts) {
+      window.open(acc.loginUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  return (
+    <DashboardShell
+      title="Account pool"
+      description="Operator-managed VFS account pool. The extension keeps each account's session warm so the booking worker can dispatch bookings to your Chrome."
+    >
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
+        <Stat label="Total" value={summary.total} />
+        <Stat label="Active" value={summary.active} tone="ok" />
+        <Stat label="Cookies fresh" value={summary.fresh} tone="ok" icon={<CheckCircle2 className="h-4 w-4" />} />
+        <Stat label="Stale" value={summary.stale} tone="warn" icon={<AlertTriangle className="h-4 w-4" />} />
+        <Stat label="Cooldown" value={summary.cooldown} icon={<Snowflake className="h-4 w-4" />} />
+        <Stat label="Blocked" value={summary.blocked} tone="bad" icon={<ShieldOff className="h-4 w-4" />} />
+      </div>
+
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className="btn-primary h-10 gap-2"
+          onClick={openAllStale}
+          disabled={staleAccounts.length === 0}
+        >
+          <ExternalLink className="h-4 w-4" />
+          Open {staleAccounts.length} stale login tab{staleAccounts.length === 1 ? '' : 's'}
+        </button>
+        <span className="text-sm text-muted-foreground">
+          Click to open login pages for stale accounts. The extension will sync cookies once you sign in.
+        </span>
+      </div>
+
+      <div className="card mt-6 overflow-hidden bg-card/70 p-0">
+        <table className="w-full text-sm">
+          <thead className="bg-zinc-950 text-zinc-400">
+            <tr>
+              <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Email</th>
+              <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Status</th>
+              <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Cookies</th>
+              <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Last warmed</th>
+              <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Profiles</th>
+              <th className="px-4 py-3 text-right text-[10px] font-black uppercase tracking-widest">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length === 0 && (
+              <tr>
+                <td className="px-4 py-8 text-center text-muted-foreground" colSpan={6}>
+                  No VFS accounts in the pool yet. Add one via POST /api/accounts or use the Account Setup flow.
+                </td>
+              </tr>
+            )}
+            {items.map((a) => (
+              <tr key={a.id} className="border-t border-border/60">
+                <td className="px-4 py-3 font-bold">{a.email}</td>
+                <td className="px-4 py-3">
+                  <StatusBadge status={a.status} />
+                </td>
+                <td className="px-4 py-3">
+                  {a.cookieFresh ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-green-500/15 px-2.5 py-1 text-xs font-bold text-green-500">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> fresh
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-bold text-amber-500">
+                      <Clock className="h-3.5 w-3.5" /> stale
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-muted-foreground">
+                  {a.lastWarmedAt ? new Date(a.lastWarmedAt).toLocaleString() : 'never'}
+                </td>
+                <td className="px-4 py-3">{a.profileCount}</td>
+                <td className="px-4 py-3 text-right">
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 gap-1.5 text-xs"
+                      onClick={() => openLoginTab(a.loginUrl)}
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      Open login
+                    </button>
+                    {a.status === 'ACTIVE' && (
+                      <button
+                        type="button"
+                        className="btn-secondary h-8 gap-1.5 text-xs"
+                        onClick={() => cooldownMutation.mutate({ id: a.id, minutes: 60 })}
+                      >
+                        <Snowflake className="h-3.5 w-3.5" />
+                        Cooldown 1h
+                      </button>
+                    )}
+                    {a.status !== 'BLOCKED' && (
+                      <button
+                        type="button"
+                        className="btn-danger h-8 gap-1.5 text-xs"
+                        onClick={() => blockMutation.mutate(a.id)}
+                      >
+                        <ShieldOff className="h-3.5 w-3.5" />
+                        Block
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </DashboardShell>
+  );
+}
+
+function Stat({ label, value, tone, icon }: { label: string; value: number; tone?: 'ok' | 'warn' | 'bad'; icon?: React.ReactNode }) {
+  return (
+    <article className={cn('card bg-card/70 p-4', tone === 'ok' && 'ring-1 ring-green-500/30', tone === 'warn' && 'ring-1 ring-amber-500/30', tone === 'bad' && 'ring-1 ring-red-500/30')}>
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{label}</p>
+        {icon}
+      </div>
+      <p className="mt-2 text-2xl font-black">{value}</p>
+    </article>
+  );
+}
+
+function StatusBadge({ status }: { status: PoolItem['status'] }) {
+  const map = {
+    ACTIVE: 'bg-green-500/15 text-green-500',
+    BLOCKED: 'bg-red-500/15 text-red-500',
+    COOLDOWN: 'bg-blue-500/15 text-blue-500',
+  } as const;
+  return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', map[status])}>{status}</span>;
+}

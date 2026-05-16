@@ -167,6 +167,64 @@ accountsRouter.put('/:id/cooldown', async (req: Request, res: Response, next: Ne
   }
 });
 
+// ── GET /api/accounts/warmup-status ──────────────────────────────────────────
+/**
+ * Operator-facing pool warmup view. Returns each account with cookie freshness
+ * info so the dashboard can show "Open Login Tab" prompts for stale accounts.
+ *
+ * - cookieFresh: lastWarmedAt within 12h
+ * - loginUrl: the URL operator should open in Chrome for this account
+ */
+accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const STALE_MS = 12 * 60 * 60 * 1000;
+    const now = Date.now();
+    const sourceCode = (req.query.source as string | undefined) ?? 'uzb';
+    const destCode = (req.query.destination as string | undefined) ?? 'lva';
+
+    const accounts = await prisma.vfsAccount.findMany({
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        email: true,
+        status: true,
+        lastWarmedAt: true,
+        cookieStore: true,
+        tabUrl: true,
+        lastUsedAt: true,
+        cooldownUntil: true,
+        profileIds: true,
+      },
+    });
+
+    const items = accounts.map((a) => ({
+      id: a.id,
+      email: a.email,
+      status: a.status,
+      cookieFresh: !!a.lastWarmedAt && now - a.lastWarmedAt.getTime() < STALE_MS,
+      lastWarmedAt: a.lastWarmedAt,
+      tabUrl: a.tabUrl,
+      lastUsedAt: a.lastUsedAt,
+      cooldownUntil: a.cooldownUntil,
+      profileCount: a.profileIds.length,
+      loginUrl: `https://visa.vfsglobal.com/${sourceCode}/en/${destCode}/login`,
+    }));
+
+    const summary = {
+      total: items.length,
+      active: items.filter((i) => i.status === 'ACTIVE').length,
+      fresh: items.filter((i) => i.cookieFresh).length,
+      stale: items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh).length,
+      blocked: items.filter((i) => i.status === 'BLOCKED').length,
+      cooldown: items.filter((i) => i.status === 'COOLDOWN').length,
+    };
+
+    res.json({ summary, items });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── POST /api/accounts/register ──────────────────────────────────────────────
 /**
  * Triggers fully-automated VFS Global account creation:
