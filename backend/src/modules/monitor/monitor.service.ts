@@ -164,6 +164,12 @@ export function injectManualCookies(profileId: string, destination: string, cook
   const destCode = getDestinationCode(destination);
   const storeKey = getCookieStoreKey(profileId, destCode);
 
+  if (env.CDP_ENDPOINT) {
+    logEvent('warn', EventType.MONITOR_STARTED,
+      '[Warmer] CDP mode active - manual cookie injection is a no-op; operator must log in via Chrome instead');
+    return;
+  }
+
   // Accept either JSON array from EditThisCookie/Cookie-Editor or raw "name=value; ..." header string
   const cookies = parseCookieString(cookieStr);
   injectedCookiesStore.set(storeKey, { cookies, setAt: new Date(), userAgent });
@@ -256,6 +262,7 @@ function buildAvailabilityUrl(source: string, dest: string): string {
 }
 
 function getScrapingProviderMode(): 'local' | 'brightdata' | 'scraperapi' {
+  if (env.CDP_ENDPOINT) return 'local';
   if (process.env.BRIGHTDATA_WS) return 'brightdata';
   if (process.env.SCRAPER_API) return 'scraperapi';
   return 'local';
@@ -306,6 +313,11 @@ function makeHttpsAgent(proxyConfig: any): https.Agent {
  * we fall back to a full stealth browser warming cycle.
  */
 async function warmSession(id: string, sourceCode: string, destinationCode: string, visaType: string, credentials?: VfsCredentials): Promise<string[] | undefined> {
+  if (env.CDP_ENDPOINT) {
+    logEvent('info', EventType.MONITOR_STARTED, `[Warmer] CDP mode active - using operator Chrome session for ${destinationCode}`);
+    return [];
+  }
+
   const state = getMonitor(id);
   if (state?.cookiesValid && state.cookies && state.cookiesSetAt && (Date.now() - state.cookiesSetAt.getTime() < 28800000)) {
     return state.cookies;
@@ -468,6 +480,10 @@ export async function startMonitor(id: string): Promise<void> {
         config.visaType,
         cookies,
         config.userAgent,
+        {
+          profileId: config.profileIds[0] ?? '*',
+          loginUser: creds?.email,
+        },
       );
 
       if (browserResult.status >= 400) {

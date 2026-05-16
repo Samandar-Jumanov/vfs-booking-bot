@@ -30,6 +30,7 @@ const envSchema = z.object({
   PROXY_PORT: z.coerce.number().optional(),
   PROXY_USERNAME: z.string().optional(),
   PROXY_PASSWORD: z.string().optional(),
+  CDP_ENDPOINT: z.string().optional(),
   BRIGHTDATA_WS: z.string().optional(),
   SCRAPER_API: z.string().optional(),
   SCRAPER_API_PREMIUM: z.string().transform((v) => v !== 'false').default('true'),

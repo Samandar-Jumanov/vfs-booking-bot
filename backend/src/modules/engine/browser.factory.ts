@@ -128,6 +128,16 @@ export async function createBrowserContext(
 
   let context: BrowserContext;
 
+  if (env.CDP_ENDPOINT) {
+    logger.info('[browser.factory] Attaching to operator Chrome at ' + env.CDP_ENDPOINT);
+    const browser = await chromium.connectOverCDP(env.CDP_ENDPOINT, { timeout: 30000 });
+    const contexts = browser.contexts();
+    if (contexts.length === 0) {
+      throw new Error('CDP_ENDPOINT chrome has no contexts - operator must open a tab first');
+    }
+    return contexts[0];
+  }
+
   if (env.BRIGHTDATA_WS) {
     logger.info('[browser.factory] Connecting to Bright Data Scraping Browser');
     const browser = await chromium.connectOverCDP(env.BRIGHTDATA_WS, {

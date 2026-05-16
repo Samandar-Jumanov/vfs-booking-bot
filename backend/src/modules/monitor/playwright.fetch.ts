@@ -13,7 +13,9 @@
  * the page. We reuse the page across polls; only re-create on cookie change
  * or after errors.
  */
-import { chromium, BrowserContext, Page } from 'rebrowser-playwright';
+import { chromium, Browser, BrowserContext, Page } from 'rebrowser-playwright';
+import { prisma } from '@config/database';
+import { env } from '@config/env';
 import { getBrowserProfileDir, resolveChromeExecutablePath } from '@modules/engine/browser.factory';
 import { fetchViaScraperApi } from '@modules/proxy/scraperapi.provider';
 
@@ -28,6 +30,9 @@ interface CtxBundle {
 }
 
 const contexts = new Map<string, CtxBundle>();
+const cdpPageCache = new Map<string, Page>();
+const profileEmailCache = new Map<string, string>();
+let cdpBrowserPromise: Promise<Browser> | undefined;
 
 const MAX_CONTEXT_AGE_MS = 30 * 60 * 1000; // recycle context every 30 min
 
@@ -59,6 +64,88 @@ function parseSetCookieArrayToPlaywright(setCookieArr: string[], domain = '.vfsg
       return cookie;
     })
     .filter(Boolean);
+}
+
+function getCdpBrowser(): Promise<Browser> {
+  if (!env.CDP_ENDPOINT) {
+    throw new Error('CDP_ENDPOINT is not configured');
+  }
+  cdpBrowserPromise ??= chromium.connectOverCDP(env.CDP_ENDPOINT, { timeout: 30000 });
+  return cdpBrowserPromise;
+}
+
+function tabMatchesRoute(url: string, sourceCode: string, destCode: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === 'visa.vfsglobal.com'
+      && parsed.pathname.toLowerCase().startsWith(`/${sourceCode.toLowerCase()}/en/${destCode.toLowerCase()}/`);
+  } catch {
+    return false;
+  }
+}
+
+async function getProfileEmail(profileId: string): Promise<string | undefined> {
+  const cached = profileEmailCache.get(profileId);
+  if (cached) return cached;
+  if (profileId === '*') return undefined;
+
+  try {
+    const profile = await prisma.profile.findUnique({
+      where: { id: profileId },
+      select: { email: true },
+    });
+    if (profile?.email) {
+      profileEmailCache.set(profileId, profile.email);
+      return profile.email;
+    }
+  } catch {
+    // If the DB is unavailable, tab matching can still fall back to route-only.
+  }
+
+  return undefined;
+}
+
+export async function findPageForProfile(profileId: string, sourceCode: string, destCode: string): Promise<Page | null> {
+  const cacheKey = `${profileId}:${sourceCode}:${destCode}`.toLowerCase();
+  const cached = cdpPageCache.get(cacheKey);
+  if (cached && !cached.isClosed() && tabMatchesRoute(cached.url(), sourceCode, destCode)) {
+    return cached;
+  }
+  cdpPageCache.delete(cacheKey);
+
+  const browser = await getCdpBrowser();
+  const context = browser.contexts()[0];
+  if (!context) return null;
+
+  const email = await getProfileEmail(profileId);
+  const routeMatches: Page[] = [];
+  for (const page of context.pages()) {
+    if (page.isClosed() || !tabMatchesRoute(page.url(), sourceCode, destCode)) continue;
+    routeMatches.push(page);
+
+    if (email) {
+      const title = await page.title().catch(() => '');
+      if (title.toLowerCase().includes(email.toLowerCase())) {
+        cdpPageCache.set(cacheKey, page);
+        return page;
+      }
+    }
+  }
+
+  if (!email && routeMatches.length === 1) {
+    cdpPageCache.set(cacheKey, routeMatches[0]);
+    return routeMatches[0];
+  }
+
+  if (email && routeMatches.length === 1) {
+    const title = await routeMatches[0].title().catch(() => '');
+    if (!title || routeMatches.length === 1) {
+      cdpPageCache.set(cacheKey, routeMatches[0]);
+      return routeMatches[0];
+    }
+  }
+
+  return null;
 }
 
 async function ensureContext(destinationCode: string, sourceCode: string, cookies: string[], userAgent?: string): Promise<CtxBundle> {
@@ -231,8 +318,55 @@ export async function fetchSlotsViaBrowser(
   visaCategoryCode: string,
   cookies: string[],
   userAgent?: string,
-  opts: { vacCode?: string; loginUser?: string; roleName?: string } = {},
+  opts: { vacCode?: string; loginUser?: string; roleName?: string; profileId?: string } = {},
 ): Promise<{ status: number; data: SlotCheckResponse | null; rawText: string }> {
+  if (env.CDP_ENDPOINT) {
+    const profileId = opts.profileId || opts.loginUser || '*';
+    if (opts.loginUser) profileEmailCache.set(profileId, opts.loginUser);
+
+    const page = await findPageForProfile(profileId, sourceCode, destinationCode);
+    if (!page) {
+      const expectedUrl = `https://visa.vfsglobal.com/${sourceCode}/en/${destinationCode}/login`;
+      const email = await getProfileEmail(profileId);
+      throw new Error(
+        `No VFS tab found for profile=${profileId} destination=${destinationCode} - operator must open ${expectedUrl} in the attached Chrome and log in as ${email ?? 'the matching VFS account'}`,
+      );
+    }
+
+    const body: SlotCheckRequest = {
+      countryCode: sourceCode,
+      missionCode: destinationCode,
+      vacCode: opts.vacCode || 'TAS',
+      visaCategoryCode,
+      roleName: opts.roleName || 'Individual',
+      loginUser: opts.loginUser || '',
+      payCode: '',
+    };
+
+    const result = await page.evaluate(async ({ url, body }) => {
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          credentials: 'include',
+          mode: 'cors',
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Accept': 'application/json, text/plain, */*',
+          },
+          body: JSON.stringify(body),
+        });
+        const text = await r.text();
+        let parsed: any = null;
+        try { parsed = JSON.parse(text); } catch {}
+        return { status: r.status, text, parsed };
+      } catch (e: any) {
+        return { status: -1, text: String(e?.message || e), parsed: null };
+      }
+    }, { url: SLOT_API, body });
+
+    return { status: result.status, data: result.parsed, rawText: result.text };
+  }
+
   if (!process.env.BRIGHTDATA_WS && process.env.SCRAPER_API) {
     return fetchSlotsViaScraperApi(sourceCode, destinationCode, visaCategoryCode, cookies, opts);
   }
@@ -320,6 +454,13 @@ export function getReusableContextFor(destinationCode: string): BrowserContext |
  * when cookies are explicitly invalidated.
  */
 export async function disposeContextFor(destinationCode: string): Promise<void> {
+  if (env.CDP_ENDPOINT) {
+    for (const key of Array.from(cdpPageCache.keys())) {
+      if (key.endsWith(`:${destinationCode.toLowerCase()}`)) cdpPageCache.delete(key);
+    }
+    return;
+  }
+
   const existing = contexts.get(destinationCode);
   if (!existing) return;
   try { await existing.context.close(); } catch {}
