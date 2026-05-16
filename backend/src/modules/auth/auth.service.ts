@@ -1,8 +1,11 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { Role } from '@prisma/client';
 import { prisma } from '@config/database';
-import { signAccessToken, signRefreshToken, verifyRefreshToken } from '@utils/jwt';
+import { signAccessToken, signExtensionToken, signRefreshToken, verifyRefreshToken } from '@utils/jwt';
 import { AppError } from '@middleware/errorHandler';
+
+const setupCodes = new Map<string, { userId: string; email: string; role: Role; expiresAt: number }>();
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -65,4 +68,27 @@ export async function logout(userId: string) {
     where: { id: userId },
     data: { refreshTokenHash: null },
   });
+}
+
+export async function mintExtensionSetup(user: { id: string; email: string; role: Role }) {
+  const setupCode = crypto.randomInt(100000, 999999).toString();
+  const expiresAt = Date.now() + 10 * 60 * 1000;
+  setupCodes.set(setupCode, { userId: user.id, email: user.email, role: user.role, expiresAt });
+  return {
+    setupCode,
+    expiresAt: new Date(expiresAt).toISOString(),
+    extensionToken: signExtensionToken({ sub: user.id, email: user.email, role: user.role }),
+  };
+}
+
+export async function exchangeExtensionSetupCode(setupCode: string) {
+  const entry = setupCodes.get(setupCode);
+  setupCodes.delete(setupCode);
+  if (!entry || entry.expiresAt < Date.now()) {
+    throw new AppError(401, 'Invalid or expired extension setup code', 'EXTENSION_SETUP_INVALID');
+  }
+  return {
+    extensionToken: signExtensionToken({ sub: entry.userId, email: entry.email, role: entry.role }),
+    customerEmail: entry.email,
+  };
 }

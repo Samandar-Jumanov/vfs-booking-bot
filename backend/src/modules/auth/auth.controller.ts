@@ -52,3 +52,26 @@ export async function logoutHandler(req: Request, res: Response, next: NextFunct
 export function meHandler(req: Request, res: Response) {
   res.json({ user: req.user });
 }
+
+export async function extensionTokenHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const result = await authService.mintExtensionSetup(req.user);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function extensionTokenExchangeHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const setupCode = String(req.body?.setupCode ?? '');
+    const result = await authService.exchangeExtensionSetupCode(setupCode);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}

@@ -12,7 +12,6 @@ import { createApp } from './app';
 import { initWebSocket } from '@modules/websocket/ws.server';
 import { startBookingWorker, stopBookingWorker } from '@modules/booking/booking.worker';
 import { initTelegramBot } from '@modules/notifications/telegram.bot';
-import { autoStartMonitors } from '@modules/monitor/monitor.service';
 import { startNotificationQueues, stopNotificationQueues } from '@modules/notifications/queues';
 
 
@@ -41,10 +40,16 @@ async function bootstrap() {
   // Interactive Telegram Bot
   initTelegramBot();
   
-  // Auto-Start active monitors from DB state
-  const { autoStartMonitors } = require('@modules/monitor/monitor.service');
-  await autoStartMonitors();
-  console.info('✅ Monitor Service auto-started');
+  // Auto-Start active monitors from DB state.
+  // Set MONITOR_AUTO_START=false in .env to skip — useful during dev so the
+  // backend doesn't burn proxy bandwidth on background polling between tests.
+  if (process.env.MONITOR_AUTO_START !== 'false') {
+    const { autoStartMonitors } = require('@modules/monitor/monitor.service');
+    await autoStartMonitors();
+    console.info('✅ Monitor Service auto-started');
+  } else {
+    console.info('⏸️  Monitor auto-start disabled (MONITOR_AUTO_START=false)');
+  }
 
   server.listen(env.PORT, () => {
     console.info(`✅ Server running on port ${env.PORT} [${env.NODE_ENV}]`);

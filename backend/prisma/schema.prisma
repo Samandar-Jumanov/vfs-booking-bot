@@ -1,6 +1,6 @@
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x", "debian-openssl-1.1.x"]
 }
 
 datasource db {
@@ -8,7 +8,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ─── Enums ────────────────────────────────────────────────────────────────────
+// --- Enums --------------------------------------------------------------------
 
 enum Role {
   ADMIN
@@ -58,7 +58,7 @@ enum Gender {
   OTHER
 }
 
-// ─── Models ───────────────────────────────────────────────────────────────────
+// --- Models -------------------------------------------------------------------
 
 model GlobalSettings {
   id             String   @id @default("singleton")
@@ -182,4 +182,23 @@ model PushSubscription {
   createdAt  DateTime @default(now())
 
   @@map("push_subscriptions")
+}
+
+enum AccountStatus {
+  ACTIVE
+  BLOCKED
+  COOLDOWN
+}
+
+model VfsAccount {
+  id                String        @id @default(uuid())
+  email             String        @unique
+  encryptedPassword String
+  phone             String?
+  status            AccountStatus @default(ACTIVE)
+  lastUsedAt        DateTime?
+  cooldownUntil     DateTime?
+  profileIds        String[]
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 }

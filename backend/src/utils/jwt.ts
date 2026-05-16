@@ -14,6 +14,12 @@ export function signRefreshToken(payload: Omit<JwtPayload, 'type'>): string {
   });
 }
 
+export function signExtensionToken(payload: Omit<JwtPayload, 'type'>): string {
+  return jwt.sign({ ...payload, type: 'extension' }, env.JWT_ACCESS_SECRET, {
+    expiresIn: '30d',
+  });
+}
+
 export function verifyAccessToken(token: string): JwtPayload {
   return jwt.verify(token, env.JWT_ACCESS_SECRET) as JwtPayload;
 }

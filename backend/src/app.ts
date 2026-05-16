@@ -15,9 +15,15 @@ import { bookingRouter } from '@modules/booking/booking.router';
 import { logsRouter } from '@modules/logs/logs.router';
 import { settingsRouter } from '@modules/settings/settings.router';
 import { proxyRouter } from '@modules/proxy/proxy.router';
+import { accountsRouter } from '@modules/accounts/accounts.router';
+import { extensionRouter } from '@modules/extension/extension.router';
 
 export function createApp() {
   const app = express();
+
+  // Trust the first proxy hop (nginx) so X-Forwarded-For yields the real client
+  // IP for express-rate-limit instead of nginx's internal address.
+  app.set('trust proxy', 1);
 
   // ── Security / parsing middleware ──────────────────────────────────────────
   app.use(helmet());
@@ -44,6 +50,8 @@ export function createApp() {
   app.use('/api/logs', logsRouter);
   app.use('/api/settings', settingsRouter);
   app.use('/api/proxy', proxyRouter);
+  app.use('/api/accounts', accountsRouter);
+  app.use('/api/extension', extensionRouter);
 
   // ── Error handler (must be last) ─────────────────────────────────────────
   app.use(errorHandler);

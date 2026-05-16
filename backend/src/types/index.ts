@@ -6,7 +6,7 @@ export interface JwtPayload {
   sub: string;      // user id
   email: string;
   role: Role;
-  type: 'access' | 'refresh';
+  type: 'access' | 'refresh' | 'extension';
 }
 
 export interface AuthUser {
