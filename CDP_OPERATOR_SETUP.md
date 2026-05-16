@@ -34,3 +34,16 @@ When you start a monitor for `profileId=X destination=lva`, the bot enumerates t
 - Cookies expire every 8h. When you see Telegram `Cookies expiring` alert, refresh the corresponding tab in Chrome and re-login.
 - Do NOT close Chrome. If you do, all monitors fail and you must re-login to every tab.
 - If Chrome crashes, restart it with the same command above. Tabs persist via `--user-data-dir`.
+
+## OTP relay for registration dry-runs
+
+Until the dashboard textbox is built, paste an SMS OTP into Redis through the API:
+
+```
+curl -X POST http://localhost:3001/api/profiles/<profileId>/submit-otp ^
+  -H "Authorization: Bearer <accessToken>" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"otp\":\"123456\"}"
+```
+
+TODO: add a small OTP textbox on `/profiles` that calls `POST /api/profiles/:id/submit-otp`.

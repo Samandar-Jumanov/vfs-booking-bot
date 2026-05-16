@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as profilesService from './profiles.service';
 import { bulkImportProfiles } from './bulkImport';
+import { getRedis } from '@config/redis';
 
 export async function listProfiles(req: Request, res: Response, next: NextFunction) {
   try {
@@ -63,6 +64,17 @@ export async function bulkUpload(req: Request, res: Response, next: NextFunction
     const succeeded = results.filter((r) => r.success).length;
     const failed = results.filter((r) => !r.success).length;
     res.json({ succeeded, failed, results });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function submitOtp(req: Request, res: Response, next: NextFunction) {
+  try {
+    const profile = await profilesService.getProfileById(req.params.id);
+    const otp = String(req.body.otp);
+    await getRedis().set(`otp:${profile.email}`, otp, 'EX', 5 * 60);
+    res.json({ ok: true, key: `otp:${profile.email}`, expiresInSeconds: 300 });
   } catch (err) {
     next(err);
   }

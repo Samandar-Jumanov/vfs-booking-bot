@@ -1,17 +1,22 @@
 import os from 'os';
 import axios from 'axios';
 import https from 'https';
+import { randomBytes } from 'crypto';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { prisma } from '@config/database';
 import { env } from '@config/env';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
-import { decrypt } from '@utils/crypto';
+import { decrypt, encrypt } from '@utils/crypto';
 import { warmSessionWithBrowser, keepSessionAlive, VfsCredentials } from './session.warmer';
-import { fetchSlotsViaBrowser, disposeContextFor } from './playwright.fetch';
+import { fetchSlotsViaBrowser, disposeContextFor, findPageForProfile } from './playwright.fetch';
+import { autoReLogin } from './auto.login';
+import { autoRegister } from './auto.register';
+import { startKeepAliveWatcher } from './session.keepalive';
 import { enqueueBooking } from '@modules/booking/booking.service';
 import { emitToAll } from '@modules/websocket/ws.server';
 import { dispatchNotification } from '@modules/notifications/notification.service';
+import { sendTelegram } from '@modules/notifications/telegram.bot';
 import { getProxy } from '@modules/proxy/proxy.service';
 import { setSetting } from '@modules/settings/settings.service';
 import { getRedis } from '@config/redis';
@@ -303,6 +308,71 @@ async function getProxyConfig(id: string) {
     return null;
 }
 
+function splitFullName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  return {
+    firstName: parts[0] || 'TEST_FIRSTNAME',
+    lastName: parts.slice(1).join(' ') || 'TEST_LASTNAME',
+  };
+}
+
+async function prepareCdpSession(profileId: string, sourceCode: string, destinationCode: string, credentials?: VfsCredentials): Promise<void> {
+  if (!env.CDP_ENDPOINT) return;
+
+  const page = await findPageForProfile(profileId, sourceCode, destinationCode);
+  if (!page) {
+    logEvent('warn', EventType.MONITOR_STARTED, `[Warmer] CDP tab not found for ${profileId}/${destinationCode}`);
+    return;
+  }
+
+  startKeepAliveWatcher(page, profileId);
+  const currentUrl = page.url().toLowerCase();
+
+  if (currentUrl.includes('/login')) {
+    if (!credentials) {
+      logEvent('warn', EventType.SESSION_EXPIRED, `[AutoLogin] No VFS credentials available for ${profileId}`);
+      return;
+    }
+    const ok = await autoReLogin(page, credentials);
+    if (ok) {
+      emitToAll('SESSION_REFRESHED', { profileId, destination: destinationCode, timestamp: Date.now() });
+      await sendTelegram(`SESSION_REFRESHED - ${profileId}/${destinationCode}`).catch(() => {});
+    }
+    return;
+  }
+
+  const profile = profileId === '*' ? null : await prisma.profile.findUnique({
+    where: { id: profileId },
+    select: { id: true, fullName: true, email: true, phone: true, dobEnc: true, passportNumberEnc: true, vfsPasswordEnc: true },
+  });
+
+  if (!profile) return;
+  if (!currentUrl.includes('/register') && profile.vfsPasswordEnc) return;
+
+  const generatedPassword = profile.vfsPasswordEnc ? decrypt(profile.vfsPasswordEnc) : `VfsDemo-${randomBytes(9).toString('base64url')}1!`;
+  if (!profile.vfsPasswordEnc) {
+    await prisma.profile.update({
+      where: { id: profile.id },
+      data: { vfsPasswordEnc: encrypt(generatedPassword) },
+    });
+  }
+
+  const names = splitFullName(profile.fullName);
+  const result = await autoRegister(page, {
+    email: profile.email || 'samandarjumanov055@gmail.com',
+    phone: profile.phone || '+998904044431',
+    password: generatedPassword,
+    firstName: names.firstName || 'TEST_FIRSTNAME',
+    lastName: names.lastName || 'TEST_LASTNAME',
+    dob: '1990-01-15',
+    passportNumber: 'AA0000000',
+  });
+
+  if (result.ok) {
+    logEvent('info', EventType.MONITOR_STARTED, `[AutoRegister] VFS account ready for ${result.vfsAccountEmail ?? profile.email}`);
+  }
+}
+
 function makeHttpsAgent(proxyConfig: any): https.Agent {
     if (proxyConfig?.url) return new HttpsProxyAgent(proxyConfig.url) as any;
     return new https.Agent({ rejectUnauthorized: false });
@@ -315,6 +385,9 @@ function makeHttpsAgent(proxyConfig: any): https.Agent {
 async function warmSession(id: string, sourceCode: string, destinationCode: string, visaType: string, credentials?: VfsCredentials): Promise<string[] | undefined> {
   if (env.CDP_ENDPOINT) {
     logEvent('info', EventType.MONITOR_STARTED, `[Warmer] CDP mode active - using operator Chrome session for ${destinationCode}`);
+    const state = getMonitor(id);
+    const profileId = state?.profileIds[0] ?? '*';
+    await prepareCdpSession(profileId, sourceCode, destinationCode, credentials);
     return [];
   }
 
@@ -474,7 +547,7 @@ export async function startMonitor(id: string): Promise<void> {
       // Fetch slots through a real Chromium context (bypasses Cloudflare WAF
       // that rejects raw axios). The context is reused across polls and only
       // re-created when cookies change or after 30 min.
-      const browserResult = await fetchSlotsViaBrowser(
+      let browserResult = await fetchSlotsViaBrowser(
         sourceCode,
         destCode,
         config.visaType,
@@ -485,6 +558,35 @@ export async function startMonitor(id: string): Promise<void> {
           loginUser: creds?.email,
         },
       );
+
+      if (env.CDP_ENDPOINT && browserResult.status === 401 && creds) {
+        const profileId = config.profileIds[0] ?? '*';
+        const page = await findPageForProfile(profileId, sourceCode, destCode);
+        const refreshed = page ? await autoReLogin(page, creds) : false;
+        if (refreshed) {
+          emitToAll('SESSION_REFRESHED', { profileId, destination: destCode, timestamp: Date.now() });
+          await sendTelegram(`SESSION_REFRESHED - ${profileId}/${destCode}`).catch(() => {});
+          browserResult = await fetchSlotsViaBrowser(
+            sourceCode,
+            destCode,
+            config.visaType,
+            cookies,
+            config.userAgent,
+            {
+              profileId,
+              loginUser: creds.email,
+            },
+          );
+        } else {
+          emitToAll('CAPTCHA_MANUAL_NEEDED', {
+            monitorId: id,
+            destination: config.destination,
+            reason: 'Auto re-login failed after HTTP 401',
+            timestamp: Date.now(),
+          });
+          await sendTelegram(`CAPTCHA_MANUAL_NEEDED - auto re-login failed for ${profileId}/${destCode}`).catch(() => {});
+        }
+      }
 
       if (browserResult.status >= 400) {
         const err: any = new Error(`Slot fetch HTTP ${browserResult.status}: ${browserResult.rawText.slice(0, 200)}`);

@@ -18,6 +18,7 @@ import { prisma } from '@config/database';
 import { env } from '@config/env';
 import { getBrowserProfileDir, resolveChromeExecutablePath } from '@modules/engine/browser.factory';
 import { fetchViaScraperApi } from '@modules/proxy/scraperapi.provider';
+import { startKeepAliveWatcher } from './session.keepalive';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 
@@ -109,6 +110,7 @@ export async function findPageForProfile(profileId: string, sourceCode: string, 
   const cacheKey = `${profileId}:${sourceCode}:${destCode}`.toLowerCase();
   const cached = cdpPageCache.get(cacheKey);
   if (cached && !cached.isClosed() && tabMatchesRoute(cached.url(), sourceCode, destCode)) {
+    startKeepAliveWatcher(cached, profileId);
     return cached;
   }
   cdpPageCache.delete(cacheKey);
@@ -127,6 +129,7 @@ export async function findPageForProfile(profileId: string, sourceCode: string, 
       const title = await page.title().catch(() => '');
       if (title.toLowerCase().includes(email.toLowerCase())) {
         cdpPageCache.set(cacheKey, page);
+        startKeepAliveWatcher(page, profileId);
         return page;
       }
     }
@@ -134,6 +137,7 @@ export async function findPageForProfile(profileId: string, sourceCode: string, 
 
   if (!email && routeMatches.length === 1) {
     cdpPageCache.set(cacheKey, routeMatches[0]);
+    startKeepAliveWatcher(routeMatches[0], profileId);
     return routeMatches[0];
   }
 
@@ -141,6 +145,7 @@ export async function findPageForProfile(profileId: string, sourceCode: string, 
     const title = await routeMatches[0].title().catch(() => '');
     if (!title || routeMatches.length === 1) {
       cdpPageCache.set(cacheKey, routeMatches[0]);
+      startKeepAliveWatcher(routeMatches[0], profileId);
       return routeMatches[0];
     }
   }

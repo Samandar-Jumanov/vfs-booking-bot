@@ -16,6 +16,10 @@ export const createProfileSchema = z.object({
 
 export const updateProfileSchema = createProfileSchema.partial();
 
+export const submitOtpSchema = z.object({
+  otp: z.string().regex(/^\d{4,8}$/, 'OTP must be 4-8 digits'),
+});
+
 export const profileIdSchema = z.object({
   id: z.string().cuid(),
 });
@@ -29,3 +33,4 @@ export const paginationSchema = z.object({
 
 export type CreateProfileDto = z.infer<typeof createProfileSchema>;
 export type UpdateProfileDto = z.infer<typeof updateProfileSchema>;
+export type SubmitOtpDto = z.infer<typeof submitOtpSchema>;

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '@middleware/auth.middleware';
 import { validate } from '@middleware/validate.middleware';
-import { createProfileSchema, updateProfileSchema } from './profiles.schema';
+import { createProfileSchema, submitOtpSchema, updateProfileSchema } from './profiles.schema';
 import {
   listProfiles,
   getProfile,
@@ -10,6 +10,7 @@ import {
   updateProfile,
   deleteProfile,
   bulkUpload,
+  submitOtp,
 } from './profiles.controller';
 
 const upload = multer({
@@ -32,6 +33,7 @@ profilesRouter.use(requireAuth);
 profilesRouter.get('/', listProfiles);
 profilesRouter.get('/:id', getProfile);
 profilesRouter.post('/', validate(createProfileSchema), createProfile);
+profilesRouter.post('/:id/submit-otp', validate(submitOtpSchema), submitOtp);
 profilesRouter.put('/:id', validate(updateProfileSchema), updateProfile);
 profilesRouter.delete('/:id', deleteProfile);
 profilesRouter.post('/bulk-upload', upload.single('file'), bulkUpload);
