@@ -198,7 +198,8 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
         const enabled = await getSetting<boolean>('notifications.telegram.enabled');
         if (enabled || env.TELEGRAM_BOT_TOKEN) {
           await sendTelegram(formatTelegramMessage(enriched), {
-            parse_mode: 'Markdown',
+            // Plain text is safer because error strings and profile data contain
+            // arbitrary characters that cannot be reliably escaped at runtime.
             ...alertButtons(enriched),
           });
         }

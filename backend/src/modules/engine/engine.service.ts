@@ -128,6 +128,82 @@ async function clickAndMaybeWaitForResponse(page: Page, selector: string, fragme
   await responseWait;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function clickAndSettle(page: Page, locator: ReturnType<Page['locator']>): Promise<void> {
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => undefined),
+    locator.click({ timeout: 15_000 }),
+  ]);
+  await humanDelay(500, 1_000);
+}
+
+async function navigateFromDashboardToCalendar(page: Page, visaType: string): Promise<void> {
+  const sel = getSelectors();
+
+  if (!page.url().toLowerCase().includes('/dashboard')) return;
+
+  try {
+    const startBooking = page.locator('button:has-text("Start New Booking")').first();
+    await clickAndSettle(page, startBooking);
+  } catch (err) {
+    throw new ClassifiedBookingError(
+      `Dashboard navigation failed at Start New Booking: ${err instanceof Error ? err.message : String(err)}`,
+      'DASHBOARD_START_BOOKING_FAILED',
+      'permanent',
+    );
+  }
+
+  try {
+    const centerCandidates = [
+      page.locator('li[class*="center"]').first(),
+      page.locator('button:has-text("Tashkent")').first(),
+      page.locator('[class*="center"]:has-text("Tashkent")').first(),
+    ];
+
+    let centerClicked = false;
+    for (const center of centerCandidates) {
+      if (await center.count()) {
+        await clickAndSettle(page, center);
+        centerClicked = true;
+        break;
+      }
+    }
+    if (!centerClicked) {
+      throw new Error('No visible visa center option found');
+    }
+  } catch (err) {
+    throw new ClassifiedBookingError(
+      `Dashboard navigation failed at visa center selection: ${err instanceof Error ? err.message : String(err)}`,
+      'DASHBOARD_CENTER_SELECTION_FAILED',
+      'permanent',
+    );
+  }
+
+  try {
+    const category = page.getByText(new RegExp(`^\\s*${escapeRegExp(visaType)}\\s*$`, 'i')).first();
+    await clickAndSettle(page, category);
+  } catch (err) {
+    throw new ClassifiedBookingError(
+      `Dashboard navigation failed at visa category selection (${visaType}): ${err instanceof Error ? err.message : String(err)}`,
+      'DASHBOARD_VISA_CATEGORY_FAILED',
+      'permanent',
+    );
+  }
+
+  try {
+    await page.locator(sel.appointmentCalendar).first().waitFor({ state: 'visible', timeout: 30_000 });
+  } catch (err) {
+    throw new ClassifiedBookingError(
+      `Dashboard navigation failed waiting for calendar: ${err instanceof Error ? err.message : String(err)}`,
+      'DASHBOARD_CALENDAR_NOT_VISIBLE',
+      'permanent',
+    );
+  }
+}
+
 async function selectEarliestVisibleSlot(page: Page, slot: BookingJobPayload['slot']): Promise<void> {
   const sel = getSelectors();
 
@@ -244,6 +320,7 @@ async function runBookingAttempt(job: BookingJobPayload, bookingId: string): Pro
       await clickAndMaybeWaitForResponse(page, sel.bookAppointmentLink, ['schedule-appointment', 'appointment']);
     }
 
+    await navigateFromDashboardToCalendar(page, job.visaType);
     await selectEarliestVisibleSlot(page, job.slot);
     await assertNoPermanentPageError(page);
 
