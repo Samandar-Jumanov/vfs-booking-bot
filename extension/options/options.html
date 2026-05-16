@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="options.css" />
+    <title>VFS Booking Bot Options</title>
+  </head>
+  <body>
+    <main class="options">
+      <h1>VFS Booking Bot Options</h1>
+      <form id="optionsForm">
+        <label>
+          Backend URL
+          <input id="backendUrl" name="backendUrl" type="url" placeholder="https://bot.example.com" required />
+        </label>
+        <label>
+          One-time setup code
+          <input id="setupCode" name="setupCode" inputmode="numeric" maxlength="6" placeholder="123456" />
+        </label>
+        <label class="toggle">
+          <input id="autoBook" name="autoBook" type="checkbox" />
+          Auto-book on slot detect
+        </label>
+        <label class="toggle">
+          <input id="soundAlerts" name="soundAlerts" type="checkbox" />
+          Sound alerts
+        </label>
+        <label>
+          Polling interval seconds
+          <input id="pollingIntervalSeconds" name="pollingIntervalSeconds" type="number" min="15" max="300" step="5" />
+        </label>
+        <button type="submit">Save and connect</button>
+        <p id="message" role="status"></p>
+      </form>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

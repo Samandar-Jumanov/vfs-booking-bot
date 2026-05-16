@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>VFS Booking Bot</title>
+  </head>
+  <body>
+    <main class="popup">
+      <header>
+        <div class="mark">VFS</div>
+        <div>
+          <h1>Booking Bot</h1>
+          <p id="customerEmail">Not paired</p>
+        </div>
+      </header>
+      <section class="status">
+        <span id="statusDot" class="dot"></span>
+        <span id="connectionStatus">Disconnected</span>
+      </section>
+      <section class="badge">Currently monitoring: UZ to LVA</section>
+      <div class="actions">
+        <button id="openVfs" type="button">Open VFS to log in</button>
+        <button id="disconnect" type="button" class="secondary">Disconnect</button>
+        <button id="openOptions" type="button" class="ghost">Options</button>
+      </div>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

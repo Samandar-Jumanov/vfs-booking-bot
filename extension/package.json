@@ -1,0 +1,20 @@
+{
+  "name": "vfs-booking-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome MV3 extension for customer-side VFS booking orchestration.",
+  "scripts": {
+    "build": "webpack --mode production && node scripts/copy-static.js",
+    "test": "tsc --project tsconfig.json --noEmit && node tests/message-routing.test.js",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/node": "^20.11.24",
+    "copy-webpack-plugin": "^12.0.2",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.90.3",
+    "webpack-cli": "^5.1.4"
+  }
+}

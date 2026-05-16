@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "VFS Booking Bot",
+  "description": "Customer-side VFS booking assistant for authenticated Chrome sessions.",
+  "version": "0.1.0",
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "VFS Booking Bot"
+  },
+  "options_page": "options/options.html",
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.vfsglobal.com/*"],
+      "js": ["content/vfs-bridge.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "cookies", "webNavigation", "scripting", "notifications", "alarms"],
+  "host_permissions": [
+    "https://*.vfsglobal.com/*",
+    "https://localhost/*",
+    "http://localhost/*",
+    "wss://localhost/*",
+    "ws://localhost/*",
+    "https://*/api/auth/extension-token*",
+    "https://*/api/extension/*",
+    "wss://*/extension*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

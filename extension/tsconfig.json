@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "jsx": "react-jsx",
+    "lib": ["DOM", "ES2022"],
+    "types": [],
+    "noEmit": false,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["background/**/*.ts", "content/**/*.ts", "popup/**/*.tsx", "options/**/*.tsx", "shared/**/*.ts"]
+}

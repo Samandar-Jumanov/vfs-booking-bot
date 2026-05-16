@@ -198,6 +198,9 @@ model VfsAccount {
   status            AccountStatus @default(ACTIVE)
   lastUsedAt        DateTime?
   cooldownUntil     DateTime?
+  cookieStore       Json?
+  lastWarmedAt      DateTime?
+  tabUrl            String?
   profileIds        String[]
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt

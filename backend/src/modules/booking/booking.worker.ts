@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { env } from '@config/env';
 import { runBooking } from '@modules/engine/engine.service';
+import { bookViaExtension } from './extension-dispatch.service';
 import { emitToAll } from '@modules/websocket/ws.server';
 import { prisma } from '@config/database';
 import { BookingStatus } from '@prisma/client';
@@ -40,7 +41,12 @@ export async function processBookingJob(job: Job<BookingJobPayload>) {
 
     emitToAll('BOOKING_PROGRESS', { jobId: job.id, profileId: payload.profileId, status: 'RUNNING' });
 
-    const result = await runBooking(payload, String(job.id ?? payload.profileId));
+    // EXTENSION_BOOKING=true → dispatch to operator's Chrome extension (Datadome-bypass via real customer session).
+    // Otherwise fall through to the CDP-driven engine.runBooking() path.
+    const useExtension = process.env.EXTENSION_BOOKING === 'true' || process.env.EXTENSION_BOOKING === '1';
+    const result = useExtension
+      ? await runViaExtensionAndAdapt(payload, String(job.id ?? payload.profileId))
+      : await runBooking(payload, String(job.id ?? payload.profileId));
 
     if (result.success && result.dryRun) {
       await prisma.booking.updateMany({
@@ -145,4 +151,27 @@ export async function stopBookingWorker(): Promise<void> {
     await worker.close();
     worker = null;
   }
+}
+
+/**
+ * Adapts bookViaExtension's ExtensionBookingResult to the BookingResult shape
+ * that processBookingJob() expects (matches what engine.runBooking returns).
+ */
+async function runViaExtensionAndAdapt(payload: BookingJobPayload, bookingId: string) {
+  const r = await bookViaExtension(payload);
+  if (r.success) {
+    return {
+      success: true,
+      confirmationNo: r.confirmationNumber ?? 'EXT-' + bookingId.slice(-8),
+      dryRun: false,
+      screenshotPath: r.screenshotPath,
+      attempts: 1,
+      durationMs: 0,
+    };
+  }
+  return {
+    success: false,
+    error: r.reason ?? 'EXTENSION_BOOKING_FAILED',
+    errorClass: (/STALE|NOT_CONNECTED|NO_ACTIVE/i.test(r.reason ?? '') ? 'permanent' : 'transient') as 'permanent' | 'transient',
+  };
 }
