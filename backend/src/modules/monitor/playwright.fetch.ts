@@ -67,11 +67,24 @@ function parseSetCookieArrayToPlaywright(setCookieArr: string[], domain = '.vfsg
     .filter(Boolean);
 }
 
-function getCdpBrowser(): Promise<Browser> {
+async function getCdpBrowser(): Promise<Browser> {
   if (!env.CDP_ENDPOINT) {
     throw new Error('CDP_ENDPOINT is not configured');
   }
-  cdpBrowserPromise ??= chromium.connectOverCDP(env.CDP_ENDPOINT, { timeout: 30000 });
+  if (cdpBrowserPromise) {
+    try {
+      const cached = await cdpBrowserPromise;
+      const firstContext = cached.contexts()[0];
+      if (cached.isConnected() && firstContext && firstContext.pages().length > 0) {
+        return cached;
+      }
+    } catch {
+      // Reconnect below.
+    }
+    cdpBrowserPromise = undefined;
+    cdpPageCache.clear();
+  }
+  cdpBrowserPromise = chromium.connectOverCDP(env.CDP_ENDPOINT, { timeout: 30000 });
   return cdpBrowserPromise;
 }
 
@@ -272,12 +285,14 @@ async function ensureContext(destinationCode: string, sourceCode: string, cookie
     }
   }
 
-  const page = await context.newPage();
-  // Navigate to schedule-appointment page so SPA can boot, set localStorage tokens, etc.
-  // If cookies are valid this lands us on the dashboard rather than /login.
-  const scheduleUrl = `https://visa.vfsglobal.com/${sourceCode}/en/${destinationCode}/schedule-appointment`;
-  await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
-  // Brief pause for SPA to boot
+  const page = context.pages().find((candidate) => tabMatchesRoute(candidate.url(), sourceCode, destinationCode))
+    ?? await context.newPage();
+  if (!tabMatchesRoute(page.url(), sourceCode, destinationCode)) {
+    throw new Error(
+      `Operator's Chrome tab must already be on /${sourceCode}/en/${destinationCode}/ before monitor fetch starts.`,
+    );
+  }
+  await page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => undefined);
   await page.waitForTimeout(2000);
 
   const bundle: CtxBundle = { context, page, destinationCode, cookieFingerprint: fp, createdAt: Date.now() };

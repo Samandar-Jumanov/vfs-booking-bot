@@ -10,8 +10,6 @@ import { SlotInfo } from '@t/index';
 import { handleVfsInterstitials } from './vfs.interstitials';
 import { attachDiagnostics, dumpBlockDiagnostics } from './vfs.diagnostics';
 
-const VFS_BASE = 'https://visa.vfsglobal.com';
-
 const SOURCE_CODES: Record<string, { url: string; origin: string }> = {
   uzbekistan: { url: 'uzb', origin: 'UZB' },
   tajikistan: { url: 'tjk', origin: 'TJK' },
@@ -54,7 +52,25 @@ export async function runBookingFlow(
   context: BrowserContext,
   opts: NavigatorOptions
 ): Promise<string> {
-  const page = await context.newPage();
+  const src = SOURCE_CODES[(opts.sourceCountry || 'uzbekistan').toLowerCase()] ?? SOURCE_CODES.uzbekistan;
+  const destination = opts.destination.toLowerCase();
+  const routePrefix = `/${src.url}/en/${destination}/`;
+  const page = context.pages().find((candidate) => {
+    try {
+      const current = new URL(candidate.url());
+      return current.hostname === 'visa.vfsglobal.com'
+        && current.pathname.toLowerCase().startsWith(routePrefix);
+    } catch {
+      return false;
+    }
+  });
+  if (!page) {
+    throw new AppError(
+      409,
+      `Operator's Chrome tab must already be on ${routePrefix}login or ${routePrefix}dashboard before booking starts.`,
+      'OPERATOR_NOT_ON_VFS_ROUTE',
+    );
+  }
   attachDiagnostics(page);
   const sel = getSelectors();
   let state: NavState = 'START';
@@ -62,12 +78,6 @@ export async function runBookingFlow(
   try {
     // ── Navigate to VFS ──────────────────────────────────────────────────────
     state = 'START';
-    const src = SOURCE_CODES[(opts.sourceCountry || 'uzbekistan').toLowerCase()] ?? SOURCE_CODES.uzbekistan;
-    await page.goto(`${VFS_BASE}/${src.url}/en/${opts.destination.toLowerCase()}/login`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
-
     // Dismiss cookie consent + handle country selector when accessed from a
     // non-source-country IP (VFS detects IP and shows these overlays first)
     await handleVfsInterstitials(

@@ -105,8 +105,16 @@ export async function autoReLogin(page: Page, profile: { email: string; password
   }
 
   if (!startingUrl.includes('/login')) {
-    await page.goto(resolvedLoginUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    const signInLink = page.locator('a:has-text("Sign In"), a:has-text("Sign in"), a:has-text("Login"), button:has-text("Sign In"), button:has-text("Sign in")').first();
+    if (await signInLink.count().catch(() => 0)) {
+      await signInLink.click({ timeout: 10_000 }).catch(() => {});
+      await page.waitForURL(/\/login/i, { timeout: 15_000 }).catch(() => {});
+    }
+    if (!page.url().toLowerCase().includes('/login')) {
+      logEvent('warn', EventType.SESSION_EXPIRED, '[AutoLogin] No Sign In link found, falling back to direct navigation - Datadome risk');
+      await page.goto(resolvedLoginUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+    }
   }
 
   await page.waitForSelector('input[type="email"], input[name="email"], input[formcontrolname="username"], input[formcontrolname="email"]', { timeout: 30_000 });

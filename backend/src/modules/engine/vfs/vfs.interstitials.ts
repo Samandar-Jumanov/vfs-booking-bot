@@ -9,7 +9,7 @@
  *
  * Both overlays must be handled after every top-level navigation.
  * Call `handleVfsInterstitials(page, source, destination)` right after
- * `page.goto(...)` completes in any VFS flow.
+ * top-level route changes in any VFS flow.
  */
 
 import { Page } from 'rebrowser-playwright';

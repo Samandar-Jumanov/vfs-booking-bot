@@ -251,10 +251,11 @@ export async function registerVfsAccount(): Promise<RegistrationResult> {
 
       try {
         // ── Step 6: Navigate to VFS registration page ─────────────────────
-        await page.goto(VFS_REGISTER_URL, {
-          waitUntil: 'domcontentloaded',
-          timeout: 30_000,
-        });
+        if (page.url().toLowerCase() !== VFS_REGISTER_URL) {
+          throw new Error(
+            `[registration] Operator's Chrome tab must already be on ${VFS_REGISTER_URL} before registration starts.`,
+          );
+        }
 
         // Dismiss cookie consent + handle country selector when accessed
         // from a non-Angola IP (VFS detects IP and shows these overlays)

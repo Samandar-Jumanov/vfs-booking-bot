@@ -58,11 +58,6 @@ function sourceCode(sourceCountry?: string): string {
   return map[(sourceCountry ?? 'uzbekistan').toLowerCase()] ?? 'uzb';
 }
 
-function extractSourceDestFromUrl(url: string): { source: string; dest: string } {
-  const match = url.match(/\/([a-z]{3})\/en\/([a-z]{3})\//i);
-  return match ? { source: match[1].toLowerCase(), dest: match[2].toLowerCase() } : { source: 'uzb', dest: 'lva' };
-}
-
 function parseSlotDateTime(job: BookingJobPayload): Date | undefined {
   if (!job.slot.date) return undefined;
   const raw = job.slot.time ? `${job.slot.date} ${job.slot.time}` : job.slot.date;
@@ -149,10 +144,11 @@ async function navigateFromDashboardToCalendar(page: Page, visaType: string): Pr
   const sel = getSelectors();
 
   if (!page.url().toLowerCase().includes('/dashboard')) {
-    const sourceDest = extractSourceDestFromUrl(page.url());
-    const dashboardUrl = `https://visa.vfsglobal.com/${sourceDest.source}/en/${sourceDest.dest}/dashboard`;
-    await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    throw new ClassifiedBookingError(
+      `Operator's Chrome tab is on ${page.url()} - booking worker requires the tab to be on /dashboard. Open the dashboard manually in the attached Chrome and retry.`,
+      'OPERATOR_NOT_ON_DASHBOARD',
+      'permanent',
+    );
   }
 
   try {
@@ -322,8 +318,6 @@ async function runBookingAttempt(job: BookingJobPayload, bookingId: string): Pro
   const sel = getSelectors();
 
   try {
-    const scheduleUrl = `https://visa.vfsglobal.com/${source}/en/${dest}/schedule-appointment`;
-    await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await assertStillAuthenticated(page);
 
     if (await page.locator(sel.bookAppointmentLink).count()) {
@@ -352,6 +346,16 @@ async function runBookingAttempt(job: BookingJobPayload, bookingId: string): Pro
     await assertNoPermanentPageError(page);
 
     const screenshotPath = await captureReviewScreenshot(page, bookingId);
+    if (process.env.DEMO_DRY_RUN === '1') {
+      logEvent('info', EventType.BOOKING_ATTEMPT, `[DryRun] Review screenshot captured: ${screenshotPath}`);
+      return {
+        success: true,
+        confirmationNo: `DRYRUN-${bookingId.slice(-8)}`,
+        dryRun: true,
+        screenshotPath,
+      };
+    }
+
     if (env.BOOKING_DRY_RUN) {
       logEvent('info', EventType.BOOKING_ATTEMPT, `Dry-run booking reached review screen for ${profile.fullName}`, {
         profileId: profile.id,
