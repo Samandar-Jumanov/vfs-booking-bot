@@ -6,6 +6,7 @@ import { accountPoolService } from './accountPool.service';
 import { prisma } from '@config/database';
 import { encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
+import { autoRegisterAccount } from './accountAutoRegister.service';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
 
@@ -220,6 +221,47 @@ accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: N
     };
 
     res.json({ summary, items });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /api/accounts/auto-create ───────────────────────────────────────────
+/**
+ * Operator clicks "Auto-Create Account" → backend allocates email (mailsac)
+ * + UZ phone (smsActivate country=171, service=vfs) + dispatches
+ * BG_REGISTER_VFS_ACCOUNT to the operator's extension. Extension drives the
+ * VFS /register form inside the operator's trusted Chrome (bypasses Datadome).
+ * Returns once extension reports EXT_REGISTER_COMPLETED or after 5-min timeout.
+ *
+ * Body: { source?: 'uzb', destination?: 'lva' }
+ */
+accountsRouter.post('/auto-create', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const source = String(req.body?.source ?? 'uzb');
+    const destination = String(req.body?.destination ?? 'lva');
+    // smsActivate country codes: 171 = Uzbekistan, 0 = any
+    const countryCode = String(req.body?.countryCode ?? '171');
+
+    logEvent('info', EventType.BOOKING_ATTEMPT, 'VFS auto-register started', { source, destination, countryCode });
+    const result = await autoRegisterAccount({
+      source,
+      destination,
+      countryCode,
+      operatorUserId: req.user.id,
+    });
+
+    if (result.ok) {
+      logEvent('info', EventType.BOOKING_SUCCESS, 'VFS auto-register succeeded', {
+        accountId: result.accountId,
+        email: result.email,
+      });
+      res.status(201).json({ success: true, accountId: result.accountId, email: result.email });
+    } else {
+      logEvent('warn', EventType.BOOKING_FAILED, 'VFS auto-register failed', { reason: result.reason });
+      res.status(409).json({ success: false, reason: result.reason });
+    }
   } catch (err) {
     next(err);
   }

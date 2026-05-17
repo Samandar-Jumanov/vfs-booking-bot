@@ -214,6 +214,62 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
       destination: String(event.destination ?? 'lva'),
       reason: `Extension session lost: ${String(event.reason ?? 'customer needs to log in again')}`,
     });
+    return;
+  }
+
+  // ── Auto-register bridge events ──────────────────────────────────────────
+  // Extension asks backend for a verification link (poll Mailsac inbox).
+  if (event.type === 'EXT_REGISTER_NEED_EMAIL_LINK' && typeof event.correlationId === 'string') {
+    const { fetchEmailVerificationLink } = await import('@modules/accounts/accountAutoRegister.service');
+    const link = await fetchEmailVerificationLink(String(event.email ?? ''));
+    sendToExtension(customerId, {
+      type: 'BG_REGISTER_EMAIL_LINK',
+      correlationId: event.correlationId,
+      link: link ?? null,
+    });
+    return;
+  }
+
+  // Extension asks backend for the SMS OTP (poll smsActivate).
+  if (event.type === 'EXT_REGISTER_NEED_SMS_OTP' && typeof event.correlationId === 'string') {
+    const { fetchSmsOtp } = await import('@modules/accounts/accountAutoRegister.service');
+    const otp = await fetchSmsOtp(String(event.smsActivateId ?? ''));
+    sendToExtension(customerId, {
+      type: 'BG_REGISTER_SMS_OTP',
+      correlationId: event.correlationId,
+      otp: otp ?? null,
+    });
+    return;
+  }
+
+  // Extension asks backend to solve Turnstile via 2Captcha.
+  if (event.type === 'EXT_REGISTER_NEED_CAPTCHA' && typeof event.correlationId === 'string') {
+    const { fetchRegisterCaptchaToken } = await import('@modules/accounts/accountAutoRegister.service');
+    const token = await fetchRegisterCaptchaToken(
+      String(event.siteKey ?? ''),
+      String(event.pageUrl ?? ''),
+    );
+    sendToExtension(customerId, {
+      type: 'BG_REGISTER_CAPTCHA_TOKEN',
+      correlationId: event.correlationId,
+      token: token ?? null,
+    });
+    return;
+  }
+
+  if (event.type === 'EXT_REGISTER_COMPLETED' && typeof event.correlationId === 'string') {
+    const { resolveAutoRegister } = await import('@modules/accounts/accountAutoRegister.service');
+    resolveAutoRegister(event.correlationId, { ok: true });
+    return;
+  }
+
+  if (event.type === 'EXT_REGISTER_FAILED' && typeof event.correlationId === 'string') {
+    const { resolveAutoRegister } = await import('@modules/accounts/accountAutoRegister.service');
+    resolveAutoRegister(event.correlationId, {
+      ok: false,
+      reason: String(event.reason ?? 'EXT_REGISTER_FAILED'),
+    });
+    return;
   }
 }
 
