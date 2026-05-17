@@ -182,12 +182,14 @@ function formatEmailHtml(p: NotificationPayload & { profileName?: string }): { s
 
 export async function dispatchNotification(payload: NotificationPayload): Promise<void> {
   let profileName = payload.profileName;
-  if (!profileName && payload.profileId) {
+  let customerChatId: string | null = null;
+  if (payload.profileId) {
     const profile = await prisma.profile.findUnique({
       where: { id: payload.profileId },
-      select: { fullName: true, email: true },
+      select: { fullName: true, email: true, telegramChatId: true },
     });
-    profileName = profile?.fullName;
+    if (!profileName) profileName = profile?.fullName;
+    customerChatId = profile?.telegramChatId ?? null;
   }
 
   const enriched = { ...payload, profileName };
@@ -197,11 +199,20 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
       try {
         const enabled = await getSetting<boolean>('notifications.telegram.enabled');
         if (enabled || env.TELEGRAM_BOT_TOKEN) {
-          await sendTelegram(formatTelegramMessage(enriched), {
-            // Plain text is safer because error strings and profile data contain
-            // arbitrary characters that cannot be reliably escaped at runtime.
-            ...alertButtons(enriched),
-          });
+          const msg = formatTelegramMessage(enriched);
+          // Always send to operator (env.TELEGRAM_CHAT_ID).
+          await sendTelegram(msg, { ...alertButtons(enriched) });
+          // Additionally send to the customer's own chat if configured.
+          if (customerChatId && customerChatId !== env.TELEGRAM_CHAT_ID) {
+            const { sendTelegramTo } = await import('./telegram.bot');
+            await sendTelegramTo(customerChatId, msg).catch((err: any) => {
+              logEvent('warn', EventType.BOOKING_FAILED, `Customer telegram send failed: ${err?.message ?? err}`, {
+                channel: 'telegram',
+                profileId: payload.profileId,
+                customerChatId,
+              });
+            });
+          }
         }
       } catch (err: any) {
         logEvent('error', EventType.BOOKING_FAILED, `Telegram notification failed: ${err.message ?? String(err)}`, {

@@ -94,6 +94,7 @@ model Profile {
   gender             Gender    @default(MALE)
   passportIssueDate  DateTime?
   vfsPasswordEnc     String?   // AES-256-GCM encrypted VFS portal login password
+  telegramChatId     String?   // Per-customer Telegram chat ID for booking alerts
   priority           Priority  @default(NORMAL)
   isActive           Boolean   @default(true)
   bookings           Booking[]

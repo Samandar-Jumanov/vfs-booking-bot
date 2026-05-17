@@ -155,3 +155,14 @@ export async function sendTelegram(message: string, options: Record<string, unkn
   if (!bot || !env.TELEGRAM_CHAT_ID) throw new Error('Telegram bot is not configured');
   await bot.telegram.sendMessage(env.TELEGRAM_CHAT_ID, message, { parse_mode: 'HTML', ...options });
 }
+
+/**
+ * Send to a specific chat ID (per-customer routing) with fallback to the
+ * operator's TELEGRAM_CHAT_ID. Pass undefined chatId to use operator chat.
+ */
+export async function sendTelegramTo(chatId: string | undefined | null, message: string, options: Record<string, unknown> = {}): Promise<void> {
+  if (!bot) throw new Error('Telegram bot is not configured');
+  const target = chatId || env.TELEGRAM_CHAT_ID;
+  if (!target) throw new Error('No Telegram chat target available');
+  await bot.telegram.sendMessage(target, message, { parse_mode: 'HTML', ...options });
+}

@@ -11,6 +11,7 @@ export const createProfileSchema = z.object({
   gender: z.enum(['MALE', 'FEMALE', 'OTHER']).default('MALE'),
   passportIssueDate: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).optional(),
   vfsPassword: z.string().min(1).optional(),
+  telegramChatId: z.string().optional(),
   priority: z.enum(['HIGH', 'NORMAL']).default('NORMAL'),
 });
 
