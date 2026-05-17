@@ -41,6 +41,21 @@ export type BackendMessage =
       payload: CustomerBookingPayload;
       correlationId: string;
     }
+  | {
+      type: 'BG_REGISTER_VFS_ACCOUNT';
+      email: string;
+      phone: string;
+      smsActivateId?: string;
+      password: string;
+      firstName: string;
+      lastName: string;
+      dob: string;
+      registerUrl: string;
+      correlationId: string;
+    }
+  | { type: 'BG_REGISTER_EMAIL_LINK'; correlationId: string; link: string | null }
+  | { type: 'BG_REGISTER_SMS_OTP'; correlationId: string; otp: string | null }
+  | { type: 'BG_REGISTER_CAPTCHA_TOKEN'; correlationId: string; token: string | null }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -72,6 +87,11 @@ export type ExtensionEvent =
     }
   | { type: 'EXT_BOOKING_FAILED'; reason: string; destination?: string; accountEmail?: string; correlationId?: string }
   | { type: 'EXT_SESSION_LOST'; destination?: string; reason?: string }
+  | { type: 'EXT_REGISTER_NEED_EMAIL_LINK'; correlationId: string; email: string }
+  | { type: 'EXT_REGISTER_NEED_SMS_OTP'; correlationId: string; smsActivateId: string }
+  | { type: 'EXT_REGISTER_NEED_CAPTCHA'; correlationId: string; siteKey: string; pageUrl: string }
+  | { type: 'EXT_REGISTER_COMPLETED'; correlationId: string }
+  | { type: 'EXT_REGISTER_FAILED'; correlationId: string; reason: string }
   | { type: 'EXT_LOGGED_IN'; email?: string }
   | { type: 'EXT_POLL_RESULT'; destination: string; status: number; data?: unknown }
   | {
@@ -96,7 +116,22 @@ export type ContentCommand =
   | { type: 'POLL_SLOT'; monitor: MonitorConfig }
   | { type: 'FILL_FORM'; payload: BookingCommand | CustomerBookingPayload }
   | { type: 'SUBMIT_BOOKING' }
-  | { type: 'EXTRACT_CONFIRMATION' };
+  | { type: 'EXTRACT_CONFIRMATION' }
+  | { type: 'REGISTER_FILL_FORM'; payload: RegisterFormPayload }
+  | { type: 'REGISTER_EMAIL_LINK'; link: string | null }
+  | { type: 'REGISTER_SMS_OTP'; otp: string | null }
+  | { type: 'REGISTER_CAPTCHA_TOKEN'; token: string | null };
+
+export interface RegisterFormPayload {
+  email: string;
+  phone: string;
+  smsActivateId: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  dob: string;
+  correlationId: string;
+}
 
 export interface PollSlotResult {
   loggedIn: boolean;

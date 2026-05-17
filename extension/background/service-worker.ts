@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
 let wsClient: ExtensionWsClient | undefined;
 let runtimeState: RuntimeState = { connectionStatus: 'disconnected' };
+const activeRegisterTabs = new Map<string, number>();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create('vfs-extension-heartbeat', { periodInMinutes: 0.5 });
@@ -94,6 +95,16 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     });
     return { ok: true };
   }
+  if (
+    message.type === 'EXT_REGISTER_NEED_EMAIL_LINK' ||
+    message.type === 'EXT_REGISTER_NEED_SMS_OTP' ||
+    message.type === 'EXT_REGISTER_NEED_CAPTCHA' ||
+    message.type === 'EXT_REGISTER_COMPLETED' ||
+    message.type === 'EXT_REGISTER_FAILED'
+  ) {
+    sendEvent(message as ExtensionEvent);
+    return { ok: true };
+  }
   return { ok: false, error: 'UNKNOWN_MESSAGE' };
 }
 
@@ -119,6 +130,22 @@ async function connectFromStoredSettings(): Promise<void> {
 }
 
 function handleBackendMessage(message: BackendMessage): void {
+  if (message.type === 'BG_REGISTER_VFS_ACCOUNT') {
+    void runRegisterFlow(message);
+    return;
+  }
+  if (message.type === 'BG_REGISTER_EMAIL_LINK') {
+    forwardToActiveRegisterTab(message.correlationId, { type: 'REGISTER_EMAIL_LINK', link: message.link });
+    return;
+  }
+  if (message.type === 'BG_REGISTER_SMS_OTP') {
+    forwardToActiveRegisterTab(message.correlationId, { type: 'REGISTER_SMS_OTP', otp: message.otp });
+    return;
+  }
+  if (message.type === 'BG_REGISTER_CAPTCHA_TOKEN') {
+    forwardToActiveRegisterTab(message.correlationId, { type: 'REGISTER_CAPTCHA_TOKEN', token: message.token });
+    return;
+  }
   if (message.type === 'START_MONITOR') {
     runtimeState = { ...runtimeState, activeMonitor: message.monitor };
     void saveRuntimeState();
@@ -144,6 +171,46 @@ function handleBackendMessage(message: BackendMessage): void {
   if (message.type === 'INJECT_FAKE_SLOT') {
     sendEvent({ type: 'EXT_SLOT_DETECTED', destination: message.destination, date: message.date, raw: { fake: true } });
   }
+}
+
+async function runRegisterFlow(msg: Extract<BackendMessage, { type: 'BG_REGISTER_VFS_ACCOUNT' }>): Promise<void> {
+  try {
+    const tab = await chrome.tabs.create({ url: msg.registerUrl, active: true } as { url: string });
+    if (!tab.id) {
+      sendEvent({ type: 'EXT_REGISTER_FAILED', correlationId: msg.correlationId, reason: 'TAB_CREATE_FAILED' });
+      return;
+    }
+    activeRegisterTabs.set(msg.correlationId, tab.id);
+    setTimeout(() => {
+      chrome.tabs.sendMessage(tab.id!, {
+        type: 'REGISTER_FILL_FORM',
+        payload: {
+          email: msg.email,
+          phone: msg.phone,
+          smsActivateId: msg.smsActivateId ?? '',
+          password: msg.password,
+          firstName: msg.firstName,
+          lastName: msg.lastName,
+          dob: msg.dob,
+          correlationId: msg.correlationId,
+        },
+      }).catch((err: Error) => {
+        sendEvent({
+          type: 'EXT_REGISTER_FAILED',
+          correlationId: msg.correlationId,
+          reason: 'CONTENT_SCRIPT_UNREACHABLE: ' + err.message,
+        });
+      });
+    }, 6000);
+  } catch (err) {
+    sendEvent({ type: 'EXT_REGISTER_FAILED', correlationId: msg.correlationId, reason: (err as Error).message });
+  }
+}
+
+function forwardToActiveRegisterTab(correlationId: string, payload: { type: string; [key: string]: unknown }): void {
+  const tabId = activeRegisterTabs.get(correlationId);
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, payload).catch(() => undefined);
 }
 
 async function handleBookForCustomer(message: Extract<BackendMessage, { type: 'BOOK_FOR_CUSTOMER' }>): Promise<void> {
@@ -242,6 +309,9 @@ function sendEvent(event: ExtensionEvent): void {
   if (event.type === 'EXT_HEARTBEAT') {
     runtimeState = { ...runtimeState, lastHeartbeatAt: event.at };
     void saveRuntimeState();
+  }
+  if (event.type === 'EXT_REGISTER_COMPLETED' || event.type === 'EXT_REGISTER_FAILED') {
+    activeRegisterTabs.delete(event.correlationId);
   }
   wsClient?.send(event);
 }

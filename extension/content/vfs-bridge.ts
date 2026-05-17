@@ -1,6 +1,18 @@
-import type { BookingCommand, ContentCommand, CustomerBookingPayload, MonitorConfig, PollSlotResult } from '../shared/types';
+import type {
+  BookingCommand,
+  ContentCommand,
+  CustomerBookingPayload,
+  ExtensionEvent,
+  MonitorConfig,
+  PollSlotResult,
+  RegisterFormPayload,
+} from '../shared/types';
 
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
+const REGISTER_STEP_TIMEOUT_MS = 90_000;
+
+let currentCorrelationId: string | undefined;
+const registerWaiters = new Map<string, (value: string | null) => void>();
 
 chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse) => {
   void handleCommand(message).then(sendResponse).catch((error: Error) => {
@@ -15,6 +27,21 @@ window.setInterval(() => void syncSessionToBackend(), 60_000);
 
 async function handleCommand(command: ContentCommand): Promise<unknown> {
   switch (command.type) {
+    case 'REGISTER_FILL_FORM':
+      void handleRegisterFlow(command.payload);
+      return { ok: true };
+    case 'REGISTER_EMAIL_LINK':
+      resolveRegisterWaiter('emailLink', command.link);
+      if (command.link) window.location.href = command.link;
+      return { ok: true };
+    case 'REGISTER_SMS_OTP':
+      resolveRegisterWaiter('smsOtp', command.otp);
+      void fillRegisterOtp(command.otp);
+      return { ok: true };
+    case 'REGISTER_CAPTCHA_TOKEN':
+      resolveRegisterWaiter('captchaToken', command.token);
+      void applyRegisterCaptchaToken(command.token);
+      return { ok: true };
     case 'POLL_SLOT':
       return pollSlot(command.monitor);
     case 'FILL_FORM':
@@ -26,6 +53,136 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
     default:
       throw new Error('Unsupported content command');
   }
+}
+
+async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
+  currentCorrelationId = payload.correlationId;
+  try {
+    await withTimeout(runRegisterSteps(payload), REGISTER_STEP_TIMEOUT_MS, 'REGISTER_TIMEOUT');
+  } catch (error) {
+    await emitRegisterEvent({
+      type: 'EXT_REGISTER_FAILED',
+      correlationId: payload.correlationId,
+      reason: (error as Error).message,
+    });
+  }
+}
+
+async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
+  await waitForElement('input[formcontrolname], input[type="email"], input[type="password"]', 30_000);
+
+  await typeIntoFirst(['input[formcontrolname="firstName"]', 'input[placeholder*="First" i]', 'input[name="firstName"]'], payload.firstName);
+  await typeIntoFirst(['input[formcontrolname="lastName"]', 'input[placeholder*="Last" i]', 'input[name="lastName"]'], payload.lastName);
+  await typeIntoFirst(['input[formcontrolname="email"]', 'input[type="email"]', 'input[name="email"]'], payload.email);
+  await typeIntoFirst([
+    'input[formcontrolname="mobileNumber"]',
+    'input[formcontrolname="phone"]',
+    'input[type="tel"]',
+    'input[name="phone"]',
+  ], payload.phone);
+  await typeIntoFirst(['input[formcontrolname="password"]', 'input[type="password"]', 'input[name="password"]'], payload.password);
+  await typeIntoFirst([
+    'input[formcontrolname="confirmPassword"]',
+    'input[name="confirmPassword"]',
+    'input[placeholder*="Confirm" i][type="password"]',
+  ], payload.password);
+  await typeIntoFirst(['input[type="date"]', 'input[formcontrolname="dob"]', 'input[name="dob"]'], payload.dob);
+
+  const turnstile = document.querySelector<HTMLElement>('[data-sitekey]');
+  const siteKey = turnstile?.getAttribute('data-sitekey');
+  if (siteKey) {
+    await emitRegisterEvent({
+      type: 'EXT_REGISTER_NEED_CAPTCHA',
+      correlationId: payload.correlationId,
+      siteKey,
+      pageUrl: window.location.href,
+    });
+    const token = await waitForRegisterSignal('captchaToken', 90_000);
+    if (!token) throw new Error('CAPTCHA_TOKEN_MISSING');
+    await applyRegisterCaptchaToken(token);
+  }
+
+  const initialUrl = window.location.href;
+  await clickRegisterSubmit();
+  await waitForRegisterProgress(initialUrl);
+
+  if (isEmailVerificationStep()) {
+    await emitRegisterEvent({ type: 'EXT_REGISTER_NEED_EMAIL_LINK', correlationId: payload.correlationId, email: payload.email });
+    const link = await waitForRegisterSignal('emailLink', 90_000);
+    if (!link) throw new Error('EMAIL_LINK_MISSING');
+    window.location.href = link;
+    return;
+  }
+
+  if (isPhoneOtpStep()) {
+    await emitRegisterEvent({
+      type: 'EXT_REGISTER_NEED_SMS_OTP',
+      correlationId: payload.correlationId,
+      smsActivateId: payload.smsActivateId,
+    });
+    const otp = await waitForRegisterSignal('smsOtp', 90_000);
+    if (!otp) throw new Error('SMS_OTP_MISSING');
+    await fillRegisterOtp(otp);
+  }
+
+  await waitForCompletionOrOtp(payload);
+}
+
+async function waitForCompletionOrOtp(payload: RegisterFormPayload): Promise<void> {
+  await waitUntil(async () => {
+    if (isRegisterComplete()) {
+      await emitRegisterEvent({ type: 'EXT_REGISTER_COMPLETED', correlationId: payload.correlationId });
+      return true;
+    }
+    if (isPhoneOtpStep()) return true;
+    return false;
+  }, 30_000).catch(() => undefined);
+
+  if (isPhoneOtpStep() && !isRegisterComplete()) {
+    await emitRegisterEvent({
+      type: 'EXT_REGISTER_NEED_SMS_OTP',
+      correlationId: payload.correlationId,
+      smsActivateId: payload.smsActivateId,
+    });
+    const otp = await waitForRegisterSignal('smsOtp', 90_000);
+    if (!otp) throw new Error('SMS_OTP_MISSING');
+    await fillRegisterOtp(otp);
+    await waitUntil(() => isRegisterComplete(), 30_000);
+  }
+
+  if (!isRegisterComplete()) throw new Error('REGISTER_COMPLETION_NOT_DETECTED');
+  await emitRegisterEvent({ type: 'EXT_REGISTER_COMPLETED', correlationId: payload.correlationId });
+}
+
+async function fillRegisterOtp(otp: string | null): Promise<void> {
+  if (!otp) return;
+  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(
+    'input[autocomplete="one-time-code"], input[formcontrolname*="otp" i], input[name*="otp" i], input[type="tel"], input[type="text"]',
+  )).filter((input) => isVisible(input));
+  const digitInputs = inputs.filter((input) => input.maxLength === 1 || input.getAttribute('maxlength') === '1');
+  if (digitInputs.length > 1) {
+    otp.split('').forEach((digit, index) => setInputValue(digitInputs[index], digit));
+  } else {
+    const target = inputs[0];
+    if (target) setInputValue(target, otp);
+  }
+  await clickVerifyButton();
+}
+
+async function applyRegisterCaptchaToken(token: string | null): Promise<void> {
+  if (!token) return;
+  let textarea = document.querySelector<HTMLTextAreaElement | HTMLInputElement>('[name="cf-turnstile-response"]');
+  if (!textarea) {
+    textarea = document.createElement('textarea');
+    textarea.name = 'cf-turnstile-response';
+    textarea.style.display = 'none';
+    document.body.appendChild(textarea);
+  }
+  setInputValue(textarea, token);
+  const widget = document.querySelector<HTMLElement>('[data-callback]');
+  const callbackName = widget?.getAttribute('data-callback');
+  const callback = callbackName ? getWindowCallback(callbackName) : undefined;
+  if (callback) callback(token);
 }
 
 function isLoggedIn(): boolean {
@@ -120,6 +277,11 @@ function detectAccountEmailFromDashboard(): Promise<string | undefined> {
 async function typeIntoFirst(selectors: string[], value: string): Promise<void> {
   const element = selectors.map((selector) => document.querySelector<HTMLInputElement>(selector)).find(Boolean);
   if (!element) return;
+  setInputValue(element, value);
+}
+
+function setInputValue(element: HTMLInputElement | HTMLTextAreaElement | undefined, value: string): void {
+  if (!element) return;
   element.focus();
   element.value = value;
   element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -147,4 +309,127 @@ async function extractConfirmation(): Promise<{ confirmationNumber: string }> {
   const text = document.body.innerText;
   const confirmationNumber = text.match(/[A-Z0-9]{8,}/)?.[0] ?? '';
   return { confirmationNumber };
+}
+
+async function clickRegisterSubmit(): Promise<void> {
+  const button = findButtonByText(['register', 'sign up', 'continue', 'create']) ?? document.querySelector<HTMLElement>('button[type="submit"]');
+  if (!button) throw new Error('REGISTER_SUBMIT_BUTTON_NOT_FOUND');
+  button.click();
+}
+
+async function clickVerifyButton(): Promise<void> {
+  const button = findButtonByText(['verify', 'submit', 'continue']);
+  if (button) button.click();
+}
+
+function findButtonByText(words: string[]): HTMLElement | null {
+  return Array.from(document.querySelectorAll<HTMLElement>('button, input[type="submit"]'))
+    .filter(isVisible)
+    .find((element) => {
+      const text = (element.innerText || element.getAttribute('value') || '').toLowerCase();
+      return words.some((word) => text.includes(word));
+    }) ?? null;
+}
+
+function isEmailVerificationStep(): boolean {
+  const text = document.body.innerText.toLowerCase();
+  return text.includes('verification email') || text.includes('verify your email') || text.includes('email sent');
+}
+
+function isPhoneOtpStep(): boolean {
+  const text = document.body.innerText.toLowerCase();
+  return text.includes('otp') || text.includes('one time password') || text.includes('verification code');
+}
+
+function isRegisterComplete(): boolean {
+  const text = document.body.innerText.toLowerCase();
+  return location.href.toLowerCase().includes('dashboard') ||
+    text.includes('account created') ||
+    text.includes('welcome') ||
+    text.includes('registration successful');
+}
+
+async function waitForRegisterProgress(initialUrl: string): Promise<void> {
+  await waitUntil(() => (
+    window.location.href !== initialUrl ||
+    isEmailVerificationStep() ||
+    isPhoneOtpStep() ||
+    isRegisterComplete()
+  ), 30_000);
+}
+
+function waitForElement(selector: string, timeoutMs: number): Promise<Element> {
+  return waitUntil(() => document.querySelector(selector), timeoutMs);
+}
+
+function waitUntil<T>(predicate: () => T | Promise<T>, timeoutMs: number): Promise<NonNullable<T>> {
+  const startedAt = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const result = await predicate();
+        if (result) {
+          resolve(result as NonNullable<T>);
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          reject(new Error('WAIT_TIMEOUT'));
+          return;
+        }
+        window.setTimeout(tick, 500);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    void tick();
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(reason)), timeoutMs);
+    promise.then((value) => {
+      window.clearTimeout(timer);
+      resolve(value);
+    }).catch((error: Error) => {
+      window.clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function waitForRegisterSignal(kind: string, timeoutMs: number): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      registerWaiters.delete(kind);
+      reject(new Error(kind.toUpperCase() + '_TIMEOUT'));
+    }, timeoutMs);
+    registerWaiters.set(kind, (value) => {
+      window.clearTimeout(timer);
+      registerWaiters.delete(kind);
+      resolve(value);
+    });
+  });
+}
+
+function resolveRegisterWaiter(kind: string, value: string | null): void {
+  registerWaiters.get(kind)?.(value);
+}
+
+async function emitRegisterEvent(event: ExtensionEvent): Promise<void> {
+  await chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+function isVisible(element: HTMLElement): boolean {
+  return Boolean(element.offsetParent || element.getClientRects().length);
+}
+
+function getWindowCallback(callbackName: string): ((token: string) => void) | undefined {
+  const value = callbackName.split('.').reduce<unknown>((target, key) => {
+    if (target && typeof target === 'object' && key in target) {
+      return (target as Record<string, unknown>)[key];
+    }
+    return undefined;
+  }, window);
+  return typeof value === 'function' ? value as (token: string) => void : undefined;
 }
