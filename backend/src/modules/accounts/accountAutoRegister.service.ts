@@ -1,10 +1,9 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { prisma } from '@config/database';
 import { solveTurnstile } from '@modules/captcha/twoCaptcha';
-import { mailsacService } from '@modules/email/mailsac.service';
-import { smsActivateService } from '@modules/phone/smsActivate.service';
 import { sendToExtension } from '@modules/websocket/ws.server';
 import { encrypt } from '@utils/crypto';
+import { getEmailProvider, getSmsProvider } from './providerFactory';
 
 interface AutoRegisterOptions {
   source: string;
@@ -27,8 +26,10 @@ const pending = new Map<string, {
 }>();
 
 export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<AutoRegisterResult> {
-  const phone = await smsActivateService.buyNumber('vfs', opts.countryCode);
-  const email = mailsacService.createInbox();
+  const smsProvider = getSmsProvider();
+  const emailProvider = getEmailProvider();
+  const phone = await smsProvider.buyNumber('vfs', opts.countryCode);
+  const email = await emailProvider.createInbox();
   const password = `Vfs-${randomBytes(8).toString('base64url')}1!`;
   const firstName = 'Akmal';
   const lastName = 'Saliyev';
@@ -51,21 +52,21 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
     });
 
     if (!accepted) {
-      await smsActivateService.releaseNumber(phone.id);
+      await smsProvider.releaseNumber(phone.id);
       throw new Error('OPERATOR_EXTENSION_OFFLINE');
     }
 
     const result = await new Promise<PendingResult>((resolve) => {
       const timer = setTimeout(() => {
         pending.delete(correlationId);
-        smsActivateService.releaseNumber(phone.id).catch(() => undefined);
+        smsProvider.releaseNumber(phone.id).catch(() => undefined);
         resolve({ ok: false, reason: 'EXTENSION_TIMEOUT' });
       }, 5 * 60 * 1000);
       pending.set(correlationId, { resolve, timer, smsActivateId: phone.id, email });
     });
 
     if (!result.ok) {
-      await smsActivateService.releaseNumber(phone.id).catch(() => undefined);
+      await smsProvider.releaseNumber(phone.id).catch(() => undefined);
       return result;
     }
 
@@ -82,7 +83,7 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
     return { ok: true, accountId: account.id, email: account.email };
   } catch (error) {
     pending.delete(correlationId);
-    await smsActivateService.releaseNumber(phone.id).catch(() => undefined);
+    await smsProvider.releaseNumber(phone.id).catch(() => undefined);
     throw error;
   }
 }
@@ -93,15 +94,16 @@ export function resolveAutoRegister(correlationId: string, result: PendingResult
   pending.delete(correlationId);
   clearTimeout(entry.timer);
   if (!result.ok && entry.smsActivateId) {
-    smsActivateService.releaseNumber(entry.smsActivateId).catch(() => undefined);
+    getSmsProvider().releaseNumber(entry.smsActivateId).catch(() => undefined);
   }
   entry.resolve(result);
 }
 
 export async function fetchEmailVerificationLink(email: string): Promise<string | null> {
+  const emailProvider = getEmailProvider();
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    const messages = await mailsacService.listInbox(email).catch(() => []);
+    const messages = await emailProvider.listInbox(email).catch(() => []);
     for (const message of messages) {
       const body = String(message.body ?? '');
       const match = body.match(/https?:\/\/[^\s"<]+(?:verify|confirm|activate)[^\s"<]*/i);
@@ -115,7 +117,7 @@ export async function fetchEmailVerificationLink(email: string): Promise<string 
 export async function fetchSmsOtp(smsActivateId: string): Promise<string | null> {
   if (!smsActivateId) return null;
   try {
-    return await smsActivateService.getOtp(smsActivateId);
+    return await getSmsProvider().getOtp(smsActivateId);
   } catch {
     return null;
   }

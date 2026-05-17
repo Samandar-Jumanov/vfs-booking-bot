@@ -17,6 +17,7 @@ import { settingsRouter } from '@modules/settings/settings.router';
 import { proxyRouter } from '@modules/proxy/proxy.router';
 import { accountsRouter } from '@modules/accounts/accounts.router';
 import { extensionRouter } from '@modules/extension/extension.router';
+import { emailRouter } from '@modules/email/email.router';
 
 export function createApp() {
   const app = express();
@@ -56,6 +57,7 @@ export function createApp() {
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
+  app.use('/api/email', emailRouter);
 
   // ── API routes ────────────────────────────────────────────────────────────
   app.use('/api', apiLimiter);

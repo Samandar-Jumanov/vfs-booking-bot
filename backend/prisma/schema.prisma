@@ -206,3 +206,16 @@ model VfsAccount {
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 }
+
+model ReceivedEmail {
+  id          String   @id @default(cuid())
+  toAddress   String
+  fromAddress String?
+  subject     String?
+  body        String   @db.Text
+  rawHeaders  Json?
+  receivedAt  DateTime @default(now())
+
+  @@index([toAddress])
+  @@map("received_emails")
+}

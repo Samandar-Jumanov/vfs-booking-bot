@@ -24,6 +24,9 @@ const envSchema = z.object({
   CAPTCHA_SOLVER: z.enum(['twocaptcha', 'manual']).default('manual'),
 
   SMS_ACTIVATE_API_KEY: z.string().optional(),
+  SMS_PROVIDER: z.enum(['smsactivate', 'vaksms']).default('smsactivate'),
+  VAKSMS_API_KEY: z.string().optional(),
+  VAKSMS_COUNTRY: z.string().default('uz'),
 
   PROXY_DEFAULT_PROVIDER: z.string().default('brightdata'),
   PROXY_HOST: z.string().optional(),
@@ -57,6 +60,9 @@ const envSchema = z.object({
 
   MAILSAC_API_KEY: z.string().optional(),
   EMAIL_DOMAIN: z.string().optional(),
+  EMAIL_PROVIDER: z.enum(['mailsac', 'custom']).default('mailsac'),
+  CUSTOM_EMAIL_DOMAIN: z.string().optional(),
+  EMAIL_WEBHOOK_SECRET: z.string().optional(),
 
   BOOKING_CONCURRENCY: z.coerce.number().default(3),
   BOOKING_DRY_RUN: z.string().transform((v) => v !== 'false').default('true'),
