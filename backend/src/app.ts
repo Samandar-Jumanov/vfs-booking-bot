@@ -57,6 +57,72 @@ export function createApp() {
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
+
+  // ── Full system health (no auth) — for ops dashboards + uptime monitors ──
+  app.get('/api/health/full', async (_req, res) => {
+    const startedAt = Date.now();
+    const { prisma } = await import('@config/database');
+    const { getRedis } = await import('@config/redis');
+    const checks: Record<string, { ok: boolean; ms?: number; note?: string }> = {};
+
+    async function check(name: string, fn: () => Promise<string | void>) {
+      const t = Date.now();
+      try {
+        const note = await fn();
+        checks[name] = { ok: true, ms: Date.now() - t, note: note || undefined };
+      } catch (err: any) {
+        checks[name] = { ok: false, ms: Date.now() - t, note: err?.message ?? String(err) };
+      }
+    }
+
+    await check('postgres', async () => {
+      const r = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT NOW() as now`;
+      return `${r[0]?.now?.toISOString?.()}`;
+    });
+    await check('redis', async () => {
+      const pong = await getRedis().ping();
+      return pong;
+    });
+    await check('account-pool', async () => {
+      const c = await prisma.vfsAccount.count();
+      const active = await prisma.vfsAccount.count({ where: { status: 'ACTIVE' } });
+      const fresh = await prisma.vfsAccount.count({
+        where: { status: 'ACTIVE', lastWarmedAt: { gt: new Date(Date.now() - 12 * 3600 * 1000) } },
+      });
+      return `total=${c} active=${active} fresh=${fresh}`;
+    });
+    await check('profiles', async () => {
+      const c = await prisma.profile.count({ where: { isActive: true } });
+      return `active=${c}`;
+    });
+    await check('bookings-24h', async () => {
+      const since = new Date(Date.now() - 24 * 3600 * 1000);
+      const total = await prisma.booking.count({ where: { createdAt: { gt: since } } });
+      const success = await prisma.booking.count({ where: { createdAt: { gt: since }, status: 'SUCCESS' } });
+      return `total=${total} success=${success}`;
+    });
+    await check('env-vendor-keys', async () => {
+      const keys = {
+        TWOCAPTCHA: !!process.env.TWOCAPTCHA_API_KEY,
+        MAILSAC: !!process.env.MAILSAC_API_KEY,
+        SMS_ACTIVATE: !!process.env.SMS_ACTIVATE_API_KEY,
+        VAKSMS: !!process.env.VAKSMS_API_KEY,
+        CUSTOM_DOMAIN: !!process.env.CUSTOM_EMAIL_DOMAIN,
+        TELEGRAM_BOT: !!process.env.TELEGRAM_BOT_TOKEN,
+        CDP: !!process.env.CDP_ENDPOINT,
+      };
+      return Object.entries(keys).filter(([, v]) => v).map(([k]) => k).join(',') || '(none)';
+    });
+
+    const allOk = Object.values(checks).every((c) => c.ok);
+    res.status(allOk ? 200 : 503).json({
+      status: allOk ? 'ok' : 'degraded',
+      checks,
+      tookMs: Date.now() - startedAt,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   app.use('/api/email', emailRouter);
 
   // ── API routes ────────────────────────────────────────────────────────────
