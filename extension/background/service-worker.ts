@@ -14,6 +14,9 @@ let runtimeState: RuntimeState = { connectionStatus: 'disconnected' };
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create('vfs-extension-heartbeat', { periodInMinutes: 0.5 });
   chrome.alarms.create('vfs-extension-poll', { periodInMinutes: 0.5 });
+  // Reconnect immediately so manifest reload doesn't leave the extension
+  // disconnected until the operator clicks Save.
+  void connectFromStoredSettings();
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -73,12 +76,20 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
       sameSite: c.sameSite,
       expirationDate: c.expirationDate,
     }));
+    // Fall back to settings.customerEmail when content script can't extract
+    // the email from VFS DOM. In the account-pool model, customerEmail is the
+    // VFS account email being managed by this Chrome profile.
+    const settings = await getSettings();
+    const resolvedEmail =
+      (typeof message.email === 'string' && message.email) ||
+      settings.customerEmail ||
+      undefined;
     sendEvent({
       type: 'EXT_SESSION_SYNC',
       url: String(message.url ?? ''),
       cookies: serialized || String(message.cookies ?? ''),
       cookieJar,
-      email: typeof message.email === 'string' ? message.email : undefined,
+      email: resolvedEmail,
       timestamp: String(message.timestamp ?? new Date().toISOString()),
     });
     return { ok: true };

@@ -1,4 +1,10 @@
-import 'dotenv/config';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
+// Backend reads backend/.env by default; also fall back to the repo-root .env
+// so shared flags (EXTENSION_BOOKING, FRONTEND_URL, etc.) take effect even
+// when only set at the root. Backend/.env wins for duplicate keys.
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env'), override: true });
 import fs from 'fs';
 import http from 'http';
 import { env } from '@config/env';

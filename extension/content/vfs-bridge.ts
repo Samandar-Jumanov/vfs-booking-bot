@@ -89,16 +89,24 @@ async function fillForm(command: BookingCommand | CustomerBookingPayload): Promi
 }
 
 async function syncSessionToBackend(): Promise<void> {
-  const cookies = document.cookie;
-  const url = window.location.href;
-  const email = await detectAccountEmailFromDashboard();
-  chrome.runtime.sendMessage({
-    type: 'EXT_SESSION_SYNC',
-    url,
-    cookies,
-    email,
-    timestamp: new Date().toISOString(),
-  }).catch(() => {});
+  // Defensive: if the extension was reloaded since this content script attached,
+  // chrome.runtime is invalidated and sendMessage will throw synchronously.
+  // Swallow the error — the next page navigation will load a fresh content
+  // script that talks to the live service worker.
+  try {
+    const cookies = document.cookie;
+    const url = window.location.href;
+    const email = await detectAccountEmailFromDashboard();
+    await chrome.runtime.sendMessage({
+      type: 'EXT_SESSION_SYNC',
+      url,
+      cookies,
+      email,
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    // Extension context invalidated, service worker dead, etc — silently ignore.
+  }
 }
 
 function detectAccountEmailFromDashboard(): Promise<string | undefined> {

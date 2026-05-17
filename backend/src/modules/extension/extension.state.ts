@@ -100,11 +100,25 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
     const email = String(event.email ?? '');
     const cookies = String(event.cookies ?? '');
     const cookieJar = Array.isArray(event.cookieJar) ? event.cookieJar : null;
-    if (!email || (!cookies && !cookieJar)) return;
-    const acc = await prisma.vfsAccount.findFirst({ where: { email } });
+    if (!cookies && !cookieJar) return;
+    // Match account by email first; if no match (extension can't always detect
+    // the VFS account email from the dashboard), fall back to single-account
+    // mode: if there is exactly ONE non-blocked account in the pool, use it.
+    // This covers the 1-operator/1-account dev scenario.
+    let acc = email ? await prisma.vfsAccount.findFirst({ where: { email } }) : null;
     if (!acc) {
-      console.info(`[EXT_SESSION_SYNC] No account row for ${email}; skipping (operator must add)`);
-      return;
+      const candidates = await prisma.vfsAccount.findMany({
+        where: { status: { not: 'BLOCKED' } },
+        orderBy: { lastWarmedAt: 'asc' },
+        take: 2,
+      });
+      if (candidates.length === 1) {
+        acc = candidates[0];
+        console.info(`[EXT_SESSION_SYNC] No email in payload; single-account fallback → ${acc.email}`);
+      } else {
+        console.info(`[EXT_SESSION_SYNC] No account row for "${email}" and ${candidates.length} candidates — skipping`);
+        return;
+      }
     }
     // Validate we actually have a Datadome trust cookie before marking the
     // account warm — without it, bookings will hit lift-api 403.
@@ -139,6 +153,21 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   }
 
   if (event.type === 'EXT_BOOKING_COMPLETED') {
+    // If this event carries a correlationId from a worker-dispatched
+    // BOOK_FOR_CUSTOMER, resolve the pending promise so the booking worker
+    // finishes its job. The worker handles the DB write + Telegram alert
+    // via its own success path; do NOT also create a Booking row here or
+    // we'll get duplicates.
+    if (typeof event.correlationId === 'string' && event.correlationId) {
+      const { resolveExtensionBooking } = await import('@modules/booking/extension-dispatch.service');
+      resolveExtensionBooking(event.correlationId, {
+        success: true,
+        confirmationNumber: String(event.confirmationNumber ?? ''),
+        accountEmail: typeof event.accountEmail === 'string' ? event.accountEmail : undefined,
+      });
+      return;
+    }
+    // Legacy path: standalone extension booking (no worker correlation).
     const profile = await prisma.profile.findFirst({ where: { isActive: true }, orderBy: { priority: 'asc' } });
     if (profile) {
       await prisma.booking.create({
@@ -162,6 +191,15 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   }
 
   if (event.type === 'EXT_BOOKING_FAILED') {
+    if (typeof event.correlationId === 'string' && event.correlationId) {
+      const { resolveExtensionBooking } = await import('@modules/booking/extension-dispatch.service');
+      resolveExtensionBooking(event.correlationId, {
+        success: false,
+        reason: String(event.reason ?? 'EXTENSION_BOOKING_FAILED'),
+        accountEmail: typeof event.accountEmail === 'string' ? event.accountEmail : undefined,
+      });
+      return;
+    }
     await dispatchNotification({
       event: 'BOOKING_FAILED',
       destination: String(event.destination ?? 'lva'),

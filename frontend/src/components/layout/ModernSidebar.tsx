@@ -26,6 +26,8 @@ const menuItems = [
   ]},
   { group: 'Records', items: [
     { label: 'Applicants', href: '/profiles', icon: Users },
+    { label: 'Account Pool', href: '/account-pool', icon: ShieldCheck },
+    { label: 'Extension Setup', href: '/extension-setup', icon: Wand2 },
   ]},
   { group: 'System', items: [
     // { label: 'Agent Mode', href: '/settings?tab=engine', icon: ShieldCheck },

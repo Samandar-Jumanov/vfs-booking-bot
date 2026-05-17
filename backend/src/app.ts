@@ -27,8 +27,24 @@ export function createApp() {
 
   // ── Security / parsing middleware ──────────────────────────────────────────
   app.use(helmet());
+  // Accept comma-separated origins via FRONTEND_URL ("http://localhost:3000,http://localhost:3010")
+  // and also dev hosts by default so local Next.js / Vite reloads on alternate ports work.
+  const allowedOrigins = new Set<string>(
+    [
+      ...env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean),
+      'http://localhost:3000',
+      'http://localhost:3010',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:3010',
+    ],
+  );
   app.use(cors({
-    origin: env.FRONTEND_URL,
+    origin: (origin, cb) => {
+      if (!origin || allowedOrigins.has(origin)) return cb(null, true);
+      // Chrome extensions: chrome-extension://<id> — always allow (extension is the booking agent).
+      if (origin.startsWith('chrome-extension://') || origin.startsWith('moz-extension://')) return cb(null, true);
+      cb(new Error(`CORS: origin ${origin} not allowed`));
+    },
     credentials: true,
   }));
   app.use(compression());
