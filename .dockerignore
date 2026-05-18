@@ -1,0 +1,17 @@
+# Exclude workspace symlinks that Docker's tar archiver cannot handle
+node_modules/backend
+node_modules/frontend
+
+# Exclude frontend from backend Docker build context (not needed)
+frontend
+
+# Exclude build artifacts and secrets
+backend/dist
+backend/.env
+*.log
+.git
+.claude
+.claude-flow
+
+# Exclude test artifacts and screenshots
+*.png

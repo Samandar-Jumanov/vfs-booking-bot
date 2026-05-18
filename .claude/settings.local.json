@@ -7,7 +7,19 @@
       "Bash(curl *)",
       "Bash(docker stop *)",
       "Bash(docker start *)",
-      "Bash(nslookup binaries.prisma.sh)"
+      "Bash(nslookup binaries.prisma.sh)",
+      "Bash(until docker logs *)",
+      "Bash(docker logs *)",
+      "Bash(cmd //c \"taskkill /F /IM chrome.exe\")",
+      "Bash(rm -rf \"C:/vfs-bot-chrome-profile-uz\")",
+      "Bash(mkdir \"C:/vfs-bot-chrome-profile-uz\")",
+      "Bash(rm -rf \"C:/vfs-bot-chrome-warmup\")",
+      "Bash(mkdir -p \"C:/vfs-bot-chrome-warmup\")",
+      "Bash(rm -rf \"C:/vfs-bot-patchright-profile\")",
+      "Bash(mkdir \"C:/vfs-bot-patchright-profile\")",
+      "Bash(rm -rf \"C:/vfs-bot-patchright-warm\")",
+      "Bash(mkdir \"C:/vfs-bot-patchright-warm\")",
+      "Bash(timeout 300 npx tsx scripts/patchright-warmup-login.ts)"
     ]
   }
 }
