@@ -37,3 +37,4 @@ test-results/
 *.tsbuildinfo
 frontend/tsc_errors.txt
 backend/tsc_errors.txt
+frontend/package-lock.json

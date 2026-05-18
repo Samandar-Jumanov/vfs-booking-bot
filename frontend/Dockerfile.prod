@@ -10,8 +10,11 @@ FROM node:20-slim AS builder
 WORKDIR /app
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+COPY frontend/package.json ./
+# Lockfile intentionally not copied: when generated on Windows it pins
+# @next/swc-win32-x64-msvc which fails on linux/amd64. Let npm resolve
+# the right SWC binary for the build platform.
+RUN npm install --no-audit --no-fund --no-package-lock
 
 COPY frontend/ ./
 # NEXT_PUBLIC_API_URL must be set at BUILD time (baked into the bundle).
