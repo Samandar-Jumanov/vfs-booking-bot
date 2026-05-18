@@ -9,9 +9,10 @@ backend/.env
 sessions/
 backend/.browser-profiles/
 
-# Logs
+# Logs (runtime artifact dirs only — NOT the src/modules/logs source module)
 *.log
-logs/
+/logs/
+/backend/logs/
 
 # OS
 .DS_Store
