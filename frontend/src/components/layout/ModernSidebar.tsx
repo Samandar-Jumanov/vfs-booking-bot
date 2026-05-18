@@ -1,37 +1,33 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { 
-  LayoutDashboard, 
-  Users, 
-  Activity, 
-  Settings, 
+import {
+  LayoutDashboard,
+  Users,
+  Activity,
+  Settings,
   Wand2,
-  LogOut, 
+  LogOut,
   Terminal,
   ShieldCheck,
-  Bell,
-  Navigation
+  Puzzle,
+  Navigation,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
-import { motion } from 'framer-motion';
 
 const menuItems = [
   { group: 'Operations', items: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { label: 'Setup', href: '/setup', icon: Wand2 },
-    { label: 'Monitoring', href: '/setup', icon: Activity },
+    { label: 'Monitor Setup', href: '/setup', icon: Activity },
     { label: 'Activity Logs', href: '/logs', icon: Terminal },
   ]},
   { group: 'Records', items: [
     { label: 'Applicants', href: '/profiles', icon: Users },
     { label: 'Account Pool', href: '/account-pool', icon: ShieldCheck },
-    { label: 'Extension Setup', href: '/extension-setup', icon: Wand2 },
+    { label: 'Extension Setup', href: '/extension-setup', icon: Puzzle },
   ]},
   { group: 'System', items: [
-    // { label: 'Agent Mode', href: '/settings?tab=engine', icon: ShieldCheck },
-    // { label: 'Notifications', href: '/settings?tab=notifications', icon: Bell },
     { label: 'Global Settings', href: '/settings', icon: Settings },
   ]},
 ];
@@ -41,7 +37,7 @@ export function ModernSidebar() {
   const logout = useAuthStore((s) => s.logout);
 
   return (
-    <aside className="w-64 border-r bg-card/30 backdrop-blur-xl flex flex-col h-full transition-all duration-300">
+    <aside className="w-64 border-r bg-card/30 backdrop-blur-xl flex flex-col h-full">
       <div className="p-6 flex items-center gap-3">
         <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
           <Navigation className="w-5 h-5 text-primary-foreground" />
@@ -57,30 +53,29 @@ export function ModernSidebar() {
             </h3>
             <div className="space-y-1">
               {group.items.map((item) => {
-                const isActive = pathname === item.href;
+                const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
                 return (
                   <Link
                     key={`${item.label}-${item.href}`}
                     href={item.href}
                     className={cn(
-                      "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 group relative",
-                      isActive 
-                        ? "bg-accent text-accent-foreground shadow-sm" 
-                        : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                      'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium group relative',
+                      'transition-colors duration-150 ease-out',
+                      isActive
+                        ? 'bg-accent text-accent-foreground shadow-sm'
+                        : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
                     )}
                   >
-                    <item.icon className={cn(
-                      "w-4 h-4 transition-colors",
-                      isActive ? "text-primary" : "group-hover:text-foreground"
-                    )} />
-                    {item.label}
                     {isActive && (
-                      <motion.div
-                        layoutId="active-nav"
-                        className="absolute left-0 w-1 h-4 bg-primary rounded-full"
-                        transition={{ type: "spring", stiffness: 300, damping: 300 }}
-                      />
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-primary rounded-full" />
                     )}
+                    <item.icon
+                      className={cn(
+                        'w-4 h-4 shrink-0',
+                        isActive ? 'text-primary' : 'group-hover:text-foreground',
+                      )}
+                    />
+                    <span className="truncate">{item.label}</span>
                   </Link>
                 );
               })}
