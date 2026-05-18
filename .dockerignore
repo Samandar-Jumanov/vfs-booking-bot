@@ -15,9 +15,11 @@ frontend/.next
 !**/.env.example
 !**/.env.production.example
 
-# Logs
+# Logs (runtime artifact dirs only — NOT src/modules/logs source module)
 *.log
-**/logs
+/logs
+/backend/logs
+/frontend/logs
 
 # VCS / IDE / agent metadata
 .git
