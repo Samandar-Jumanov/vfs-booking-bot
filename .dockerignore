@@ -1,17 +1,35 @@
 # Exclude workspace symlinks that Docker's tar archiver cannot handle
-node_modules/backend
-node_modules/frontend
+node_modules
+**/node_modules
 
-# Exclude frontend from backend Docker build context (not needed)
-frontend
-
-# Exclude build artifacts and secrets
+# Build artifacts
 backend/dist
-backend/.env
+frontend/.next
+**/dist
+**/.next
+*.tsbuildinfo
+
+# Secrets / env (any .env file)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.production.example
+
+# Logs
 *.log
+**/logs
+
+# VCS / IDE / agent metadata
 .git
+.gitignore
 .claude
 .claude-flow
+.codex
+.cursor
+.vscode
+.idea
 
-# Exclude test artifacts and screenshots
-*.png
+# Test artifacts
+playwright-report
+test-results
+coverage
