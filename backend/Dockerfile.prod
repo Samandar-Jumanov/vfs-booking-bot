@@ -1,0 +1,62 @@
+# Production-optimized backend Dockerfile for the account-pool / extension
+# architecture. No Playwright/Xvfb (the extension running on operator's Chrome
+# does all browsing; backend is pure Node + Prisma + BullMQ).
+#
+# Build from repo root:
+#   docker build -f backend/Dockerfile.prod -t vfs-bot-backend .
+# Or via docker-compose.prod.yml (recommended).
+
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM node:20-slim AS builder
+
+WORKDIR /app
+RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY backend/package.json backend/package-lock.json* ./
+COPY backend/prisma ./prisma/
+COPY backend/tsconfig.json ./
+COPY backend/src ./src/
+
+RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+# Prisma 5.x can run generate without an actual DB connection, but it does need
+# a valid-looking URL. Dummy is fine — the schema parsing is offline.
+ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
+RUN node_modules/.bin/prisma generate
+RUN node_modules/.bin/tsc --project tsconfig.json && node_modules/.bin/tsc-alias -p tsconfig.json
+
+# Prune dev deps for the runtime stage.
+RUN npm prune --omit=dev
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM node:20-slim AS runner
+
+WORKDIR /app
+RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates dumb-init curl && rm -rf /var/lib/apt/lists/*
+
+ENV NODE_ENV=production
+ENV PORT=3001
+
+COPY --from=builder /app/node_modules ./node_modules/
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/package.json ./
+
+# Re-generate Prisma client against the runtime libc / openssl so binary
+# bindings match (schema declares debian-openssl-3.0.x).
+ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
+RUN node_modules/.bin/prisma generate
+
+# Non-root user.
+RUN groupadd -r app && useradd -r -g app -d /app -s /usr/sbin/nologin app && chown -R app:app /app
+USER app
+
+EXPOSE 3001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
+
+# dumb-init reaps zombies (important for BullMQ child processes).
+ENTRYPOINT ["dumb-init", "--"]
+# Apply migrations then start the server. Railway/Render run this as PID 1.
+CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && node dist/index.js"]
