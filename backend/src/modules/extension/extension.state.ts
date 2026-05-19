@@ -117,8 +117,18 @@ export async function dispatchBookingToExtension(opts: {
 }
 
 export async function handleExtensionEvent(customerId: string, event: { type?: string; [key: string]: unknown }): Promise<void> {
+  // Log every event we receive from the extension so the operator can see in
+  // the Activity Logs whether polling is actually happening. EXT_HEARTBEAT is
+  // too noisy (every 30s) — log it only at trace level to console.
   if (event.type === 'EXT_HEARTBEAT') {
     markExtensionHeartbeat(customerId);
+    return;
+  }
+  if (event.type === 'EXT_POLL_RESULT') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.MONITOR_STARTED,
+      `[EXT_POLL_RESULT] dest=${event.destination} status=${event.status} hasData=${Boolean(event.data)}`);
     return;
   }
 
