@@ -186,8 +186,25 @@ async function applyRegisterCaptchaToken(token: string | null): Promise<void> {
 }
 
 function isLoggedIn(): boolean {
-  const text = document.body.innerText.toLowerCase();
-  return text.includes('dashboard') || text.includes('schedule appointment') || text.includes('logout') || location.pathname.includes('dashboard');
+  // URL-based check — language-agnostic. We're "logged in" iff we're on a
+  // VFS path that isn't an auth page. The old English-text check failed for
+  // operators with UI in Uzbek/Russian.
+  const path = location.pathname.toLowerCase();
+  if (path.includes('/login') || path.includes('/register') || path.includes('/page-not-found') || path.includes('/forgot-password')) {
+    return false;
+  }
+  // Fallback: accept if there's an Authorization-like JWT in localStorage.
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (/(token|auth|jwt|access)/i.test(key) && (localStorage.getItem(key) ?? '').length > 20) {
+        return true;
+      }
+    }
+  } catch { /* ignore */ }
+  // If we're on vfsglobal.com on any non-auth path, assume logged in and let
+  // the API call validate. A 401 from /Slot/Get will surface as a regular
+  // EXT_POLL_RESULT with status=401 instead of a hard SESSION_LOST.
+  return location.hostname.includes('vfsglobal.com');
 }
 
 async function pollSlot(monitor: MonitorConfig): Promise<PollSlotResult> {
