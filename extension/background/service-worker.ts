@@ -73,7 +73,9 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     return { settings: await getSettings(), state: runtimeState };
   }
   if (message.type === 'SAVE_SETTINGS') {
-    await saveSettings(message.settings as Partial<ExtensionSettings>);
+    const incoming = message.settings as Partial<ExtensionSettings>;
+    log('SAVE_SETTINGS received — backendUrl=', incoming.backendUrl, 'hasToken=', Boolean(incoming.extensionToken), 'email=', incoming.customerEmail);
+    await saveSettings(incoming);
     await connectFromStoredSettings();
     return { ok: true };
   }
