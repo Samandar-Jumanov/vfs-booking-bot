@@ -576,7 +576,21 @@ export async function startMonitor(id: string): Promise<void> {
     } else {
       logEvent('warn', EventType.MONITOR_STARTED, `[Monitor] EXTENSION_BOOKING=true but OPERATOR_USER_ID not set in env`);
     }
-    // Stay "running" so the dashboard reflects it; extension drives the poll.
+
+    // Keep the supervisor happy: the actual poll runs in the extension, but
+    // the supervisor expects a heartbeat in Redis every <60s or it kills the
+    // monitor as "crashed". Refresh the heartbeat every 30s here. Extension
+    // drives the actual VFS fetch.
+    const heartbeatTimer = setInterval(() => {
+      const c = getMonitor(id);
+      if (!c || !c.isRunning) {
+        clearInterval(heartbeatTimer);
+        return;
+      }
+      getRedis().set(`monitor:${id}:heartbeat`, Date.now().toString(), 'EX', 90).catch(() => undefined);
+    }, 30_000);
+    // Store the timer handle so stopMonitor can clear it later.
+    monitorTimeouts.set(id, heartbeatTimer as unknown as NodeJS.Timeout);
     return;
   }
 
