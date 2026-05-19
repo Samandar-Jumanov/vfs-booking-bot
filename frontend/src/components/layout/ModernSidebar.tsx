@@ -30,7 +30,6 @@ const menuItems = [
   ]},
   { group: 'System', items: [
     { label: 'Vendor Costs', href: '/vendors', icon: Wallet },
-    { label: 'Global Settings', href: '/settings', icon: Settings },
   ]},
 ];
 
