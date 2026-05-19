@@ -24,7 +24,8 @@ const envSchema = z.object({
   CAPTCHA_SOLVER: z.enum(['twocaptcha', 'manual']).default('manual'),
 
   SMS_ACTIVATE_API_KEY: z.string().optional(),
-  SMS_PROVIDER: z.enum(['smsactivate', 'vaksms']).default('smsactivate'),
+  SMS_PROVIDER: z.enum(['smsactivate', 'vaksms', 'onlinesim']).default('smsactivate'),
+  ONLINESIM_API_KEY: z.string().optional(),
   VAKSMS_API_KEY: z.string().optional(),
   VAKSMS_COUNTRY: z.string().default('uz'),
 
