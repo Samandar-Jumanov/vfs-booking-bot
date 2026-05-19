@@ -1,7 +1,7 @@
 import type { ExtensionSettings } from '../shared/types';
 
 const DEFAULTS: ExtensionSettings = {
-  backendUrl: 'http://localhost:3001',
+  backendUrl: 'https://backend-production-24c3.up.railway.app',
   autoBook: true,
   soundAlerts: true,
   pollingIntervalSeconds: 30,

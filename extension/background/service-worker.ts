@@ -6,7 +6,7 @@ const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
 log('boot at', new Date().toISOString());
 
 const DEFAULT_SETTINGS: ExtensionSettings = {
-  backendUrl: 'http://localhost:3001',
+  backendUrl: 'https://backend-production-24c3.up.railway.app',
   autoBook: true,
   soundAlerts: true,
   pollingIntervalSeconds: 30,
