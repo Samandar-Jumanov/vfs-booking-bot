@@ -51,7 +51,7 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
   // service name (default to a generic catch-all). For OnlineSIM the cheapest
   // generic is typically "other" or "mail.ru"; for Vak-SMS "vfs" works.
   const smsService = process.env.SMS_SERVICE_NAME
-    || (smsVendor === 'onlinesim' ? 'mailru' : 'vfs');
+    || (smsVendor === 'onlinesim' ? 'facebook' : 'vfs');
   const phone = await smsProvider.buyNumber(smsService, opts.countryCode);
   await recordSpend({
     vendor: smsVendor,
