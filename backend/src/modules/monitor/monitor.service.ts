@@ -553,14 +553,20 @@ export async function startMonitor(id: string): Promise<void> {
     const operatorUserId = process.env.OPERATOR_USER_ID;
     if (operatorUserId) {
       const { sendToExtension } = await import('@modules/websocket/ws.server');
+      // Translate dashboard-friendly names ("uzbekistan", "latvia") into the
+      // 3-letter codes the VFS lift-api expects ("uzb", "lva"). The content
+      // script POSTs these directly to /Slot/Get.
+      const sourceCode = getSourceCode(current.sourceCountry);
+      const destCode = getDestinationCode(current.destination);
       const dispatched = sendToExtension(operatorUserId, {
         type: 'START_MONITOR',
         monitor: {
-          id,
-          sourceCountry: current.sourceCountry,
-          destination: current.destination,
-          visaType: current.visaType,
-          intervalMs: current.intervalMs,
+          sourceCountry: sourceCode,
+          destination: destCode,
+          visaCategoryCode: current.visaType,
+          vacCode: process.env.VFS_DEFAULT_VAC_CODE || 'TASUZB',
+          loginUser: process.env.VFS_EMAIL || '',
+          roleName: 'Individual',
         },
       });
       logEvent('info', EventType.MONITOR_STARTED,
