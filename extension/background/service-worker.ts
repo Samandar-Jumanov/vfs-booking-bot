@@ -300,8 +300,28 @@ async function handleBookForCustomer(message: Extract<BackendMessage, { type: 'B
 }
 
 async function pollActiveMonitor(): Promise<void> {
+  // Re-hydrate runtimeState from storage so a SW cold-boot race doesn't drop
+  // the activeMonitor we just stored from a START_MONITOR message.
+  if (!runtimeState.activeMonitor) {
+    try {
+      const stored = (await chrome.storage.local.get(null)) as { runtimeState?: RuntimeState };
+      if (stored.runtimeState?.activeMonitor) {
+        runtimeState = { ...runtimeState, activeMonitor: stored.runtimeState.activeMonitor };
+        log('pollActiveMonitor: rehydrated activeMonitor from storage');
+      }
+    } catch { /* ignore */ }
+  }
+
   const monitor = runtimeState.activeMonitor;
-  if (!monitor || runtimeState.connectionStatus !== 'connected') return;
+  if (!monitor) {
+    log('pollActiveMonitor: no activeMonitor — skipping');
+    return;
+  }
+  if (runtimeState.connectionStatus !== 'connected') {
+    log('pollActiveMonitor: WS not connected — skipping, will reconnect');
+    void connectFromStoredSettings();
+    return;
+  }
 
   try {
     const result = await sendToVfsTab({ type: 'POLL_SLOT', monitor });
@@ -331,7 +351,26 @@ async function pollActiveMonitor(): Promise<void> {
 async function sendToVfsTab(command: ContentCommand): Promise<unknown> {
   const tab = await findVfsTab(command.type === 'POLL_SLOT' ? command.monitor : undefined);
   if (!tab.id) throw new Error('No VFS tab is open');
-  return chrome.tabs.sendMessage(tab.id, command);
+  try {
+    return await chrome.tabs.sendMessage(tab.id, command);
+  } catch (err) {
+    const msg = String((err as Error).message ?? err);
+    // "Receiving end does not exist" = content script not injected (tab loaded
+    // before extension was installed/reloaded). Inject it programmatically.
+    if (msg.includes('Receiving end does not exist') || msg.includes('Could not establish connection')) {
+      log('sendToVfsTab: injecting content script into tab', tab.id, '(missing)');
+      try {
+        await (chrome as unknown as { scripting: { executeScript: (opts: { target: { tabId: number }; files: string[] }) => Promise<unknown> } })
+          .scripting.executeScript({ target: { tabId: tab.id }, files: ['content/vfs-bridge.js'] });
+        // Tiny delay so the listener registers.
+        await new Promise((r) => self.setTimeout(r, 250));
+        return await chrome.tabs.sendMessage(tab.id, command);
+      } catch (inject) {
+        throw new Error('Content script injection failed: ' + String((inject as Error).message ?? inject));
+      }
+    }
+    throw err;
+  }
 }
 
 async function findVfsTab(monitor?: MonitorConfig): Promise<chrome.tabs.Tab> {
