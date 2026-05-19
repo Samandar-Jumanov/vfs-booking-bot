@@ -42,8 +42,35 @@ export function markExtensionHeartbeat(customerId: string): ExtensionConnectionS
 }
 
 export function getExtensionState(customerId: string): ExtensionConnectionState | undefined {
-  return extensionStates.get(customerId);
+  const state = extensionStates.get(customerId);
+  if (!state) return undefined;
+  // Don't claim "connected" if last heartbeat is older than 60s. The TCP
+  // socket may not have closed cleanly (idle-killed service worker, network
+  // drop, NAT timeout) so we use heartbeat freshness as ground truth.
+  if (state.connected && state.lastHeartbeatAt) {
+    const ageMs = Date.now() - new Date(state.lastHeartbeatAt).getTime();
+    if (ageMs > 60_000) {
+      const stale = { ...state, connected: false };
+      extensionStates.set(customerId, stale);
+      return stale;
+    }
+  }
+  return state;
 }
+
+// Periodic sweeper so anyone polling the state sees fresh data even when
+// they're not the one to trigger getExtensionState.
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, state] of extensionStates) {
+    if (state.connected && state.lastHeartbeatAt) {
+      const ageMs = now - new Date(state.lastHeartbeatAt).getTime();
+      if (ageMs > 60_000) {
+        extensionStates.set(id, { ...state, connected: false });
+      }
+    }
+  }
+}, 30_000).unref();
 
 export async function dispatchBookingToExtension(opts: {
   customerId: string;

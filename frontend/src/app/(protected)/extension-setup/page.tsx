@@ -136,7 +136,11 @@ export default function ExtensionSetupPage() {
             <StatusRow label="Installed" value={extensionDetected ? 'Detected' : 'Waiting'} ok={extensionDetected} />
             <StatusRow label="Backend" value={statusQuery.data?.connected ? 'Connected' : 'Offline'} ok={Boolean(statusQuery.data?.connected)} />
             <StatusRow label="Customer" value={statusQuery.data?.customerEmail ?? 'Unknown'} />
-            <StatusRow label="Last heartbeat" value={statusQuery.data?.lastHeartbeatAt ? new Date(statusQuery.data.lastHeartbeatAt).toLocaleString() : 'Never'} />
+            <StatusRow
+              label="Last heartbeat"
+              value={statusQuery.data?.lastHeartbeatAt ? relativeTime(statusQuery.data.lastHeartbeatAt) : 'Never'}
+              ok={statusQuery.data?.lastHeartbeatAt ? Date.now() - new Date(statusQuery.data.lastHeartbeatAt).getTime() < 60_000 : false}
+            />
           </div>
           {statusQuery.data?.connected && (
             <a href="/dashboard" className="btn-primary mt-5 h-11 w-full">All set</a>
@@ -154,4 +158,17 @@ function StatusRow({ label, value, ok }: { label: string; value: string; ok?: bo
       <span className={cn('text-right font-bold', ok === true && 'text-green-300', ok === false && 'text-amber-300')}>{value}</span>
     </div>
   );
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return 'just now';
+  const s = Math.floor(diff / 1000);
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return new Date(iso).toLocaleString();
 }
