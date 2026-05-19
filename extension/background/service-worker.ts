@@ -1,6 +1,10 @@
 import { ExtensionWsClient } from '../shared/ws-client';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
+const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
+const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
+log('boot at', new Date().toISOString());
+
 const DEFAULT_SETTINGS: ExtensionSettings = {
   backendUrl: 'http://localhost:3001',
   autoBook: true,
@@ -43,6 +47,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  log('alarm fired:', alarm.name, 'connectionStatus=', runtimeState.connectionStatus);
   // Every alarm wake-up: make sure the WS is alive. If the SW was idle-killed
   // its WS is gone. Reconnect if disconnected. Idempotent if already up.
   if (runtimeState.connectionStatus !== 'connected') {
@@ -133,7 +138,9 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
 
 async function connectFromStoredSettings(): Promise<void> {
   const settings = await getSettings();
+  log('connectFromStoredSettings — backendUrl=', settings.backendUrl, 'hasToken=', Boolean(settings.extensionToken), 'customerEmail=', settings.customerEmail);
   if (!settings.extensionToken) {
+    warn('no extensionToken in storage — pair via Options first');
     runtimeState = { ...runtimeState, connectionStatus: 'disconnected', customerEmail: settings.customerEmail };
     await saveRuntimeState();
     return;
@@ -145,10 +152,12 @@ async function connectFromStoredSettings(): Promise<void> {
     token: settings.extensionToken,
     onMessage: handleBackendMessage,
     onStatus: (connectionStatus, lastError) => {
+      log('WS status →', connectionStatus, lastError ? '(error: ' + lastError + ')' : '');
       runtimeState = { ...runtimeState, connectionStatus, lastError, customerEmail: settings.customerEmail };
       void saveRuntimeState();
     },
   });
+  log('opening WS to', settings.backendUrl, '/extension');
   wsClient.connect();
 }
 

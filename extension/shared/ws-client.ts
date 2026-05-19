@@ -17,8 +17,10 @@ export class ExtensionWsClient {
   connect(): void {
     this.options.onStatus('connecting');
     const url = this.buildUrl();
+    console.log('[VFS-WS] connect →', url.replace(/token=[^&]+/, 'token=<redacted>'));
     this.socket = new WebSocket(url);
     this.socket.addEventListener('open', () => {
+      console.log('[VFS-WS] OPEN');
       this.retry = 0;
       this.options.onStatus('connected');
     });
@@ -26,8 +28,12 @@ export class ExtensionWsClient {
       const parsed = this.safeParse(event.data);
       if (parsed) this.options.onMessage(parsed as BackendMessage);
     });
-    this.socket.addEventListener('close', () => this.scheduleReconnect());
-    this.socket.addEventListener('error', () => {
+    this.socket.addEventListener('close', (e) => {
+      console.warn('[VFS-WS] CLOSE code=', e.code, 'reason=', e.reason || '(none)');
+      this.scheduleReconnect();
+    });
+    this.socket.addEventListener('error', (e) => {
+      console.error('[VFS-WS] ERROR', e);
       this.options.onStatus('error', 'WebSocket error');
       this.scheduleReconnect();
     });
