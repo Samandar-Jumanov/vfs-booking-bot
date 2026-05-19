@@ -96,10 +96,14 @@ export default function ExtensionSetupPage() {
                     <h2 className="mt-1 text-lg font-black">{step.title}</h2>
                     <p className="mt-1 text-sm text-muted-foreground">{step.description}</p>
                     {index === 0 && (
-                      <a className="btn-secondary mt-4 h-10 w-fit gap-2" href="/extension/dist" target="_blank" rel="noreferrer">
-                        <ExternalLink className="h-4 w-4" />
-                        Install Chrome Extension
-                      </a>
+                      <div className="mt-4 rounded-lg border bg-muted/40 p-4 text-sm">
+                        <p className="font-medium">Local install (unpacked):</p>
+                        <ol className="mt-2 list-decimal space-y-1 pl-5 text-muted-foreground">
+                          <li>Open <code className="rounded bg-background px-1.5 py-0.5">chrome://extensions</code></li>
+                          <li>Enable <strong>Developer mode</strong> (top-right)</li>
+                          <li>Click <strong>Load unpacked</strong> → pick the <code className="rounded bg-background px-1.5 py-0.5">extension/dist</code> folder from this repo</li>
+                        </ol>
+                      </div>
                     )}
                     {index === 1 && (
                       <div className="mt-4 flex flex-wrap items-center gap-3">
