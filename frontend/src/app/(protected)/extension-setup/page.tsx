@@ -35,11 +35,15 @@ export default function ExtensionSetupPage() {
     onSuccess: setTokenResponse,
   });
 
+  const [autoPaired, setAutoPaired] = useState(false);
+  const [autoPairError, setAutoPairError] = useState<string | null>(null);
+
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (event.data?.source === 'vfs-booking-extension' && event.data?.type === 'EXTENSION_PRESENT') {
-        setExtensionDetected(true);
-      }
+      if (event.data?.source !== 'vfs-booking-extension') return;
+      if (event.data.type === 'EXTENSION_PRESENT') setExtensionDetected(true);
+      if (event.data.type === 'AUTO_PAIRED') setAutoPaired(true);
+      if (event.data.type === 'AUTO_PAIR_FAILED') setAutoPairError(String(event.data.reason ?? 'unknown'));
     };
     window.addEventListener('message', onMessage);
     window.postMessage({ source: 'vfs-dashboard', type: 'PING_EXTENSION' }, window.location.origin);
@@ -51,6 +55,28 @@ export default function ExtensionSetupPage() {
       window.clearInterval(id);
     };
   }, []);
+
+  // Auto-pair as soon as the extension is detected AND the backend says
+  // it's not connected yet. No 6-digit code typing required — we mint an
+  // extension token (the dashboard is already authenticated) and pipe it
+  // directly to the extension via postMessage.
+  useEffect(() => {
+    if (!extensionDetected) return;
+    if (statusQuery.data?.connected) return;
+    if (autoPaired) return;
+    if (autoPairError) return;
+    if (tokenMutation.isPending) return;
+    void tokenMutation.mutateAsync().then((tok) => {
+      const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? '').replace(/\/api$/, '').replace(/\/$/, '');
+      window.postMessage({
+        source: 'vfs-dashboard',
+        type: 'AUTO_PAIR',
+        extensionToken: tok.extensionToken,
+        customerEmail: undefined,
+        backendUrl: backendUrl || window.location.origin.replace('frontend', 'backend'),
+      }, window.location.origin);
+    }).catch((e) => setAutoPairError((e as Error).message));
+  }, [extensionDetected, statusQuery.data?.connected, autoPaired, autoPairError, tokenMutation]);
 
   const steps = useMemo(() => [
     {
