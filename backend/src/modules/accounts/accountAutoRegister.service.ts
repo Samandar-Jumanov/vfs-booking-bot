@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { prisma } from '@config/database';
 import { solveTurnstile } from '@modules/captcha/twoCaptcha';
+import { claimToken, registerPool } from '@modules/captcha/token.pool';
 import { sendToExtension } from '@modules/websocket/ws.server';
 import { encrypt } from '@utils/crypto';
 import { recordSpend } from '@modules/vendor/spend.recorder';
@@ -166,6 +167,13 @@ export async function fetchSmsOtp(smsActivateId: string): Promise<string | null>
 
 export async function fetchRegisterCaptchaToken(siteKey: string, pageUrl: string): Promise<string | null> {
   if (!siteKey || !pageUrl) return null;
+  // Register this (siteKey, pageUrl) with the pool so future requests get a
+  // pre-solved token immediately.
+  registerPool(siteKey, pageUrl);
+  // Try the pool first — instant if there's a fresh token.
+  const pooled = claimToken(siteKey, pageUrl);
+  if (pooled) return pooled;
+  // Fall back to live solve (4–15s).
   try {
     return await solveTurnstile(siteKey, pageUrl);
   } catch {

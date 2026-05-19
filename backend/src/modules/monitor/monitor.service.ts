@@ -674,7 +674,7 @@ export async function startMonitor(id: string): Promise<void> {
         }
       }
 
-      const nextPoll = setTimeout(poll, config.intervalMs || 30000);
+      const nextPoll = setTimeout(poll, config.intervalMs || env.MONITOR_DEFAULT_INTERVAL_MS);
       monitorTimeouts.set(id, nextPoll);
 
     } catch (err: any) {
@@ -745,7 +745,7 @@ export async function autoStartMonitors(): Promise<void> {
         sourceCountry: booking.profile.nationality || 'uzbekistan',
         destination: booking.destination.toLowerCase(),
         visaType: booking.visaType,
-        intervalMs: 30000,
+        intervalMs: env.MONITOR_DEFAULT_INTERVAL_MS,
         profileIds: [booking.profileId],
         mode: 'auto',
       });

@@ -66,7 +66,16 @@ const envSchema = z.object({
 
   BOOKING_CONCURRENCY: z.coerce.number().default(3),
   BOOKING_DRY_RUN: z.string().transform((v) => v !== 'false').default('true'),
-  MONITOR_DEFAULT_INTERVAL_MS: z.coerce.number().default(10000),
+  // Default 5s — speed-pack floor. Per-account polling; sharding spreads load
+  // across the pool so effective slot detection lag is interval/N.
+  MONITOR_DEFAULT_INTERVAL_MS: z.coerce.number().default(5000),
+  // Minimum gap between polls hitting the SAME VFS account (anti-Datadome).
+  // VFS rate-limits ~3-5 req/sec; we stay well below.
+  MONITOR_MIN_INTERVAL_MS: z.coerce.number().default(5000),
+  // Captcha token pool: keep N pre-solved Turnstile tokens ready.
+  CAPTCHA_TOKEN_POOL_SIZE: z.coerce.number().default(3),
+  // Drop a captcha token when this old; 2Captcha tokens are valid ~120s.
+  CAPTCHA_TOKEN_MAX_AGE_MS: z.coerce.number().default(90_000),
   SESSION_DIR: z.string().default('/app/sessions'),
   BOOKING_MAX_RETRIES: z.coerce.number().default(3),
   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: z.string().optional(),

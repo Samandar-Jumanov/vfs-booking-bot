@@ -19,6 +19,7 @@ import { initWebSocket } from '@modules/websocket/ws.server';
 import { startBookingWorker, stopBookingWorker } from '@modules/booking/booking.worker';
 import { initTelegramBot } from '@modules/notifications/telegram.bot';
 import { startNotificationQueues, stopNotificationQueues } from '@modules/notifications/queues';
+import { startCaptchaPoolSweeper } from '@modules/captcha/token.pool';
 
 
 async function bootstrap() {
@@ -42,6 +43,9 @@ async function bootstrap() {
 
   await startNotificationQueues();
   console.info('Notification queues started');
+
+  startCaptchaPoolSweeper();
+  console.info('✅ Captcha token pool sweeper running');
 
   // Interactive Telegram Bot
   initTelegramBot();
