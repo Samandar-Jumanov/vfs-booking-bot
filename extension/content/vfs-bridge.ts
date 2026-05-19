@@ -69,24 +69,36 @@ async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
 }
 
 async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
-  await waitForElement('input[formcontrolname], input[type="email"], input[type="password"]', 30_000);
+  console.log('[VFS-REG] runRegisterSteps starting on', location.href);
+  await waitForElement('input[type="email"], input[type="password"]', 30_000);
+  console.log('[VFS-REG] form fields detected, filling…');
 
-  await typeIntoFirst(['input[formcontrolname="firstName"]', 'input[placeholder*="First" i]', 'input[name="firstName"]'], payload.firstName);
-  await typeIntoFirst(['input[formcontrolname="lastName"]', 'input[placeholder*="Last" i]', 'input[name="lastName"]'], payload.lastName);
-  await typeIntoFirst(['input[formcontrolname="email"]', 'input[type="email"]', 'input[name="email"]'], payload.email);
+  // VFS Uzbekistan /register form (verified from operator screenshots 2026-05-20):
+  //   Email • Password • Confirm Password • Mobile Number (dial-code+number) •
+  //   3 consent checkboxes • Cloudflare Turnstile • Register button.
+  // NO firstName / lastName / DOB. Old code targeted non-existent fields and
+  // failed silently → "Mandatory field cannot be left blank" → 5-min timeout.
+  await typeIntoFirst(['input[type="email"]', 'input[formcontrolname="email"]', 'input[name="email"]'], payload.email);
+  await typeIntoFirst(['input[type="password"]', 'input[formcontrolname="password"]', 'input[name="password"]'], payload.password);
   await typeIntoFirst([
-    'input[formcontrolname="mobileNumber"]',
-    'input[formcontrolname="phone"]',
-    'input[type="tel"]',
-    'input[name="phone"]',
-  ], payload.phone);
-  await typeIntoFirst(['input[formcontrolname="password"]', 'input[type="password"]', 'input[name="password"]'], payload.password);
-  await typeIntoFirst([
+    'input[type="password"][formcontrolname="confirmPassword"]',
     'input[formcontrolname="confirmPassword"]',
     'input[name="confirmPassword"]',
-    'input[placeholder*="Confirm" i][type="password"]',
+    // last password input that isn't the first one
   ], payload.password);
-  await typeIntoFirst(['input[type="date"]', 'input[formcontrolname="dob"]', 'input[name="dob"]'], payload.dob);
+  // Phone — VFS expects the LOCAL number (without country code; dial code is
+  // a separate select that defaults to 998 for UZ). Strip leading +998 if
+  // someone passes the full international form.
+  const localPhone = payload.phone.replace(/^\+?998/, '').replace(/^\+/, '');
+  await typeIntoFirst([
+    'input[formcontrolname="mobileNumber"]',
+    'input[type="tel"]',
+    'input[name="phone"]',
+    'input[name="mobile"]',
+  ], localPhone);
+  // Check all 3 consent checkboxes (Privacy Notice, Data Transfer, Terms).
+  await checkAllRegisterConsents();
+  console.log('[VFS-REG] consents checked');
 
   const turnstile = document.querySelector<HTMLElement>('[data-sitekey]');
   const siteKey = turnstile?.getAttribute('data-sitekey');
@@ -280,8 +292,32 @@ function detectAccountEmailFromDashboard(): Promise<string | undefined> {
 
 async function typeIntoFirst(selectors: string[], value: string): Promise<void> {
   const element = selectors.map((selector) => document.querySelector<HTMLInputElement>(selector)).find(Boolean);
-  if (!element) return;
+  if (!element) {
+    console.warn('[VFS-REG] no element matched any of:', selectors);
+    return;
+  }
   setInputValue(element, value);
+}
+
+// Check every consent checkbox on the VFS register form. There are 3:
+//   1. Privacy Notice / processing of personal data
+//   2. Data Transfer / international transfer
+//   3. Terms & Conditions
+// Skip the Cloudflare Turnstile checkbox — that one is handled by 2Captcha.
+async function checkAllRegisterConsents(): Promise<void> {
+  const boxes = Array.from(document.querySelectorAll<HTMLInputElement>(
+    'input[type="checkbox"]'
+  ));
+  console.log('[VFS-REG] found', boxes.length, 'checkboxes on page');
+  for (const box of boxes) {
+    // Skip Turnstile widget's internal checkbox if any.
+    const inTurnstile = box.closest('[data-sitekey], iframe, .cf-turnstile');
+    if (inTurnstile) continue;
+    if (!box.checked) {
+      box.click();
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
 }
 
 function setInputValue(element: HTMLInputElement | HTMLTextAreaElement | undefined, value: string): void {
