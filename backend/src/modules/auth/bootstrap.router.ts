@@ -27,27 +27,21 @@ bootstrapRouter.post('/admin', async (req, res) => {
     return res.status(500).json({ error: 'BOOTSTRAP_ADMIN_PASSWORD must be at least 8 characters' });
   }
 
-  const existing = await prisma.user.findFirst({ where: { role: 'ADMIN' as never } });
-  if (existing) {
-    return res.json({
-      created: false,
-      userId: existing.id,
-      email: existing.email,
-      message: 'Admin already exists.',
-    });
-  }
-
   const hash = await bcrypt.hash(password, 10);
-  const user = await prisma.user.create({
-    data: { email, passwordHash: hash, role: 'ADMIN' as never },
+  // Upsert: if an admin already exists, RESET its password to the one in env.
+  // Idempotent + lets the operator recover from "I forgot the bootstrap password".
+  const user = await prisma.user.upsert({
+    where: { email },
+    update: { passwordHash: hash, role: 'ADMIN' as never },
+    create: { email, passwordHash: hash, role: 'ADMIN' as never },
     select: { id: true, email: true, role: true },
   });
-  logger.warn(`bootstrap admin created: ${user.email}`);
+  logger.warn(`bootstrap admin upserted: ${user.email}`);
 
   res.json({
-    created: true,
+    upserted: true,
     userId: user.id,
     email: user.email,
-    message: 'Admin created. Set OPERATOR_USER_ID=<userId> on Railway, then log in.',
+    message: 'Admin password set. Use BOOTSTRAP_ADMIN_PASSWORD to log in.',
   });
 });
