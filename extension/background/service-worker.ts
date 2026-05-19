@@ -302,10 +302,15 @@ async function handleBookForCustomer(message: Extract<BackendMessage, { type: 'B
   }
 }
 
-// Backoff state when VFS returns 429. Next attempt is held off until this
-// timestamp. Doubles on each 429, max 5 min. Resets on a successful poll.
+// Backoff state when VFS returns 429. Persisted to chrome.storage so SW
+// idle-kill doesn't reset it (otherwise we'd keep hammering at 1/min while
+// the rate-limit hasn't cleared).
 let pollBackoffUntil = 0;
 let pollBackoffMs = 60_000;
+void chrome.storage.local.get({ pollBackoffUntil: 0, pollBackoffMs: 60_000 }).then((stored) => {
+  pollBackoffUntil = (stored.pollBackoffUntil as number) ?? 0;
+  pollBackoffMs = (stored.pollBackoffMs as number) ?? 60_000;
+});
 
 async function pollActiveMonitor(): Promise<void> {
   if (Date.now() < pollBackoffUntil) {
@@ -329,10 +334,13 @@ async function pollActiveMonitor(): Promise<void> {
     log('pollActiveMonitor: no activeMonitor — skipping');
     return;
   }
+  // Don't gate the poll on WS status — the actual VFS fetch happens via
+  // chrome.tabs.sendMessage (no WS dependency). If WS is down, kick a
+  // reconnect in background but still attempt the poll. If reporting back
+  // via sendEvent fails (WS still down), the result is just lost; next
+  // poll tries again. Heartbeat alarm will reconnect WS independently.
   if (runtimeState.connectionStatus !== 'connected') {
-    log('pollActiveMonitor: WS not connected — skipping, will reconnect');
     void connectFromStoredSettings();
-    return;
   }
 
   try {
@@ -347,9 +355,11 @@ async function pollActiveMonitor(): Promise<void> {
       pollBackoffUntil = Date.now() + pollBackoffMs;
       pollBackoffMs = Math.min(pollBackoffMs * 2, 5 * 60_000);
       log('VFS 429 — backing off for', pollBackoffMs / 1000, 's');
+      void chrome.storage.local.set({ pollBackoffUntil, pollBackoffMs });
     } else if (typed.status === 200) {
       pollBackoffMs = 60_000; // reset
       pollBackoffUntil = 0;
+      void chrome.storage.local.set({ pollBackoffUntil: 0, pollBackoffMs: 60_000 });
     }
     if (typed.earliestDate) {
       sendEvent({ type: 'EXT_SLOT_DETECTED', destination: monitor.destination, date: typed.earliestDate, raw: typed.data });
