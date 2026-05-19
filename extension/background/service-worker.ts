@@ -10,11 +10,29 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
 let wsClient: ExtensionWsClient | undefined;
 let runtimeState: RuntimeState = { connectionStatus: 'disconnected' };
+
+// Hydrate runtimeState from storage on cold boot so the popup doesn't
+// briefly show stale 'disconnected' between SW restart and WS reconnect.
+void chrome.storage.local.get('runtimeState').then((stored) => {
+  const persisted = (stored as { runtimeState?: RuntimeState }).runtimeState;
+  if (persisted) {
+    // Don't trust the persisted 'connected' as fact — WS will re-confirm.
+    // But we keep activeMonitor + customerEmail + lastHeartbeatAt so the
+    // popup shows continuity instead of resetting.
+    runtimeState = { ...persisted, connectionStatus: 'connecting' };
+  }
+});
 const activeRegisterTabs = new Map<string, number>();
 
+// MV3 idle-kills service workers in ~30s. We arm two recurring alarms so
+// the SW is woken on a fixed cadence — keeps the WS reconnect logic alive
+// and the heartbeat flowing to the backend. chrome.alarms.create is
+// idempotent (same-name re-creates are no-ops), so we run it at top-level
+// EVERY boot — not just onInstalled — to survive any cold-start path.
+chrome.alarms.create('vfs-extension-heartbeat', { periodInMinutes: 0.5 });
+chrome.alarms.create('vfs-extension-poll', { periodInMinutes: 0.5 });
+
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create('vfs-extension-heartbeat', { periodInMinutes: 0.5 });
-  chrome.alarms.create('vfs-extension-poll', { periodInMinutes: 0.5 });
   // Reconnect immediately so manifest reload doesn't leave the extension
   // disconnected until the operator clicks Save.
   void connectFromStoredSettings();
@@ -25,6 +43,11 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  // Every alarm wake-up: make sure the WS is alive. If the SW was idle-killed
+  // its WS is gone. Reconnect if disconnected. Idempotent if already up.
+  if (runtimeState.connectionStatus !== 'connected') {
+    void connectFromStoredSettings();
+  }
   if (alarm.name === 'vfs-extension-heartbeat') {
     sendEvent({ type: 'EXT_HEARTBEAT', at: new Date().toISOString(), state: runtimeState });
   }
