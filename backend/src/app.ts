@@ -18,6 +18,7 @@ import { proxyRouter } from '@modules/proxy/proxy.router';
 import { accountsRouter } from '@modules/accounts/accounts.router';
 import { extensionRouter } from '@modules/extension/extension.router';
 import { emailRouter } from '@modules/email/email.router';
+import { vendorRouter } from '@modules/vendor/vendor.router';
 
 export function createApp() {
   const app = express();
@@ -136,6 +137,7 @@ export function createApp() {
   app.use('/api/proxy', proxyRouter);
   app.use('/api/accounts', accountsRouter);
   app.use('/api/extension', extensionRouter);
+  app.use('/api/vendor', vendorRouter);
 
   // ── Error handler (must be last) ─────────────────────────────────────────
   app.use(errorHandler);

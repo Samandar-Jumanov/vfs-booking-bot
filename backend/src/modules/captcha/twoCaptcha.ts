@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { env } from '@config/env';
 import { sleep } from '@utils/retry';
+import { recordSpend } from '@modules/vendor/spend.recorder';
 
 const BASE = 'https://2captcha.com';
 const POLL_INTERVAL_MS = 5000;
@@ -30,6 +31,14 @@ async function submitAndPoll(submitParams: Record<string, string | number>): Pro
     });
 
     if (pollRes.data.status === 1) {
+      // Fire-and-forget: log the spend (avg Turnstile ≈ $0.003 on 2Captcha).
+      recordSpend({
+        vendor: '2captcha',
+        kind: 'CAPTCHA',
+        action: String(submitParams.method ?? 'unknown'),
+        costUsd: 0.003,
+        externalRef: String(taskId),
+      }).catch(() => undefined);
       return pollRes.data.request as string;
     }
 

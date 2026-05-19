@@ -3,13 +3,28 @@ import { prisma } from '@config/database';
 import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { sendToExtension } from '@modules/websocket/ws.server';
 import { encrypt } from '@utils/crypto';
+import { recordSpend } from '@modules/vendor/spend.recorder';
 import { getEmailProvider, getSmsProvider } from './providerFactory';
+
+// Approximate per-action vendor costs in USD. These are used for the
+// dashboard cost-tracking widget. They are sourced from each vendor's
+// public price page and may be tuned via env later if needed.
+const COST = {
+  ONLINESIM_BUY_NUMBER: 0.50,
+  VAKSMS_BUY_NUMBER: 0.30,
+  SMSACTIVATE_BUY_NUMBER: 0.30,
+  TWOCAPTCHA_TURNSTILE: 0.003,
+  KOPEECHKA_EMAIL: 0.05,
+  MAILSAC_INBOX: 0,
+  CUSTOM_DOMAIN_INBOX: 0,
+};
 
 interface AutoRegisterOptions {
   source: string;
   destination: string;
   countryCode: string;
   operatorUserId: string;
+  profileId?: string;
 }
 
 type AutoRegisterResult =
@@ -28,8 +43,34 @@ const pending = new Map<string, {
 export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<AutoRegisterResult> {
   const smsProvider = getSmsProvider();
   const emailProvider = getEmailProvider();
+  const smsVendor = (process.env.SMS_PROVIDER || 'smsactivate').toLowerCase();
+  const emailVendor = (process.env.EMAIL_PROVIDER || 'mailsac').toLowerCase();
+
   const phone = await smsProvider.buyNumber('vfs', opts.countryCode);
+  await recordSpend({
+    vendor: smsVendor,
+    kind: 'SMS',
+    action: 'buy_number',
+    costUsd:
+      smsVendor === 'onlinesim' ? COST.ONLINESIM_BUY_NUMBER :
+      smsVendor === 'vaksms' ? COST.VAKSMS_BUY_NUMBER :
+      COST.SMSACTIVATE_BUY_NUMBER,
+    externalRef: phone.id,
+    profileId: opts.profileId,
+    meta: { country: opts.countryCode, number: phone.number },
+  });
+
   const email = await emailProvider.createInbox();
+  await recordSpend({
+    vendor: emailVendor,
+    kind: 'EMAIL',
+    action: 'create_inbox',
+    costUsd:
+      emailVendor === 'custom' ? COST.CUSTOM_DOMAIN_INBOX :
+      COST.MAILSAC_INBOX,
+    externalRef: email,
+    profileId: opts.profileId,
+  });
   const password = `Vfs-${randomBytes(8).toString('base64url')}1!`;
   const firstName = 'Akmal';
   const lastName = 'Saliyev';
