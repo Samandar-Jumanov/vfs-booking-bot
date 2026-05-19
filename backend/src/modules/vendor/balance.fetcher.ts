@@ -11,9 +11,20 @@ export interface VendorBalance {
 
 const TIMEOUT_MS = 8_000;
 
+// Treat placeholder / empty / obvious sentinel values as "not configured" so
+// we don't hammer vendor APIs with junk keys and pollute the logs.
+function isRealKey(value: string | undefined): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const placeholders = ['__SET_ME__', 'CHANGE_ME', 'YOUR_API_KEY', 'TODO', 'TBD'];
+  if (placeholders.some((p) => trimmed.toUpperCase().includes(p))) return false;
+  return true;
+}
+
 async function onlinesimBalance(): Promise<VendorBalance> {
   const key = process.env.ONLINESIM_API_KEY;
-  if (!key) return { vendor: 'onlinesim', balanceUsd: null, currency: 'USD', configured: false };
+  if (!isRealKey(key)) return { vendor: 'onlinesim', balanceUsd: null, currency: 'USD', configured: false };
   try {
     const r = await axios.get('https://onlinesim.io/api/getBalance.php', {
       params: { apikey: key },
@@ -30,7 +41,7 @@ async function onlinesimBalance(): Promise<VendorBalance> {
 
 async function vaksmsBalance(): Promise<VendorBalance> {
   const key = process.env.VAKSMS_API_KEY;
-  if (!key) return { vendor: 'vaksms', balanceUsd: null, currency: 'RUB', configured: false };
+  if (!isRealKey(key)) return { vendor: 'vaksms', balanceUsd: null, currency: 'RUB', configured: false };
   try {
     const r = await axios.get('https://vak-sms.com/api/getBalance', {
       params: { apiKey: key },
@@ -47,7 +58,7 @@ async function vaksmsBalance(): Promise<VendorBalance> {
 
 async function twocaptchaBalance(): Promise<VendorBalance> {
   const key = process.env.TWOCAPTCHA_API_KEY;
-  if (!key) return { vendor: '2captcha', balanceUsd: null, currency: 'USD', configured: false };
+  if (!isRealKey(key)) return { vendor: '2captcha', balanceUsd: null, currency: 'USD', configured: false };
   try {
     const r = await axios.get('https://2captcha.com/res.php', {
       params: { key, action: 'getbalance', json: 1 },
@@ -62,7 +73,7 @@ async function twocaptchaBalance(): Promise<VendorBalance> {
 
 async function mailsacBalance(): Promise<VendorBalance> {
   const key = process.env.MAILSAC_API_KEY;
-  if (!key) return { vendor: 'mailsac', balanceUsd: null, currency: 'USD', configured: false };
+  if (!isRealKey(key)) return { vendor: 'mailsac', balanceUsd: null, currency: 'USD', configured: false };
   // Mailsac is a flat subscription, not pay-per-use; report quota usage if available.
   try {
     const r = await axios.get('https://mailsac.com/api/me', {
