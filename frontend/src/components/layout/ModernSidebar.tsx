@@ -13,6 +13,7 @@ import {
   Puzzle,
   Navigation,
   Wallet,
+  Cookie,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -26,6 +27,7 @@ const menuItems = [
   { group: 'Records', items: [
     { label: 'Applicants', href: '/profiles', icon: Users },
     { label: 'Account Pool', href: '/account-pool', icon: ShieldCheck },
+    { label: 'Inject Cookies', href: '/inject-cookies', icon: Cookie },
     { label: 'Extension Setup', href: '/extension-setup', icon: Puzzle },
   ]},
   { group: 'System', items: [

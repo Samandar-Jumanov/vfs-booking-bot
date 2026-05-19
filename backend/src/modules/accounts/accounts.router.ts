@@ -267,6 +267,83 @@ accountsRouter.post('/auto-create', async (req: Request, res: Response, next: Ne
   }
 });
 
+// ── POST /api/accounts/inject-cookies ────────────────────────────────────────
+/**
+ * Operator-driven session injection. Operator logs into VFS in their own
+ * Chrome, exports the cookies (DevTools → Application → Cookies → Copy All),
+ * pastes the JSON into the dashboard. We store the session as a VfsAccount
+ * row so the backend monitor can use it for slot polling via the IPRoyal UZ
+ * proxy.
+ *
+ * Body:
+ * {
+ *   email: string,            // VFS account email
+ *   password?: string,        // optional; useful for re-login if cookies expire
+ *   cookies: Array<{ name, value, domain, path, secure, httpOnly, sameSite, expirationDate }>
+ *   tabUrl?: string           // e.g. https://visa.vfsglobal.com/uzb/en/lva/dashboard
+ * }
+ */
+const injectCookiesSchema = z.object({
+  email: z.string().email(),
+  password: z.string().optional(),
+  cookies: z.array(z.object({
+    name: z.string(),
+    value: z.string(),
+    domain: z.string().optional(),
+    path: z.string().optional(),
+    secure: z.boolean().optional(),
+    httpOnly: z.boolean().optional(),
+    sameSite: z.string().optional(),
+    expirationDate: z.number().optional(),
+  })).min(1, 'cookies array cannot be empty'),
+  tabUrl: z.string().url().optional(),
+});
+
+accountsRouter.post('/inject-cookies', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = injectCookiesSchema.parse(req.body);
+    const now = new Date();
+
+    const existing = await prisma.vfsAccount.findUnique({ where: { email: body.email } });
+
+    const account = existing
+      ? await prisma.vfsAccount.update({
+          where: { email: body.email },
+          data: {
+            cookieStore: body.cookies as never,
+            lastWarmedAt: now,
+            tabUrl: body.tabUrl ?? existing.tabUrl,
+            status: 'ACTIVE',
+            ...(body.password ? { encryptedPassword: encrypt(body.password) } : {}),
+          },
+          select: { id: true, email: true, status: true, lastWarmedAt: true },
+        })
+      : await prisma.vfsAccount.create({
+          data: {
+            email: body.email,
+            encryptedPassword: encrypt(body.password ?? ''),
+            cookieStore: body.cookies as never,
+            lastWarmedAt: now,
+            tabUrl: body.tabUrl ?? null,
+            status: 'ACTIVE',
+          },
+          select: { id: true, email: true, status: true, lastWarmedAt: true },
+        });
+
+    logEvent('info', EventType.MONITOR_STARTED, `VFS cookies injected for ${account.email} (${body.cookies.length} cookies)`);
+
+    res.json({
+      success: true,
+      accountId: account.id,
+      email: account.email,
+      cookiesCount: body.cookies.length,
+      lastWarmedAt: account.lastWarmedAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── POST /api/accounts/register ──────────────────────────────────────────────
 /**
  * Triggers fully-automated VFS Global account creation:
