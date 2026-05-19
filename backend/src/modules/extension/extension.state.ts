@@ -132,6 +132,17 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
     return;
   }
 
+  // Catch-all so any unexpected extension event surfaces in Activity Logs.
+  // Helps diagnose why poll attempts aren't completing.
+  if (event.type && !['EXT_HEARTBEAT', 'EXT_SESSION_SYNC', 'EXT_SLOT_DETECTED',
+    'EXT_SESSION_LOST', 'EXT_REGISTER_NEED_EMAIL_LINK', 'EXT_REGISTER_NEED_SMS_OTP',
+    'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
+    'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT'].includes(String(event.type))) {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('warn', EventType.MONITOR_STARTED, `[EXT_UNKNOWN] type=${event.type}`);
+  }
+
   if (event.type === 'EXT_SESSION_SYNC') {
     const url = String(event.url ?? '');
     const email = String(event.email ?? '');
@@ -246,6 +257,10 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   }
 
   if (event.type === 'EXT_SESSION_LOST') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('warn', EventType.SESSION_EXPIRED,
+      `[EXT_SESSION_LOST] dest=${event.destination} reason=${String(event.reason ?? 'unknown')}`);
     await dispatchNotification({
       event: 'BOOKING_FAILED',
       destination: String(event.destination ?? 'lva'),
