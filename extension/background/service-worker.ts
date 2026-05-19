@@ -371,7 +371,12 @@ function sendEvent(event: ExtensionEvent): void {
 }
 
 async function getSettings(): Promise<ExtensionSettings> {
-  const stored = await chrome.storage.local.get({ ...DEFAULT_SETTINGS });
+  // IMPORTANT: passing an object to chrome.storage.local.get only returns
+  // keys present in the object. Passing null returns EVERYTHING stored,
+  // including extensionToken/customerEmail/setupCode which are not part of
+  // DEFAULT_SETTINGS. Without this fix the token was silently dropped on
+  // every read after SAVE_SETTINGS wrote it.
+  const stored = await chrome.storage.local.get(null);
   return { ...DEFAULT_SETTINGS, ...stored } as ExtensionSettings;
 }
 

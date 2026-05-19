@@ -27,7 +27,7 @@ declare namespace chrome {
 
   namespace storage {
     namespace local {
-      function get(defaults: Record<string, unknown>): Promise<Record<string, unknown>>;
+      function get(defaults: Record<string, unknown> | string | string[] | null): Promise<Record<string, unknown>>;
       function set(values: Record<string, unknown>): Promise<void>;
     }
   }
