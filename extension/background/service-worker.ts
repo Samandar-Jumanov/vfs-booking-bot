@@ -46,6 +46,19 @@ chrome.runtime.onStartup.addListener(() => {
   void connectFromStoredSettings();
 });
 
+// React to VFS cookie changes immediately. After a successful VFS login the
+// datadome + session cookies are set; we push within ~1s of that happening
+// so the backend has fresh credentials without waiting for the 30s alarm.
+let cookieDebounceTimer: number | undefined;
+chrome.cookies.onChanged.addListener((change) => {
+  if (!change.cookie?.domain?.includes('vfsglobal.com')) return;
+  if (cookieDebounceTimer) self.clearTimeout(cookieDebounceTimer);
+  cookieDebounceTimer = self.setTimeout(() => {
+    cookieDebounceTimer = undefined;
+    void pushCookiesToBackend();
+  }, 1500);
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   log('alarm fired:', alarm.name, 'connectionStatus=', runtimeState.connectionStatus);
   // Every alarm wake-up: make sure the WS is alive. If the SW was idle-killed
@@ -55,6 +68,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
   if (alarm.name === 'vfs-extension-heartbeat') {
     sendEvent({ type: 'EXT_HEARTBEAT', at: new Date().toISOString(), state: runtimeState });
+    // Plain HTTP cookie sync — works even when WS is down. This is the
+    // single most important signal for the backend: a fresh set of VFS
+    // cookies, posted directly, no service-worker WS dependency.
+    void pushCookiesToBackend();
   }
   if (alarm.name === 'vfs-extension-poll') {
     void pollActiveMonitor();
@@ -77,6 +94,9 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     log('SAVE_SETTINGS received — backendUrl=', incoming.backendUrl, 'hasToken=', Boolean(incoming.extensionToken), 'email=', incoming.customerEmail);
     await saveSettings(incoming);
     await connectFromStoredSettings();
+    // Sync cookies immediately on pairing so the operator sees the account
+    // appear in the pool right away instead of waiting for the 30s alarm.
+    void pushCookiesToBackend();
     return { ok: true };
   }
   if (message.type === 'DISCONNECT') {
@@ -361,4 +381,57 @@ async function saveSettings(settings: Partial<ExtensionSettings>): Promise<void>
 
 async function saveRuntimeState(): Promise<void> {
   await chrome.storage.local.set({ runtimeState });
+}
+
+// Push current vfsglobal.com cookies to the backend via plain HTTP. This is
+// the resilient sync path — works even when the WS is down. Backend stores
+// the cookies on the VfsAccount row so monitor.service can poll directly
+// through the IPRoyal UZ proxy.
+async function pushCookiesToBackend(): Promise<void> {
+  try {
+    const settings = await getSettings();
+    if (!settings.extensionToken) {
+      log('pushCookies: no extensionToken; skipping');
+      return;
+    }
+    const cookies = await chrome.cookies.getAll({ domain: 'vfsglobal.com' });
+    if (cookies.length === 0) {
+      log('pushCookies: no vfsglobal.com cookies yet — operator needs to log into VFS');
+      return;
+    }
+    const tabs = await chrome.tabs.query({ url: 'https://*.vfsglobal.com/*' });
+    const tabUrl = tabs[0]?.url;
+    const body = {
+      email: settings.customerEmail || 'jumanovsamandar84@gmail.com',
+      cookies: cookies.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        httpOnly: c.httpOnly,
+        sameSite: c.sameSite,
+        expirationDate: c.expirationDate,
+      })),
+      tabUrl,
+    };
+    const url = `${settings.backendUrl.replace(/\/$/, '')}/api/accounts/inject-cookies`;
+    log('pushCookies: POST', url, 'count=', cookies.length);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + settings.extensionToken,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      warn('pushCookies failed HTTP', res.status, text.slice(0, 200));
+      return;
+    }
+    log('pushCookies OK');
+  } catch (e) {
+    warn('pushCookies threw:', (e as Error).message);
+  }
 }

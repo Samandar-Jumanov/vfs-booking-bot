@@ -52,5 +52,11 @@ declare namespace chrome {
       storeId?: string;
     }
     function getAll(details: { domain?: string; url?: string; name?: string }): Promise<Cookie[]>;
+    interface CookieChangeInfo {
+      cookie: Cookie;
+      cause: string;
+      removed: boolean;
+    }
+    const onChanged: { addListener(listener: (changeInfo: CookieChangeInfo) => void): void };
   }
 }
