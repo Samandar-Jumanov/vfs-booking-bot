@@ -13,7 +13,7 @@ let runtimeState: RuntimeState = { connectionStatus: 'disconnected' };
 
 // Hydrate runtimeState from storage on cold boot so the popup doesn't
 // briefly show stale 'disconnected' between SW restart and WS reconnect.
-void chrome.storage.local.get('runtimeState').then((stored) => {
+void chrome.storage.local.get({ runtimeState: null }).then((stored) => {
   const persisted = (stored as { runtimeState?: RuntimeState }).runtimeState;
   if (persisted) {
     // Don't trust the persisted 'connected' as fact — WS will re-confirm.
