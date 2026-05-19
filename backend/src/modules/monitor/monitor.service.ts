@@ -542,6 +542,38 @@ export async function startMonitor(id: string): Promise<void> {
   logEvent('info', EventType.MONITOR_STARTED, `Monitor started for ${current.sourceCountry.toUpperCase()} -> ${current.destination.toUpperCase()}`);
   logEvent('info', EventType.MONITOR_STARTED, `[Monitor] Provider: ${getScrapingProviderMode()}`);
 
+  // In the operator-extension architecture (EXTENSION_BOOKING=true on prod),
+  // the BACKEND does NOT poll VFS itself — Playwright on Railway would (a)
+  // crash because no Chromium binary in the image, and (b) get Datadome-blocked
+  // from datacenter IPs anyway. Instead we delegate polling to the operator's
+  // Chrome extension: send START_MONITOR over WS, extension's pollActiveMonitor
+  // alarm runs every 30s inside the operator's trusted VFS tab, and reports
+  // back via EXT_POLL_RESULT / EXT_SLOT_DETECTED events.
+  if (process.env.EXTENSION_BOOKING === 'true') {
+    const operatorUserId = process.env.OPERATOR_USER_ID;
+    if (operatorUserId) {
+      const { sendToExtension } = await import('@modules/websocket/ws.server');
+      const dispatched = sendToExtension(operatorUserId, {
+        type: 'START_MONITOR',
+        monitor: {
+          id,
+          sourceCountry: current.sourceCountry,
+          destination: current.destination,
+          visaType: current.visaType,
+          intervalMs: current.intervalMs,
+        },
+      });
+      logEvent('info', EventType.MONITOR_STARTED,
+        dispatched
+          ? `[Monitor] Polling delegated to operator extension (UZ residential IP, trusted VFS tab)`
+          : `[Monitor] EXTENSION_BOOKING=true but operator extension is offline — slots will not be detected until extension reconnects`);
+    } else {
+      logEvent('warn', EventType.MONITOR_STARTED, `[Monitor] EXTENSION_BOOKING=true but OPERATOR_USER_ID not set in env`);
+    }
+    // Stay "running" so the dashboard reflects it; extension drives the poll.
+    return;
+  }
+
   const poll = async () => {
     const config = getMonitor(id);
     if (!config || !config.isRunning) return;
