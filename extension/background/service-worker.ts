@@ -34,7 +34,10 @@ const activeRegisterTabs = new Map<string, number>();
 // idempotent (same-name re-creates are no-ops), so we run it at top-level
 // EVERY boot — not just onInstalled — to survive any cold-start path.
 chrome.alarms.create('vfs-extension-heartbeat', { periodInMinutes: 0.5 });
-chrome.alarms.create('vfs-extension-poll', { periodInMinutes: 0.5 });
+// Poll cadence: VFS lift-api rate-limits aggressively (429). 1 min is the
+// floor we can do per-account without sustained 429s. With sharding across
+// accounts (future) we can effectively poll more often.
+chrome.alarms.create('vfs-extension-poll', { periodInMinutes: 1 });
 
 chrome.runtime.onInstalled.addListener(() => {
   // Reconnect immediately so manifest reload doesn't leave the extension
@@ -299,7 +302,16 @@ async function handleBookForCustomer(message: Extract<BackendMessage, { type: 'B
   }
 }
 
+// Backoff state when VFS returns 429. Next attempt is held off until this
+// timestamp. Doubles on each 429, max 5 min. Resets on a successful poll.
+let pollBackoffUntil = 0;
+let pollBackoffMs = 60_000;
+
 async function pollActiveMonitor(): Promise<void> {
+  if (Date.now() < pollBackoffUntil) {
+    log('pollActiveMonitor: 429 backoff, next attempt at', new Date(pollBackoffUntil).toISOString());
+    return;
+  }
   // Re-hydrate runtimeState from storage so a SW cold-boot race doesn't drop
   // the activeMonitor we just stored from a START_MONITOR message.
   if (!runtimeState.activeMonitor) {
@@ -331,6 +343,14 @@ async function pollActiveMonitor(): Promise<void> {
       return;
     }
     sendEvent({ type: 'EXT_POLL_RESULT', destination: monitor.destination, status: typed.status ?? 0, data: typed.data });
+    if (typed.status === 429) {
+      pollBackoffUntil = Date.now() + pollBackoffMs;
+      pollBackoffMs = Math.min(pollBackoffMs * 2, 5 * 60_000);
+      log('VFS 429 — backing off for', pollBackoffMs / 1000, 's');
+    } else if (typed.status === 200) {
+      pollBackoffMs = 60_000; // reset
+      pollBackoffUntil = 0;
+    }
     if (typed.earliestDate) {
       sendEvent({ type: 'EXT_SLOT_DETECTED', destination: monitor.destination, date: typed.earliestDate, raw: typed.data });
       const settings = await getSettings();
