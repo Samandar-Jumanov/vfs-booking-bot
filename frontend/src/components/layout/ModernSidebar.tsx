@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Puzzle,
   Navigation,
+  Wallet,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -28,6 +29,7 @@ const menuItems = [
     { label: 'Extension Setup', href: '/extension-setup', icon: Puzzle },
   ]},
   { group: 'System', items: [
+    { label: 'Vendor Costs', href: '/vendors', icon: Wallet },
     { label: 'Global Settings', href: '/settings', icon: Settings },
   ]},
 ];
