@@ -17,6 +17,15 @@
       "matches": ["https://*.vfsglobal.com/*"],
       "js": ["content/vfs-bridge.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.up.railway.app/*",
+        "http://localhost/*",
+        "http://localhost:*/*"
+      ],
+      "js": ["content/dashboard-bridge.js"],
+      "run_at": "document_idle"
     }
   ],
   "permissions": ["storage", "cookies", "webNavigation", "scripting", "notifications", "alarms"],

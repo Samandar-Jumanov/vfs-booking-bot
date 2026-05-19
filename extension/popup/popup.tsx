@@ -22,6 +22,10 @@ document.getElementById('openOptions')?.addEventListener('click', () => {
 });
 
 void refresh();
+// Re-poll every 1.5s so the popup reflects WS state changes even if it was
+// opened before the connection settled. Otherwise the popup gets stuck on
+// whatever state the runtime had at open-time.
+setInterval(() => { void refresh(); }, 1500);
 
 async function refresh(): Promise<void> {
   const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' }) as StateResponse;

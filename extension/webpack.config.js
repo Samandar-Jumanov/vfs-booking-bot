@@ -5,6 +5,7 @@ module.exports = {
   entry: {
     'background/service-worker': './background/service-worker.ts',
     'content/vfs-bridge': './content/vfs-bridge.ts',
+    'content/dashboard-bridge': './content/dashboard-bridge.ts',
     'popup/popup': './popup/popup.tsx',
     'options/options': './options/options.tsx'
   },
