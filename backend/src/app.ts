@@ -19,6 +19,7 @@ import { accountsRouter } from '@modules/accounts/accounts.router';
 import { extensionRouter } from '@modules/extension/extension.router';
 import { emailRouter } from '@modules/email/email.router';
 import { vendorRouter } from '@modules/vendor/vendor.router';
+import { bootstrapRouter } from '@modules/auth/bootstrap.router';
 
 export function createApp() {
   const app = express();
@@ -125,6 +126,8 @@ export function createApp() {
   });
 
   app.use('/api/email', emailRouter);
+  // Bootstrap endpoint must NOT be rate-limited or require auth (it creates the first admin).
+  app.use('/api/bootstrap', bootstrapRouter);
 
   // ── API routes ────────────────────────────────────────────────────────────
   app.use('/api', apiLimiter);
