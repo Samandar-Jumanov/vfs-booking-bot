@@ -263,7 +263,9 @@ accountsRouter.post('/auto-create', async (req: Request, res: Response, next: Ne
       res.status(409).json({ success: false, reason: result.reason });
     }
   } catch (err) {
-    next(err);
+    const message = err instanceof Error ? err.message : String(err);
+    logEvent('error', EventType.BOOKING_FAILED, `auto-register threw: ${message}`);
+    res.status(500).json({ success: false, error: message });
   }
 });
 

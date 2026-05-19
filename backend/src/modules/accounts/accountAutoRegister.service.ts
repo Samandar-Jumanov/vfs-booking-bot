@@ -47,7 +47,12 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
   const smsVendor = (process.env.SMS_PROVIDER || 'smsactivate').toLowerCase();
   const emailVendor = (process.env.EMAIL_PROVIDER || 'mailsac').toLowerCase();
 
-  const phone = await smsProvider.buyNumber('vfs', opts.countryCode);
+  // OnlineSIM doesn't recognize "vfs" as a service. Use the configured
+  // service name (default to a generic catch-all). For OnlineSIM the cheapest
+  // generic is typically "other" or "mail.ru"; for Vak-SMS "vfs" works.
+  const smsService = process.env.SMS_SERVICE_NAME
+    || (smsVendor === 'onlinesim' ? 'other' : 'vfs');
+  const phone = await smsProvider.buyNumber(smsService, opts.countryCode);
   await recordSpend({
     vendor: smsVendor,
     kind: 'SMS',
