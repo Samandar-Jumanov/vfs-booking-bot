@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, ExternalLink, KeyRound, MonitorCheck, PlugZap } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
@@ -57,16 +57,18 @@ export default function ExtensionSetupPage() {
   }, []);
 
   // Auto-pair as soon as the extension is detected AND the backend says
-  // it's not connected yet. No 6-digit code typing required — we mint an
-  // extension token (the dashboard is already authenticated) and pipe it
-  // directly to the extension via postMessage.
+  // it's not connected yet. ONCE per page-load — we use a ref guard because
+  // the mutation object changes on every render and including it in the
+  // dependency array caused an infinite re-mint loop.
+  const autoPairAttemptedRef = useRef(false);
   useEffect(() => {
     if (!extensionDetected) return;
     if (statusQuery.data?.connected) return;
-    if (autoPaired) return;
-    if (autoPairError) return;
-    if (tokenMutation.isPending) return;
-    void tokenMutation.mutateAsync().then((tok) => {
+    if (autoPairAttemptedRef.current) return;
+    autoPairAttemptedRef.current = true;
+    void api.post<ExtensionTokenResponse>('/auth/extension-token').then((response) => {
+      const tok = response.data;
+      setTokenResponse(tok);
       const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? '').replace(/\/api$/, '').replace(/\/$/, '');
       window.postMessage({
         source: 'vfs-dashboard',
@@ -75,8 +77,11 @@ export default function ExtensionSetupPage() {
         customerEmail: undefined,
         backendUrl: backendUrl || window.location.origin.replace('frontend', 'backend'),
       }, window.location.origin);
-    }).catch((e) => setAutoPairError((e as Error).message));
-  }, [extensionDetected, statusQuery.data?.connected, autoPaired, autoPairError, tokenMutation]);
+    }).catch((e) => {
+      autoPairAttemptedRef.current = false; // allow one retry on failure
+      setAutoPairError((e as Error).message);
+    });
+  }, [extensionDetected, statusQuery.data?.connected]);
 
   const steps = useMemo(() => [
     {
