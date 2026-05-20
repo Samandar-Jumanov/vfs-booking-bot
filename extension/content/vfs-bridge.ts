@@ -376,24 +376,25 @@ async function selectDialCode998(): Promise<void> {
       return;
     }
   }
-  // Angular Material MDC (mat-mdc-select) ignores raw MouseEvent dispatched
-  // on the trigger — it listens for pointerdown + the click ripple. Combine
-  // pointer events with focus + keyboard fallback to handle every variant.
-  const candidates: HTMLElement[] = Array.from(document.querySelectorAll<HTMLElement>(
-    'mat-select[formcontrolname="dialCode"], mat-select[formcontrolname*="dial" i], mat-select[formcontrolname*="country" i], mat-select[formcontrolname*="code" i], .mat-select, .mat-mdc-select, [role="combobox"]',
-  ));
-  let trigger = candidates.find((el) => {
-    const fcn = el.getAttribute('formcontrolname') ?? '';
-    const al = el.getAttribute('aria-label') ?? '';
-    return /dial|country|code/i.test(fcn) || /dial|country|code/i.test(al);
-  });
+  // VFS UZ uses formcontrolname="dialcode" (all lowercase). Try the exact
+  // name first, then fall back to fuzzy / first-mat-select heuristics.
+  let trigger: HTMLElement | undefined =
+    document.querySelector<HTMLElement>('mat-select[formcontrolname="dialcode"]') ??
+    document.querySelector<HTMLElement>('mat-select[formcontrolname="dialCode"]') ??
+    undefined;
   if (!trigger) {
-    // Heuristic: first mat-mdc-select on the form is the dial code on VFS UZ.
-    trigger = candidates[0];
+    const candidates: HTMLElement[] = Array.from(document.querySelectorAll<HTMLElement>(
+      'mat-select, .mat-mdc-select, [role="combobox"]',
+    ));
+    trigger = candidates.find((el) => {
+      const fcn = el.getAttribute('formcontrolname') ?? '';
+      const al = el.getAttribute('aria-label') ?? '';
+      return /dial|country|code/i.test(fcn) || /dial|country|code/i.test(al);
+    }) ?? candidates[0];
   }
   if (!trigger) {
     console.warn('[VFS-REG] dial-code dropdown trigger not found');
-    void postRegisterTrace('dial-code trigger NOT FOUND', { candidateCount: candidates.length });
+    void postRegisterTrace('dial-code trigger NOT FOUND', {});
     return;
   }
 
