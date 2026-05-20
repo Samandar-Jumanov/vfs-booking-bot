@@ -112,6 +112,10 @@ class OnlineSimService implements SmsProvider {
     if (normalized === 'uz' || normalized === 'uzb' || normalized === 'uzbekistan') {
       return '998';
     }
+    // smsActivate uses '171' for Uzbekistan; OnlineSIM uses international dial
+    // code '998'. Accept either so the frontend doesn't need to know which
+    // provider is configured.
+    if (normalized === '171') return '998';
     return normalized;
   }
 
