@@ -66,6 +66,30 @@ export default function AccountPoolPage() {
     },
   });
 
+  const [manualOpen, setManualOpen] = useState(false);
+  const [mEmail, setMEmail] = useState('');
+  const [mPassword, setMPassword] = useState('');
+  const [mPhone, setMPhone] = useState('');
+  const [manualMsg, setManualMsg] = useState<string | null>(null);
+  const manualAddMutation = useMutation({
+    mutationFn: () =>
+      api.post('/accounts', {
+        email: mEmail.trim(),
+        password: mPassword,
+        phone: mPhone.trim() || undefined,
+      }).then((r) => r.data),
+    onSuccess: (data) => {
+      setManualMsg(`Added ${data.email}`);
+      setMEmail(''); setMPassword(''); setMPhone('');
+      setManualOpen(false);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
+      setManualMsg(`Failed: ${msg}`);
+    },
+  });
+
   const summary = poolQuery.data?.summary ?? { total: 0, active: 0, fresh: 0, stale: 0, blocked: 0, cooldown: 0 };
   const items = poolQuery.data?.items ?? [];
 
@@ -108,6 +132,14 @@ export default function AccountPoolPage() {
         <button
           type="button"
           className="btn-secondary h-10 gap-2"
+          onClick={() => { setManualMsg(null); setManualOpen((v) => !v); }}
+        >
+          <Plus className="h-4 w-4" />
+          Add existing account
+        </button>
+        <button
+          type="button"
+          className="btn-secondary h-10 gap-2"
           onClick={openAllStale}
           disabled={staleAccounts.length === 0}
         >
@@ -117,7 +149,61 @@ export default function AccountPoolPage() {
         {autoCreateMsg && (
           <span className={`text-sm ${autoCreateMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{autoCreateMsg}</span>
         )}
+        {manualMsg && (
+          <span className={`text-sm ${manualMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{manualMsg}</span>
+        )}
       </div>
+      {manualOpen && (
+        <div className="card mt-4 p-4">
+          <h3 className="mb-3 font-semibold">Add existing VFS account</h3>
+          <p className="mb-3 text-xs text-muted-foreground">
+            Paste credentials for a VFS account you've already activated. Password is encrypted before storage.
+          </p>
+          <div className="grid gap-3 md:grid-cols-3">
+            <input
+              type="email"
+              placeholder="email (e.g. vfs-abc@mailsac.com)"
+              value={mEmail}
+              onChange={(e) => setMEmail(e.target.value)}
+              className="input h-10"
+              autoComplete="off"
+            />
+            <input
+              type="text"
+              placeholder="password"
+              value={mPassword}
+              onChange={(e) => setMPassword(e.target.value)}
+              className="input h-10"
+              autoComplete="off"
+            />
+            <input
+              type="text"
+              placeholder="phone (optional, e.g. +998936191865)"
+              value={mPhone}
+              onChange={(e) => setMPhone(e.target.value)}
+              className="input h-10"
+              autoComplete="off"
+            />
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              className="btn-primary h-9"
+              onClick={() => { setManualMsg(null); manualAddMutation.mutate(); }}
+              disabled={!mEmail.trim() || !mPassword || manualAddMutation.isPending}
+            >
+              {manualAddMutation.isPending ? 'Saving…' : 'Save account'}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary h-9"
+              onClick={() => { setManualOpen(false); setManualMsg(null); }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="card mt-6 overflow-hidden bg-card/70 p-0">
         <table className="w-full text-sm">
