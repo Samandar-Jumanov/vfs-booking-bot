@@ -6,7 +6,8 @@ import { accountPoolService } from './accountPool.service';
 import { prisma } from '@config/database';
 import { encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
-import { autoRegisterAccount } from './accountAutoRegister.service';
+import { autoRegisterAccount, fetchEmailVerificationLink } from './accountAutoRegister.service';
+import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
 import { EventType } from '@prisma/client';
 
@@ -265,6 +266,65 @@ accountsRouter.post('/auto-create', async (req: Request, res: Response, next: Ne
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logEvent('error', EventType.BOOKING_FAILED, `auto-register threw: ${message}`);
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+/**
+ * Recover an account that was registered on VFS but failed mid-flow on our
+ * side (e.g. operator clicked Register manually so EXT_REGISTER_SUBMITTED
+ * never fired). Operator supplies { email, password, phone? }; backend
+ * polls Mailsac for the verification link, GETs it, and persists the row.
+ *
+ * Body: { email, password, phone?, smsExternalId? }
+ */
+accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const email = String(req.body?.email ?? '').trim();
+    const password = String(req.body?.password ?? '');
+    const phone = req.body?.phone ? String(req.body.phone) : null;
+    const smsExternalId = req.body?.smsExternalId ? String(req.body.smsExternalId) : null;
+    if (!email || !password) {
+      res.status(400).json({ success: false, reason: 'EMAIL_AND_PASSWORD_REQUIRED' });
+      return;
+    }
+
+    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] polling Mailsac for ${email}`);
+    const link = await fetchEmailVerificationLink(email);
+    if (!link) {
+      res.status(409).json({ success: false, reason: 'EMAIL_LINK_NOT_RECEIVED' });
+      return;
+    }
+
+    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email}`);
+    const visit = await axios.get(link, { maxRedirects: 5, validateStatus: () => true, timeout: 15_000 }).catch((e) => ({ status: 0, err: (e as Error).message }));
+    if ('status' in visit && typeof visit.status === 'number' && visit.status >= 400) {
+      res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visit.status}` });
+      return;
+    }
+
+    const existing = await prisma.vfsAccount.findUnique({ where: { email } });
+    if (existing) {
+      res.status(200).json({ success: true, accountId: existing.id, email, note: 'ALREADY_EXISTS' });
+      return;
+    }
+
+    const account = await prisma.vfsAccount.create({
+      data: {
+        email,
+        encryptedPassword: encrypt(password),
+        phone,
+        smsExternalId,
+        status: 'ACTIVE',
+      },
+      select: { id: true, email: true },
+    });
+    logEvent('info', EventType.BOOKING_SUCCESS, `[RECOVER] account persisted ${account.email}`);
+    res.status(201).json({ success: true, accountId: account.id, email: account.email });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logEvent('error', EventType.BOOKING_FAILED, `recover-from-mailsac threw: ${message}`);
     res.status(500).json({ success: false, error: message });
   }
 });

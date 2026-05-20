@@ -144,22 +144,48 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
     .map(e => (e as HTMLElement).innerText?.trim())
     .filter(s => s && s.length < 200);
   if (errors.length) void postRegisterTrace('pre-submit visible errors', { errors });
-  await clickRegisterSubmit();
-  void postRegisterTrace('submit clicked', { initialUrl });
-  await waitForRegisterProgress(initialUrl);
+  // Try to click submit. If it throws (button never enabled, etc.) we
+  // DON'T bail — the operator might click manually, or Turnstile may take
+  // longer than our 60s wait. We just log and proceed to page-transition
+  // detection.
+  let clickOk = false;
+  try {
+    await clickRegisterSubmit();
+    clickOk = true;
+    void postRegisterTrace('submit clicked by bot', { initialUrl });
+  } catch (err) {
+    void postRegisterTrace('submit click failed (bot) — waiting for operator', {
+      reason: (err as Error).message,
+    });
+  }
 
-  // VFS UZ does NOT issue an SMS at signup — only an email verification
-  // link. Hand off to backend: it polls the inbox and visits the link
-  // server-side. We are done in the page.
-  void postRegisterTrace('submitted, handing off to backend for email link', {
-    url: location.href,
-    email: payload.email,
-  });
-  await emitRegisterEvent({
-    type: 'EXT_REGISTER_SUBMITTED',
-    correlationId: payload.correlationId,
-    email: payload.email,
-  });
+  // Wait up to 3 minutes for page transition OR "verification email sent"
+  // text. This covers both: bot clicked successfully, OR operator clicked
+  // after bot gave up.
+  const handoffDeadline = Date.now() + 180_000;
+  while (Date.now() < handoffDeadline) {
+    if (
+      window.location.href !== initialUrl ||
+      isEmailVerificationStep() ||
+      isRegisterComplete()
+    ) {
+      void postRegisterTrace('submitted, handing off to backend for email link', {
+        url: location.href,
+        email: payload.email,
+        clickByBot: clickOk,
+      });
+      await emitRegisterEvent({
+        type: 'EXT_REGISTER_SUBMITTED',
+        correlationId: payload.correlationId,
+        email: payload.email,
+      });
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  // Page never transitioned in 3 min — register really didn't go through.
+  throw new Error('REGISTER_PAGE_NEVER_TRANSITIONED');
 }
 
 async function waitForCompletionOrOtp(payload: RegisterFormPayload): Promise<void> {
