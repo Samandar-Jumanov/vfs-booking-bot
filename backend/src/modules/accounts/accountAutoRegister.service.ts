@@ -85,8 +85,12 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
   const registerUrl = `https://visa.vfsglobal.com/${opts.source}/en/${opts.destination}/register`;
 
   try {
-    const accepted = sendToExtension(opts.operatorUserId, {
-      type: 'BG_REGISTER_VFS_ACCOUNT',
+    // The extension's MV3 service worker can be in an idle state when we
+    // dispatch — its WS won't be in the connections map for a few seconds
+    // until the next alarm wakes it. Retry the dispatch for up to 45 s.
+    let accepted = false;
+    const dispatchPayload = {
+      type: 'BG_REGISTER_VFS_ACCOUNT' as const,
       email,
       phone: phone.number,
       smsActivateId: phone.id,
@@ -96,11 +100,17 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
       dob,
       registerUrl,
       correlationId,
-    });
+    };
+    const dispatchDeadline = Date.now() + 45_000;
+    while (Date.now() < dispatchDeadline) {
+      accepted = sendToExtension(opts.operatorUserId, dispatchPayload);
+      if (accepted) break;
+      await new Promise<void>((r) => setTimeout(r, 3_000));
+    }
 
     if (!accepted) {
       await smsProvider.releaseNumber(phone.id);
-      throw new Error('OPERATOR_EXTENSION_OFFLINE');
+      throw new Error('OPERATOR_EXTENSION_OFFLINE_AFTER_45S');
     }
 
     const result = await new Promise<PendingResult>((resolve) => {
