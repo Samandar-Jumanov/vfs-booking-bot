@@ -77,7 +77,17 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
     externalRef: email,
     profileId: opts.profileId,
   });
-  const password = `Vfs-${randomBytes(8).toString('base64url')}1!`;
+  // VFS password rules: min 8, max 15, ≥1 upper, ≥1 lower, ≥1 digit, ≥1 special
+  // from ($ @ # ! % * ?). Generate a compliant 14-char password from those
+  // specifically-allowed characters only.
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // omit I,O for readability
+  const lower = 'abcdefghjkmnpqrstuvwxyz';
+  const digit = '23456789';
+  const special = '@#!%*?'; // VFS's allowed special chars (skip $ which some validators reject)
+  const pick = (s: string) => s[randomBytes(1)[0] % s.length];
+  // 14 chars total, guaranteed at least one from each class
+  const rest = Array.from({ length: 10 }).map(() => pick(upper + lower + digit + special)).join('');
+  const password = `Q${pick(upper)}${pick(lower)}${pick(digit)}${pick(special)}${rest}`.slice(0, 14);
   const firstName = 'Akmal';
   const lastName = 'Saliyev';
   const dob = '1995-06-15';

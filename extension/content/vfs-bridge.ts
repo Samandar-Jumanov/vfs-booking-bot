@@ -81,13 +81,21 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   //   3 consent checkboxes • Cloudflare Turnstile • Register button.
   // NO firstName / lastName / DOB. Old code targeted non-existent fields and
   // failed silently → "Mandatory field cannot be left blank" → 5-min timeout.
-  await typeIntoFirst(['input[type="email"]', 'input[formcontrolname="email"]', 'input[name="email"]'], payload.email);
+  // VFS Uzbekistan uses 'emailid' and 'contact' as formcontrolname (not the
+  // standard 'email' / 'mobileNumber'). Verified from real trace 2026-05-20.
+  await typeIntoFirst([
+    'input[formcontrolname="emailid"]',
+    'input[name="emailid"]',
+    'input[id*="email" i]',
+    'input[type="email"]',
+    'input[formcontrolname="email"]',
+    'input[name="email"]',
+  ], payload.email);
   await typeIntoFirst(['input[type="password"]', 'input[formcontrolname="password"]', 'input[name="password"]'], payload.password);
   await typeIntoFirst([
     'input[type="password"][formcontrolname="confirmPassword"]',
     'input[formcontrolname="confirmPassword"]',
     'input[name="confirmPassword"]',
-    // last password input that isn't the first one
   ], payload.password);
   // Select Dial Code "998" from the dropdown. The dropdown shows up as
   // either a native select OR an Angular Material mat-select. Try both.
@@ -95,11 +103,12 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   // Phone — VFS expects the LOCAL number (without country code).
   const localPhone = payload.phone.replace(/^\+?998/, '').replace(/^\+/, '');
   await typeIntoFirst([
+    'input[formcontrolname="contact"]',  // ← real VFS UZ field name
+    'input[name="contact"]',
     'input[formcontrolname="mobileNumber"]',
     'input[type="tel"]',
     'input[name="phone"]',
     'input[name="mobile"]',
-    // Last-resort: any input near a "Mobile number" label that isn't the dial-code select
     'input[placeholder*="Mobile" i]',
   ], localPhone);
   // Check all 3 consent checkboxes (Privacy Notice, Data Transfer, Terms).
