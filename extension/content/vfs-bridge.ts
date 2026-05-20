@@ -121,7 +121,22 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   }
 
   const initialUrl = window.location.href;
+  // Trace what's actually in the form right before submit, so we can see
+  // if Angular committed the values to its FormControl.
+  const formSnapshot: Record<string, string> = {};
+  document.querySelectorAll<HTMLInputElement>('input').forEach((inp) => {
+    const key = inp.getAttribute('formcontrolname') || inp.getAttribute('name') || inp.type;
+    if (!key) return;
+    formSnapshot[key] = maskForLog(inp.value);
+  });
+  void postRegisterTrace('pre-submit form snapshot', formSnapshot);
+  // Also check if validation errors are visible on the page
+  const errors = Array.from(document.querySelectorAll('.error, .mat-error, .invalid-feedback, [class*="error" i]'))
+    .map(e => (e as HTMLElement).innerText?.trim())
+    .filter(s => s && s.length < 200);
+  if (errors.length) void postRegisterTrace('pre-submit visible errors', { errors });
   await clickRegisterSubmit();
+  void postRegisterTrace('submit clicked', { initialUrl });
   await waitForRegisterProgress(initialUrl);
 
   if (isEmailVerificationStep()) {
@@ -300,9 +315,21 @@ async function typeIntoFirst(selectors: string[], value: string): Promise<void> 
   const element = selectors.map((selector) => document.querySelector<HTMLInputElement>(selector)).find(Boolean);
   if (!element) {
     console.warn('[VFS-REG] no element matched any of:', selectors);
+    void postRegisterTrace('typeIntoFirst NO MATCH', { selectors, value: maskForLog(value) });
     return;
   }
   setInputValue(element, value);
+  // Verify post-write
+  const actual = element.value;
+  if (actual !== value) {
+    void postRegisterTrace('typeIntoFirst MISMATCH', { selector: selectors[0], expected: maskForLog(value), actual: maskForLog(actual) });
+  }
+}
+
+function maskForLog(s: string): string {
+  if (!s) return '';
+  if (s.length <= 4) return '****';
+  return s.slice(0, 2) + '***' + s.slice(-2);
 }
 
 // Open the Dial Code dropdown and pick "998" (Uzbekistan). VFS uses either
