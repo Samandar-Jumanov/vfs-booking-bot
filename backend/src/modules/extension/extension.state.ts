@@ -272,8 +272,14 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   // ── Auto-register bridge events ──────────────────────────────────────────
   // Extension asks backend for a verification link (poll Mailsac inbox).
   if (event.type === 'EXT_REGISTER_NEED_EMAIL_LINK' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] step: NEED_EMAIL_LINK — polling Mailsac for ${event.email}`);
     const { fetchEmailVerificationLink } = await import('@modules/accounts/accountAutoRegister.service');
     const link = await fetchEmailVerificationLink(String(event.email ?? ''));
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] email link ${link ? 'received' : 'MISSING after 2 min'}: ${link ? link.slice(0,60) + '…' : 'null'}`);
     sendToExtension(customerId, {
       type: 'BG_REGISTER_EMAIL_LINK',
       correlationId: event.correlationId,
@@ -284,8 +290,14 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
 
   // Extension asks backend for the SMS OTP (poll smsActivate).
   if (event.type === 'EXT_REGISTER_NEED_SMS_OTP' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] step: NEED_SMS_OTP — polling SMS provider id=${event.smsActivateId}`);
     const { fetchSmsOtp } = await import('@modules/accounts/accountAutoRegister.service');
     const otp = await fetchSmsOtp(String(event.smsActivateId ?? ''));
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] SMS OTP ${otp ? 'received: ' + otp : 'MISSING after timeout'}`);
     sendToExtension(customerId, {
       type: 'BG_REGISTER_SMS_OTP',
       correlationId: event.correlationId,
@@ -296,11 +308,17 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
 
   // Extension asks backend to solve Turnstile via 2Captcha.
   if (event.type === 'EXT_REGISTER_NEED_CAPTCHA' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] step: NEED_CAPTCHA — siteKey=${String(event.siteKey).slice(0,12)}… solving via 2Captcha`);
     const { fetchRegisterCaptchaToken } = await import('@modules/accounts/accountAutoRegister.service');
     const token = await fetchRegisterCaptchaToken(
       String(event.siteKey ?? ''),
       String(event.pageUrl ?? ''),
     );
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] captcha ${token ? 'solved (token len=' + token.length + ')' : 'FAILED'}`);
     sendToExtension(customerId, {
       type: 'BG_REGISTER_CAPTCHA_TOKEN',
       correlationId: event.correlationId,
@@ -310,12 +328,20 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   }
 
   if (event.type === 'EXT_REGISTER_COMPLETED' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_SUCCESS,
+      `[REGISTER] step: COMPLETED for correlation ${event.correlationId.slice(0,8)}…`);
     const { resolveAutoRegister } = await import('@modules/accounts/accountAutoRegister.service');
     resolveAutoRegister(event.correlationId, { ok: true });
     return;
   }
 
   if (event.type === 'EXT_REGISTER_FAILED' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('error', EventType.BOOKING_FAILED,
+      `[REGISTER] step: FAILED reason=${String(event.reason ?? 'unknown')}`);
     const { resolveAutoRegister } = await import('@modules/accounts/accountAutoRegister.service');
     resolveAutoRegister(event.correlationId, {
       ok: false,
