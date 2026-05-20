@@ -16,9 +16,28 @@ export class ExtensionWsClient {
 
   connect(): void {
     this.options.onStatus('connecting');
-    const url = this.buildUrl();
+    let url: string;
+    try {
+      url = this.buildUrl();
+    } catch (err) {
+      console.error('[VFS-WS] buildUrl failed:', (err as Error).message, 'backendUrl=', this.options.backendUrl);
+      this.options.onStatus('error', 'Invalid backend URL: ' + (err as Error).message);
+      return;
+    }
+    if (!this.options.backendUrl || typeof this.options.backendUrl !== 'string') {
+      console.error('[VFS-WS] backendUrl is empty/invalid; aborting connect');
+      this.options.onStatus('error', 'backendUrl missing');
+      return;
+    }
     console.log('[VFS-WS] connect →', url.replace(/token=[^&]+/, 'token=<redacted>'));
-    this.socket = new WebSocket(url);
+    try {
+      this.socket = new WebSocket(url);
+    } catch (err) {
+      console.error('[VFS-WS] new WebSocket threw:', (err as Error).message, 'url=', url.replace(/token=[^&]+/, 'token=<redacted>'));
+      this.options.onStatus('error', 'WebSocket constructor failed: ' + (err as Error).message);
+      this.scheduleReconnect();
+      return;
+    }
     this.socket.addEventListener('open', () => {
       console.log('[VFS-WS] OPEN');
       this.retry = 0;

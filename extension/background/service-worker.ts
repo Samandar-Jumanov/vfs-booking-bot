@@ -443,10 +443,18 @@ async function getSettings(): Promise<ExtensionSettings> {
   // IMPORTANT: passing an object to chrome.storage.local.get only returns
   // keys present in the object. Passing null returns EVERYTHING stored,
   // including extensionToken/customerEmail/setupCode which are not part of
-  // DEFAULT_SETTINGS. Without this fix the token was silently dropped on
-  // every read after SAVE_SETTINGS wrote it.
-  const stored = await chrome.storage.local.get(null);
-  return { ...DEFAULT_SETTINGS, ...stored } as ExtensionSettings;
+  // DEFAULT_SETTINGS.
+  const stored = (await chrome.storage.local.get(null)) as Record<string, unknown>;
+  // Filter out empty/undefined values so they don't override DEFAULT_SETTINGS.
+  // A failed auto-pair could have stored backendUrl='' which then makes
+  // `new URL('')` throw and crash the entire SW on boot.
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(stored)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    cleaned[k] = v;
+  }
+  return { ...DEFAULT_SETTINGS, ...cleaned } as ExtensionSettings;
 }
 
 async function saveSettings(settings: Partial<ExtensionSettings>): Promise<void> {
