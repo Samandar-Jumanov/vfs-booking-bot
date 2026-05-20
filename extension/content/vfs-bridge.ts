@@ -376,58 +376,98 @@ async function selectDialCode998(): Promise<void> {
       return;
     }
   }
-  // Angular Material mat-select / Bootstrap-style dropdown. VFS UZ uses a
-  // mat-select with formcontrolname="dialCode" but the trigger element is
-  // actually the `.mat-select-trigger` child, not the mat-select itself.
-  // Also: Angular Material does not open the panel on raw .click() — it
-  // listens for mousedown. Dispatch a full mouse sequence.
+  // Angular Material MDC (mat-mdc-select) ignores raw MouseEvent dispatched
+  // on the trigger — it listens for pointerdown + the click ripple. Combine
+  // pointer events with focus + keyboard fallback to handle every variant.
   const candidates: HTMLElement[] = Array.from(document.querySelectorAll<HTMLElement>(
-    'mat-select[formcontrolname="dialCode"], mat-select[formcontrolname*="dial" i], mat-select[formcontrolname*="country" i], mat-select[formcontrolname*="code" i], .mat-select, [role="combobox"], button[aria-haspopup], .ng-select-container, .select-dial-code, .mat-mdc-select'
+    'mat-select[formcontrolname="dialCode"], mat-select[formcontrolname*="dial" i], mat-select[formcontrolname*="country" i], mat-select[formcontrolname*="code" i], .mat-select, .mat-mdc-select, [role="combobox"]',
   ));
-  const trigger = candidates.find((el) => {
+  let trigger = candidates.find((el) => {
     const fcn = el.getAttribute('formcontrolname') ?? '';
     const al = el.getAttribute('aria-label') ?? '';
-    const txt = (el.textContent ?? '').trim();
-    return /dial|country|code/i.test(fcn) || /dial|country|code/i.test(al) || /\+?\d{1,3}|dial|country/i.test(txt);
+    return /dial|country|code/i.test(fcn) || /dial|country|code/i.test(al);
   });
   if (!trigger) {
+    // Heuristic: first mat-mdc-select on the form is the dial code on VFS UZ.
+    trigger = candidates[0];
+  }
+  if (!trigger) {
     console.warn('[VFS-REG] dial-code dropdown trigger not found');
-    void postRegisterTrace('dial-code trigger NOT FOUND', {
-      candidateCount: candidates.length,
-      sample: candidates.slice(0, 3).map((c) => ({
-        tag: c.tagName,
-        fcn: c.getAttribute('formcontrolname'),
-        aria: c.getAttribute('aria-label'),
-        txt: (c.textContent ?? '').trim().slice(0, 40),
-      })),
-    });
+    void postRegisterTrace('dial-code trigger NOT FOUND', { candidateCount: candidates.length });
     return;
   }
-  // Click the inner trigger node if present (Angular Material structure).
-  const innerTrigger = trigger.querySelector<HTMLElement>('.mat-select-trigger, .mat-mdc-select-trigger') ?? trigger;
-  ['mousedown', 'mouseup', 'click'].forEach((type) =>
-    innerTrigger.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 })),
+
+  void postRegisterTrace('dial-code trigger found', {
+    tag: trigger.tagName,
+    fcn: trigger.getAttribute('formcontrolname'),
+    id: trigger.id,
+  });
+
+  // Open the panel. Material MDC respects: focus → keydown Enter | Space | ArrowDown.
+  const innerTrigger = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
+  innerTrigger.focus();
+  // Try pointer events first (MDC primary path).
+  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) =>
+    innerTrigger.dispatchEvent(
+      type.startsWith('pointer')
+        ? new PointerEvent(type, { bubbles: true, cancelable: true, isPrimary: true, button: 0 })
+        : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 }),
+    ),
   );
-  // Wait up to 2s for the cdk-overlay to render options.
-  const deadline = Date.now() + 2000;
+
+  // Wait up to 3s for the overlay panel to actually appear.
+  const panelDeadline = Date.now() + 3000;
+  let panel: HTMLElement | null = null;
+  while (Date.now() < panelDeadline && !panel) {
+    panel = document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel, .cdk-overlay-pane [role="listbox"]');
+    if (!panel) await new Promise((r) => setTimeout(r, 100));
+  }
+
+  // Fallback: if panel didn't open via pointer events, send keyboard ENTER.
+  if (!panel) {
+    void postRegisterTrace('dial-code pointer click did not open panel — trying keyboard', {});
+    const opts: KeyboardEventInit = { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
+    innerTrigger.dispatchEvent(new KeyboardEvent('keydown', opts));
+    innerTrigger.dispatchEvent(new KeyboardEvent('keyup', opts));
+    const kbDeadline = Date.now() + 2000;
+    while (Date.now() < kbDeadline && !panel) {
+      panel = document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel, .cdk-overlay-pane [role="listbox"]');
+      if (!panel) await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  if (!panel) {
+    void postRegisterTrace('dial-code panel NEVER opened', {});
+    return;
+  }
+  void postRegisterTrace('dial-code panel opened', {});
+
+  // Find the "998" / Uzbekistan option in the panel.
+  const optionDeadline = Date.now() + 2000;
   let option: HTMLElement | undefined;
-  while (Date.now() < deadline && !option) {
-    option = Array.from(document.querySelectorAll<HTMLElement>(
-      'mat-option, .mat-option, .mat-mdc-option, [role="option"], .ng-option, .dropdown-item',
-    )).find((el) => /\b\+?998\b|uzbekistan/i.test(el.textContent ?? ''));
+  while (Date.now() < optionDeadline && !option) {
+    option = Array.from(panel.querySelectorAll<HTMLElement>(
+      'mat-option, .mat-option, .mat-mdc-option, [role="option"]',
+    )).find((el) => /\b\+?998\b|uzbekistan/i.test((el.textContent ?? '').trim()));
     if (!option) await new Promise((r) => setTimeout(r, 100));
   }
-  if (option) {
-    option.scrollIntoView({ block: 'nearest' });
-    ['mousedown', 'mouseup', 'click'].forEach((type) =>
-      option!.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 })),
-    );
-    console.log('[VFS-REG] dial-code 998 picked from dropdown');
-    void postRegisterTrace('dial-code 998 selected', {});
-  } else {
-    console.warn('[VFS-REG] dial-code 998 option not found in opened list');
-    void postRegisterTrace('dial-code 998 option NOT in overlay', {});
+  if (!option) {
+    const sample = Array.from(panel.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'))
+      .slice(0, 5).map((e) => (e.textContent ?? '').trim().slice(0, 40));
+    void postRegisterTrace('dial-code 998 option NOT in panel', { panelOptionsSample: sample });
+    return;
   }
+
+  option.scrollIntoView({ block: 'nearest' });
+  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) =>
+    option!.dispatchEvent(
+      type.startsWith('pointer')
+        ? new PointerEvent(type, { bubbles: true, cancelable: true, isPrimary: true, button: 0 })
+        : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 }),
+    ),
+  );
+  void postRegisterTrace('dial-code 998 selected', { text: (option.textContent ?? '').trim().slice(0, 40) });
+  console.log('[VFS-REG] dial-code 998 picked from dropdown');
 }
 
 // Check every consent checkbox on the VFS register form. There are 3:
