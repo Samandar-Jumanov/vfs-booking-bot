@@ -112,6 +112,25 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     await chrome.tabs.create({ url: 'https://visa.vfsglobal.com/uzb/en/lva/login' });
     return { ok: true };
   }
+  if (message.type === 'REGISTER_TRACE') {
+    // HTTP-only fallback trace path so register-flow events appear in
+    // backend logs even when the WS is down. Best effort, never block.
+    void (async () => {
+      try {
+        const settings = await getSettings();
+        if (!settings.extensionToken) return;
+        await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/extension/trace`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + settings.extensionToken,
+          },
+          body: JSON.stringify({ step: message.step, meta: message.meta }),
+        });
+      } catch {}
+    })();
+    return { ok: true };
+  }
   if (message.type === 'EXT_SESSION_SYNC') {
     // Augment with HttpOnly cookies (datadome + session) via chrome.cookies API.
     // document.cookie in the content script cannot see HttpOnly cookies, which

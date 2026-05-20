@@ -57,6 +57,7 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
 
 async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
   currentCorrelationId = payload.correlationId;
+  void postRegisterTrace('handleRegisterFlow START', { url: location.href, email: payload.email });
   try {
     await withTimeout(runRegisterSteps(payload), REGISTER_STEP_TIMEOUT_MS, 'REGISTER_TIMEOUT');
   } catch (error) {
@@ -70,8 +71,10 @@ async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
 
 async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   console.log('[VFS-REG] runRegisterSteps starting on', location.href);
+  void postRegisterTrace('runRegisterSteps START', { url: location.href });
   await waitForElement('input[type="email"], input[type="password"]', 30_000);
   console.log('[VFS-REG] form fields detected, filling…');
+  void postRegisterTrace('form fields detected', { url: location.href });
 
   // VFS Uzbekistan /register form (verified from operator screenshots 2026-05-20):
   //   Email • Password • Confirm Password • Mobile Number (dial-code+number) •
@@ -510,6 +513,17 @@ function waitForRegisterSignal(kind: string, timeoutMs: number): Promise<string 
 
 function resolveRegisterWaiter(kind: string, value: string | null): void {
   registerWaiters.get(kind)?.(value);
+}
+
+// HTTP-only register-flow trace: POST goes via chrome.runtime to the SW which
+// has the backend URL + extension token. Lets us see every step in backend
+// Activity Logs even when the WS event channel is dead.
+async function postRegisterTrace(step: string, meta?: Record<string, unknown>): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({ type: 'REGISTER_TRACE', step, meta });
+  } catch {
+    /* ignore */
+  }
 }
 
 async function emitRegisterEvent(event: ExtensionEvent): Promise<void> {
