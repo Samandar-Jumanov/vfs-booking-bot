@@ -86,15 +86,18 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
     'input[name="confirmPassword"]',
     // last password input that isn't the first one
   ], payload.password);
-  // Phone — VFS expects the LOCAL number (without country code; dial code is
-  // a separate select that defaults to 998 for UZ). Strip leading +998 if
-  // someone passes the full international form.
+  // Select Dial Code "998" from the dropdown. The dropdown shows up as
+  // either a native select OR an Angular Material mat-select. Try both.
+  await selectDialCode998();
+  // Phone — VFS expects the LOCAL number (without country code).
   const localPhone = payload.phone.replace(/^\+?998/, '').replace(/^\+/, '');
   await typeIntoFirst([
     'input[formcontrolname="mobileNumber"]',
     'input[type="tel"]',
     'input[name="phone"]',
     'input[name="mobile"]',
+    // Last-resort: any input near a "Mobile number" label that isn't the dial-code select
+    'input[placeholder*="Mobile" i]',
   ], localPhone);
   // Check all 3 consent checkboxes (Privacy Notice, Data Transfer, Terms).
   await checkAllRegisterConsents();
@@ -299,6 +302,45 @@ async function typeIntoFirst(selectors: string[], value: string): Promise<void> 
   setInputValue(element, value);
 }
 
+// Open the Dial Code dropdown and pick "998" (Uzbekistan). VFS uses either
+// a native <select> or an Angular Material mat-select component. Try native
+// first (simple), then Material click pattern.
+async function selectDialCode998(): Promise<void> {
+  // Native select
+  const nativeSelect = document.querySelector<HTMLSelectElement>(
+    'select[formcontrolname="dialCode"], select[name="dialCode"], select[name="countryCode"]'
+  );
+  if (nativeSelect) {
+    const opt = Array.from(nativeSelect.options).find(o => o.value === '998' || /998/.test(o.textContent || ''));
+    if (opt) {
+      nativeSelect.value = opt.value;
+      nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      console.log('[VFS-REG] native dial-code 998 selected');
+      return;
+    }
+  }
+  // Angular Material mat-select / Bootstrap-style dropdown
+  const trigger = Array.from(document.querySelectorAll<HTMLElement>(
+    'mat-select[formcontrolname="dialCode"], .mat-select, [role="combobox"], button[aria-haspopup], .ng-select-container, .select-dial-code'
+  )).find((el) => /dial|country|code/i.test(el.getAttribute('formcontrolname') || el.getAttribute('aria-label') || el.textContent || ''));
+  if (!trigger) {
+    console.warn('[VFS-REG] dial-code dropdown trigger not found');
+    return;
+  }
+  trigger.click();
+  // Wait briefly for the option list to render.
+  await new Promise(r => setTimeout(r, 500));
+  const option = Array.from(document.querySelectorAll<HTMLElement>(
+    'mat-option, .mat-option, [role="option"], .ng-option, .dropdown-item'
+  )).find((el) => /\b998\b/.test(el.textContent || ''));
+  if (option) {
+    option.click();
+    console.log('[VFS-REG] dial-code 998 picked from dropdown');
+  } else {
+    console.warn('[VFS-REG] dial-code 998 option not found in opened list');
+  }
+}
+
 // Check every consent checkbox on the VFS register form. There are 3:
 //   1. Privacy Notice / processing of personal data
 //   2. Data Transfer / international transfer
@@ -323,9 +365,23 @@ async function checkAllRegisterConsents(): Promise<void> {
 function setInputValue(element: HTMLInputElement | HTMLTextAreaElement | undefined, value: string): void {
   if (!element) return;
   element.focus();
-  element.value = value;
-  element.dispatchEvent(new Event('input', { bubbles: true }));
+  // Use the native value setter so Angular's NgModel/FormControl picks up
+  // the new value. Plain `element.value = ...` updates the DOM but Angular's
+  // input event handler reads via the prototype's value-tracking setter,
+  // which gets bypassed when you assign directly.
+  const proto = element instanceof HTMLTextAreaElement
+    ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype;
+  const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (nativeSetter) {
+    nativeSetter.call(element, value);
+  } else {
+    element.value = value;
+  }
+  // InputEvent (not Event) is what Angular's (input) binding listens for.
+  element.dispatchEvent(new InputEvent('input', { bubbles: true, data: value }));
   element.dispatchEvent(new Event('change', { bubbles: true }));
+  element.dispatchEvent(new Event('blur', { bubbles: true }));
 }
 
 async function clickFirst(selectors: string[]): Promise<{ ok: true }> {
