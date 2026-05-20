@@ -148,26 +148,18 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   void postRegisterTrace('submit clicked', { initialUrl });
   await waitForRegisterProgress(initialUrl);
 
-  if (isEmailVerificationStep()) {
-    await emitRegisterEvent({ type: 'EXT_REGISTER_NEED_EMAIL_LINK', correlationId: payload.correlationId, email: payload.email });
-    const link = await waitForRegisterSignal('emailLink', 90_000);
-    if (!link) throw new Error('EMAIL_LINK_MISSING');
-    window.location.href = link;
-    return;
-  }
-
-  if (isPhoneOtpStep()) {
-    await emitRegisterEvent({
-      type: 'EXT_REGISTER_NEED_SMS_OTP',
-      correlationId: payload.correlationId,
-      smsActivateId: payload.smsActivateId,
-    });
-    const otp = await waitForRegisterSignal('smsOtp', 90_000);
-    if (!otp) throw new Error('SMS_OTP_MISSING');
-    await fillRegisterOtp(otp);
-  }
-
-  await waitForCompletionOrOtp(payload);
+  // VFS UZ does NOT issue an SMS at signup — only an email verification
+  // link. Hand off to backend: it polls the inbox and visits the link
+  // server-side. We are done in the page.
+  void postRegisterTrace('submitted, handing off to backend for email link', {
+    url: location.href,
+    email: payload.email,
+  });
+  await emitRegisterEvent({
+    type: 'EXT_REGISTER_SUBMITTED',
+    correlationId: payload.correlationId,
+    email: payload.email,
+  });
 }
 
 async function waitForCompletionOrOtp(payload: RegisterFormPayload): Promise<void> {

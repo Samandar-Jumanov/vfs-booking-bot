@@ -196,6 +196,7 @@ model VfsAccount {
   email             String        @unique
   encryptedPassword String
   phone             String?
+  smsExternalId     String?
   status            AccountStatus @default(ACTIVE)
   lastUsedAt        DateTime?
   cooldownUntil     DateTime?

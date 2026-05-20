@@ -90,6 +90,7 @@ export type ExtensionEvent =
   | { type: 'EXT_REGISTER_NEED_EMAIL_LINK'; correlationId: string; email: string }
   | { type: 'EXT_REGISTER_NEED_SMS_OTP'; correlationId: string; smsActivateId: string }
   | { type: 'EXT_REGISTER_NEED_CAPTCHA'; correlationId: string; siteKey: string; pageUrl: string }
+  | { type: 'EXT_REGISTER_SUBMITTED'; correlationId: string; email: string }
   | { type: 'EXT_REGISTER_COMPLETED'; correlationId: string }
   | { type: 'EXT_REGISTER_FAILED'; correlationId: string; reason: string }
   | { type: 'EXT_LOGGED_IN'; email?: string }

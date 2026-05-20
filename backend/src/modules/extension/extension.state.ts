@@ -136,7 +136,7 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   // Helps diagnose why poll attempts aren't completing.
   if (event.type && !['EXT_HEARTBEAT', 'EXT_SESSION_SYNC', 'EXT_SLOT_DETECTED',
     'EXT_SESSION_LOST', 'EXT_REGISTER_NEED_EMAIL_LINK', 'EXT_REGISTER_NEED_SMS_OTP',
-    'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
+    'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_SUBMITTED', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
     'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT'].includes(String(event.type))) {
     const { logEvent } = await import('@modules/logs/logger');
     const { EventType } = await import('@prisma/client');
@@ -324,6 +324,16 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
       correlationId: event.correlationId,
       token: token ?? null,
     });
+    return;
+  }
+
+  if (event.type === 'EXT_REGISTER_SUBMITTED' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[REGISTER] step: SUBMITTED — form posted, waiting for email link for ${event.email ?? '(unknown)'}`);
+    const { resolveAutoRegisterSubmitted } = await import('@modules/accounts/accountAutoRegister.service');
+    resolveAutoRegisterSubmitted(event.correlationId);
     return;
   }
 
