@@ -10,6 +10,9 @@ import type {
 
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 90_000;
+// Version marker so we can confirm in console which build is loaded.
+const VFS_BRIDGE_VERSION = '2026-05-20-mdc-dialcode-v2';
+console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
 const registerWaiters = new Map<string, (value: string | null) => void>();
@@ -363,6 +366,18 @@ function maskForLog(s: string): string {
 // a native <select> or an Angular Material mat-select component. Try native
 // first (simple), then Material click pattern.
 async function selectDialCode998(): Promise<void> {
+  // Always emit so we know the function ran at all. Includes a count of
+  // mat-select elements on the page so we can verify the trigger exists.
+  const matCount = document.querySelectorAll('mat-select').length;
+  const exactHit = Boolean(document.querySelector('mat-select[formcontrolname="dialcode"]'));
+  void postRegisterTrace('selectDialCode998 ENTRY', {
+    version: VFS_BRIDGE_VERSION,
+    matSelectCount: matCount,
+    exactDialcodeHit: exactHit,
+    href: location.href,
+  });
+  console.log(`[VFS-REG] selectDialCode998 ENTRY ver=${VFS_BRIDGE_VERSION} matCount=${matCount} exactHit=${exactHit}`);
+
   // Native select
   const nativeSelect = document.querySelector<HTMLSelectElement>(
     'select[formcontrolname="dialCode"], select[name="dialCode"], select[name="countryCode"]'
