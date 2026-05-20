@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake } from 'lucide-react';
+import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2 } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -53,6 +53,19 @@ export default function AccountPoolPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['account-pool'] }),
   });
 
+  const [autoCreateMsg, setAutoCreateMsg] = useState<string | null>(null);
+  const autoCreateMutation = useMutation({
+    mutationFn: () => api.post('/accounts/auto-create', { source: 'uzb', destination: 'lva', countryCode: '171' }).then((r) => r.data),
+    onSuccess: (data) => {
+      setAutoCreateMsg(data?.success ? `Created ${data.email}` : `Failed: ${data?.reason ?? 'unknown'}`);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
+    onError: (err: any) => {
+      const reason = err?.response?.data?.reason ?? err?.message ?? 'unknown error';
+      setAutoCreateMsg(`Failed: ${reason}`);
+    },
+  });
+
   const summary = poolQuery.data?.summary ?? { total: 0, active: 0, fresh: 0, stale: 0, blocked: 0, cooldown: 0 };
   const items = poolQuery.data?.items ?? [];
 
@@ -86,15 +99,24 @@ export default function AccountPoolPage() {
         <button
           type="button"
           className="btn-primary h-10 gap-2"
+          onClick={() => { setAutoCreateMsg(null); autoCreateMutation.mutate(); }}
+          disabled={autoCreateMutation.isPending}
+        >
+          {autoCreateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          {autoCreateMutation.isPending ? 'Auto-creating…' : 'Auto-create VFS account'}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary h-10 gap-2"
           onClick={openAllStale}
           disabled={staleAccounts.length === 0}
         >
           <ExternalLink className="h-4 w-4" />
           Open {staleAccounts.length} stale login tab{staleAccounts.length === 1 ? '' : 's'}
         </button>
-        <span className="text-sm text-muted-foreground">
-          Click to open login pages for stale accounts. The extension will sync cookies once you sign in.
-        </span>
+        {autoCreateMsg && (
+          <span className={`text-sm ${autoCreateMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{autoCreateMsg}</span>
+        )}
       </div>
 
       <div className="card mt-6 overflow-hidden bg-card/70 p-0">
