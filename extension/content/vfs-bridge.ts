@@ -350,25 +350,57 @@ async function selectDialCode998(): Promise<void> {
       return;
     }
   }
-  // Angular Material mat-select / Bootstrap-style dropdown
-  const trigger = Array.from(document.querySelectorAll<HTMLElement>(
-    'mat-select[formcontrolname="dialCode"], .mat-select, [role="combobox"], button[aria-haspopup], .ng-select-container, .select-dial-code'
-  )).find((el) => /dial|country|code/i.test(el.getAttribute('formcontrolname') || el.getAttribute('aria-label') || el.textContent || ''));
+  // Angular Material mat-select / Bootstrap-style dropdown. VFS UZ uses a
+  // mat-select with formcontrolname="dialCode" but the trigger element is
+  // actually the `.mat-select-trigger` child, not the mat-select itself.
+  // Also: Angular Material does not open the panel on raw .click() — it
+  // listens for mousedown. Dispatch a full mouse sequence.
+  const candidates: HTMLElement[] = Array.from(document.querySelectorAll<HTMLElement>(
+    'mat-select[formcontrolname="dialCode"], mat-select[formcontrolname*="dial" i], mat-select[formcontrolname*="country" i], mat-select[formcontrolname*="code" i], .mat-select, [role="combobox"], button[aria-haspopup], .ng-select-container, .select-dial-code, .mat-mdc-select'
+  ));
+  const trigger = candidates.find((el) => {
+    const fcn = el.getAttribute('formcontrolname') ?? '';
+    const al = el.getAttribute('aria-label') ?? '';
+    const txt = (el.textContent ?? '').trim();
+    return /dial|country|code/i.test(fcn) || /dial|country|code/i.test(al) || /\+?\d{1,3}|dial|country/i.test(txt);
+  });
   if (!trigger) {
     console.warn('[VFS-REG] dial-code dropdown trigger not found');
+    void postRegisterTrace('dial-code trigger NOT FOUND', {
+      candidateCount: candidates.length,
+      sample: candidates.slice(0, 3).map((c) => ({
+        tag: c.tagName,
+        fcn: c.getAttribute('formcontrolname'),
+        aria: c.getAttribute('aria-label'),
+        txt: (c.textContent ?? '').trim().slice(0, 40),
+      })),
+    });
     return;
   }
-  trigger.click();
-  // Wait briefly for the option list to render.
-  await new Promise(r => setTimeout(r, 500));
-  const option = Array.from(document.querySelectorAll<HTMLElement>(
-    'mat-option, .mat-option, [role="option"], .ng-option, .dropdown-item'
-  )).find((el) => /\b998\b/.test(el.textContent || ''));
+  // Click the inner trigger node if present (Angular Material structure).
+  const innerTrigger = trigger.querySelector<HTMLElement>('.mat-select-trigger, .mat-mdc-select-trigger') ?? trigger;
+  ['mousedown', 'mouseup', 'click'].forEach((type) =>
+    innerTrigger.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 })),
+  );
+  // Wait up to 2s for the cdk-overlay to render options.
+  const deadline = Date.now() + 2000;
+  let option: HTMLElement | undefined;
+  while (Date.now() < deadline && !option) {
+    option = Array.from(document.querySelectorAll<HTMLElement>(
+      'mat-option, .mat-option, .mat-mdc-option, [role="option"], .ng-option, .dropdown-item',
+    )).find((el) => /\b\+?998\b|uzbekistan/i.test(el.textContent ?? ''));
+    if (!option) await new Promise((r) => setTimeout(r, 100));
+  }
   if (option) {
-    option.click();
+    option.scrollIntoView({ block: 'nearest' });
+    ['mousedown', 'mouseup', 'click'].forEach((type) =>
+      option!.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 })),
+    );
     console.log('[VFS-REG] dial-code 998 picked from dropdown');
+    void postRegisterTrace('dial-code 998 selected', {});
   } else {
     console.warn('[VFS-REG] dial-code 998 option not found in opened list');
+    void postRegisterTrace('dial-code 998 option NOT in overlay', {});
   }
 }
 
@@ -439,9 +471,41 @@ async function extractConfirmation(): Promise<{ confirmationNumber: string }> {
 }
 
 async function clickRegisterSubmit(): Promise<void> {
-  const button = findButtonByText(['register', 'sign up', 'continue', 'create']) ?? document.querySelector<HTMLElement>('button[type="submit"]');
-  if (!button) throw new Error('REGISTER_SUBMIT_BUTTON_NOT_FOUND');
-  button.click();
+  const findBtn = () =>
+    findButtonByText(['register', 'sign up', 'continue', 'create']) ?? document.querySelector<HTMLElement>('button[type="submit"]');
+  const isEnabled = (btn: HTMLElement) => {
+    const asBtn = btn as HTMLButtonElement;
+    if (asBtn.disabled) return false;
+    if (btn.getAttribute('aria-disabled') === 'true') return false;
+    if (btn.hasAttribute('disabled')) return false;
+    return true;
+  };
+  const hasTurnstileToken = () => {
+    const t = document.querySelector<HTMLTextAreaElement | HTMLInputElement>('[name="cf-turnstile-response"]');
+    return Boolean(t?.value);
+  };
+  // Wait up to 60s for both: Turnstile token present AND button enabled.
+  // If only one becomes true, keep waiting — VFS won't accept submit without both.
+  const deadline = Date.now() + 60_000;
+  let lastLogAt = 0;
+  while (Date.now() < deadline) {
+    const btn = findBtn();
+    const tokenOk = hasTurnstileToken();
+    const btnOk = btn ? isEnabled(btn) : false;
+    if (btn && tokenOk && btnOk) {
+      ['mousedown', 'mouseup', 'click'].forEach((type) =>
+        btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 })),
+      );
+      void postRegisterTrace('register submit clicked', { tokenOk, btnOk });
+      return;
+    }
+    if (Date.now() - lastLogAt > 5000) {
+      void postRegisterTrace('register submit waiting', { btnFound: Boolean(btn), tokenOk, btnEnabled: btnOk });
+      lastLogAt = Date.now();
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error('REGISTER_SUBMIT_BUTTON_NEVER_ENABLED');
 }
 
 async function clickVerifyButton(): Promise<void> {
