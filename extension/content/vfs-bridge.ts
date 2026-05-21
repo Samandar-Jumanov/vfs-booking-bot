@@ -11,7 +11,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-timeout-180s-v10';
+const VFS_BRIDGE_VERSION = '2026-05-21-submit-retry-v11';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
@@ -800,10 +800,39 @@ async function clickRegisterSubmit(): Promise<void> {
     const tokenOk = hasTurnstileToken();
     const btnOk = btn ? isEnabled(btn) : false;
     if (btn && tokenOk && btnOk) {
-      // Use trusted click — Material MDC button uses a ripple handler that
-      // can reject dispatched clicks too.
-      const ok = await trustedClick(btn);
-      void postRegisterTrace('register submit trusted-clicked', { tokenOk, btnOk, ok });
+      // VFS sometimes enables the button momentarily during Turnstile
+      // verification but rejects the first click. Click multiple times
+      // with verification between each — stop as soon as the page
+      // transitions to the verification-email screen.
+      const initialUrl = window.location.href;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        const ok = await trustedClick(btn);
+        void postRegisterTrace('register submit trusted-clicked', { attempt, tokenOk, btnOk, ok });
+        // Wait 2s for VFS to process the click + transition.
+        await new Promise((r) => setTimeout(r, 2000));
+        if (
+          window.location.href !== initialUrl ||
+          isEmailVerificationStep() ||
+          isRegisterComplete()
+        ) {
+          void postRegisterTrace('register submit succeeded', { attempt, url: location.href });
+          return;
+        }
+        // Re-check button before next attempt — it may have disabled itself
+        // momentarily and we should wait for it to re-enable.
+        const reBtn = findBtn();
+        if (!reBtn) break;
+        const reEnabled = isEnabled(reBtn);
+        if (!reEnabled) {
+          void postRegisterTrace('register submit button disabled after click — waiting to re-enable', { attempt });
+          // Wait up to 3s for the button to come back, then try again.
+          const reDeadline = Date.now() + 3000;
+          while (Date.now() < reDeadline && !isEnabled(reBtn)) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        }
+      }
+      void postRegisterTrace('register submit exhausted retries', {});
       return;
     }
     if (Date.now() - lastLogAt > 5000) {
