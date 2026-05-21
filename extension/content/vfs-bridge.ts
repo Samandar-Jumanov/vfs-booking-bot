@@ -11,7 +11,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 90_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-dialcode-mdc-target-sequence-v8';
+const VFS_BRIDGE_VERSION = '2026-05-21-dialcode-mobile-refill-v9';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
@@ -122,6 +122,24 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   // Now try dial code. If it fails, we show a banner asking the operator to
   // click it manually — the page-transition watcher catches the submit either way.
   await selectDialCode998();
+
+  // Re-fill mobile AFTER dial code selects. Angular Material's validation chain
+  // can reset the contact field when dialcode was empty at first typing, OR
+  // when the dropdown clicks bubble through and steal focus. Always re-set
+  // the value, verify it sticks.
+  const contactEl = document.querySelector<HTMLInputElement>('input[formcontrolname="contact"]');
+  if (contactEl && contactEl.value !== localPhone) {
+    void postRegisterTrace('mobile field was cleared after dial code, re-filling', {
+      previousValue: maskForLog(contactEl.value),
+    });
+    setInputValue(contactEl, localPhone);
+    // Give Angular time to commit the value, then verify
+    await new Promise((r) => setTimeout(r, 500));
+    void postRegisterTrace('mobile re-fill result', {
+      currentValue: maskForLog(contactEl.value),
+      stuck: contactEl.value === localPhone,
+    });
+  }
 
   const turnstile = document.querySelector<HTMLElement>('[data-sitekey]');
   const siteKey = turnstile?.getAttribute('data-sitekey');
