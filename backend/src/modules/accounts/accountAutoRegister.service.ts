@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'crypto';
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { prisma } from '@config/database';
 import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { claimToken, registerPool } from '@modules/captcha/token.pool';
@@ -167,14 +168,10 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
       return { ok: false, reason: 'EMAIL_LINK_NOT_RECEIVED' };
     }
 
-    // Step 3: visit the link server-side. VFS verification links are public
-    // GETs with a token param — no session/proxy needed.
+    // Step 3: visit the link server-side. VFS checks visitor country — must
+    // come from a UZ IP. Route through BrightData if configured.
     try {
-      const resp = await axios.get(verifyLink, {
-        maxRedirects: 5,
-        validateStatus: () => true,
-        timeout: 15_000,
-      });
+      const resp = await visitActivationLink(verifyLink);
       if (resp.status >= 400) {
         return { ok: false, reason: `EMAIL_LINK_VISIT_FAILED_${resp.status}` };
       }
@@ -217,6 +214,36 @@ export function resolveAutoRegister(correlationId: string, result: PendingResult
     getSmsProvider().releaseNumber(entry.smsActivateId).catch(() => undefined);
   }
   entry.resolve(result);
+}
+
+// Visit VFS activation link through BrightData UZ proxy (if configured).
+// VFS rejects non-UZ traffic with /page-not-found. Backend lives in EU/US
+// so direct axios.get from Railway would fail. The proxy makes the
+// activation request appear to come from Uzbekistan.
+export async function visitActivationLink(link: string): Promise<{ status: number }> {
+  const proxyUrl = buildBrightDataProxyUrl();
+  const config: Parameters<typeof axios.get>[1] = {
+    maxRedirects: 5,
+    validateStatus: () => true,
+    timeout: 30_000,
+  };
+  if (proxyUrl) {
+    const agent = new HttpsProxyAgent(proxyUrl);
+    config.httpsAgent = agent;
+    config.httpAgent = agent;
+    config.proxy = false; // Disable axios's built-in proxy handling, use agent.
+  }
+  const resp = await axios.get(link, config);
+  return { status: resp.status };
+}
+
+function buildBrightDataProxyUrl(): string | null {
+  const host = process.env.PROXY_HOST || process.env.BRIGHTDATA_HOST;
+  const port = process.env.PROXY_PORT || process.env.BRIGHTDATA_PORT;
+  const user = process.env.PROXY_USERNAME || process.env.BRIGHTDATA_USERNAME;
+  const pass = process.env.PROXY_PASSWORD || process.env.BRIGHTDATA_PASSWORD;
+  if (!host || !port || !user || !pass) return null;
+  return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
 }
 
 export async function fetchEmailVerificationLink(email: string): Promise<string | null> {

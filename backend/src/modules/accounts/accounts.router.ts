@@ -6,7 +6,7 @@ import { accountPoolService } from './accountPool.service';
 import { prisma } from '@config/database';
 import { decrypt, encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
-import { autoRegisterAccount, fetchEmailVerificationLink } from './accountAutoRegister.service';
+import { autoRegisterAccount, fetchEmailVerificationLink, visitActivationLink } from './accountAutoRegister.service';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
 import { AccountStatus, EventType } from '@prisma/client';
@@ -355,8 +355,9 @@ accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response,
       return;
     }
 
-    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email}`);
-    const visit = await axios.get(link, { maxRedirects: 5, validateStatus: () => true, timeout: 15_000 }).catch((e) => ({ status: 0, err: (e as Error).message }));
+    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email} (via BrightData)`);
+    const visit = await visitActivationLink(link).catch((e) => ({ status: 0, err: (e as Error).message }));
+    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] activation link response status=${visit.status}`);
     if ('status' in visit && typeof visit.status === 'number' && visit.status >= 400) {
       res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visit.status}` });
       return;
