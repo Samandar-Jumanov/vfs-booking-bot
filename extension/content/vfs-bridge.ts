@@ -11,7 +11,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-submit-retry-v11';
+const VFS_BRIDGE_VERSION = '2026-05-21-success-detection-v12';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
@@ -184,6 +184,15 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
       reason: (err as Error).message,
     });
   }
+
+  // Snapshot the page state RIGHT AFTER submit attempts so we can see what
+  // VFS actually rendered. Helps diagnose "click fired but no transition".
+  setTimeout(() => {
+    const bodySample = document.body.innerText.slice(0, 800);
+    const hasForm = Boolean(document.querySelector('input[formcontrolname="emailid"]'));
+    const url = window.location.href;
+    void postRegisterTrace('post-submit page snapshot', { url, hasEmailField: hasForm, bodyTextSample: bodySample });
+  }, 3000);
 
   // Wait up to 3 minutes for page transition OR "verification email sent"
   // text. This covers both: bot clicked successfully, OR operator clicked
@@ -860,7 +869,30 @@ function findButtonByText(words: string[]): HTMLElement | null {
 
 function isEmailVerificationStep(): boolean {
   const text = document.body.innerText.toLowerCase();
-  return text.includes('verification email') || text.includes('verify your email') || text.includes('email sent');
+  // Look for any signal that VFS accepted the registration and is showing
+  // a confirmation/email-sent message. Several possible variants observed.
+  if (
+    text.includes('verification email') ||
+    text.includes('verify your email') ||
+    text.includes('email sent') ||
+    text.includes('email has been sent') ||
+    text.includes('check your email') ||
+    text.includes('check your inbox') ||
+    text.includes('successfully registered') ||
+    text.includes('successfully created') ||
+    text.includes('thank you for registering') ||
+    text.includes('thank you for signing up') ||
+    text.includes('activate your account') ||
+    text.includes('please activate') ||
+    text.includes('confirmation email')
+  ) {
+    return true;
+  }
+  // Heuristic: if the password/confirmPassword inputs are gone from the page,
+  // the form was destroyed — registration probably succeeded.
+  const stillHasForm = document.querySelector('input[formcontrolname="emailid"]') &&
+    document.querySelector('input[formcontrolname="password"]');
+  return !stillHasForm;
 }
 
 function isPhoneOtpStep(): boolean {
