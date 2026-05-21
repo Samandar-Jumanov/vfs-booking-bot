@@ -186,6 +186,7 @@ model PushSubscription {
 }
 
 enum AccountStatus {
+  PENDING
   ACTIVE
   BLOCKED
   COOLDOWN

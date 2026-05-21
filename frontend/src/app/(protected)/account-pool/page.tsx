@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2 } from 'lucide-react';
+import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2, RefreshCw } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 interface PoolItem {
   id: string;
   email: string;
-  status: 'ACTIVE' | 'BLOCKED' | 'COOLDOWN';
+  status: 'PENDING' | 'ACTIVE' | 'BLOCKED' | 'COOLDOWN';
   cookieFresh: boolean;
   lastWarmedAt: string | null;
   tabUrl: string | null;
@@ -27,6 +27,7 @@ interface PoolSummary {
   stale: number;
   blocked: number;
   cooldown: number;
+  pending: number;
 }
 
 interface PoolResponse {
@@ -64,6 +65,22 @@ export default function AccountPoolPage() {
       const reason = err?.response?.data?.reason ?? err?.message ?? 'unknown error';
       setAutoCreateMsg(`Failed: ${reason}`);
     },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['account-pool'] }),
+  });
+
+  const [retryMsg, setRetryMsg] = useState<string | null>(null);
+  const retryActivationMutation = useMutation({
+    mutationFn: (accountId: string) =>
+      api.post('/accounts/recover-from-mailsac', { accountId }).then((r) => r.data),
+    onSuccess: (data) => {
+      setRetryMsg(data?.success ? `Activated ${data.email}` : `Failed: ${data?.reason ?? 'unknown'}`);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
+    onError: (err: any) => {
+      const reason = err?.response?.data?.reason ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
+      setRetryMsg(`Failed: ${reason}`);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
   });
 
   const [manualOpen, setManualOpen] = useState(false);
@@ -90,7 +107,7 @@ export default function AccountPoolPage() {
     },
   });
 
-  const summary = poolQuery.data?.summary ?? { total: 0, active: 0, fresh: 0, stale: 0, blocked: 0, cooldown: 0 };
+  const summary = poolQuery.data?.summary ?? { total: 0, active: 0, fresh: 0, stale: 0, blocked: 0, cooldown: 0, pending: 0 };
   const items = poolQuery.data?.items ?? [];
 
   const staleAccounts = useMemo(() => items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh), [items]);
@@ -110,8 +127,9 @@ export default function AccountPoolPage() {
       title="Account pool"
       description="Operator-managed VFS account pool. The extension keeps each account's session warm so the booking worker can dispatch bookings to your Chrome."
     >
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-7">
         <Stat label="Total" value={summary.total} />
+        <Stat label="Pending" value={summary.pending} tone="warn" icon={<Clock className="h-4 w-4" />} />
         <Stat label="Active" value={summary.active} tone="ok" />
         <Stat label="Cookies fresh" value={summary.fresh} tone="ok" icon={<CheckCircle2 className="h-4 w-4" />} />
         <Stat label="Stale" value={summary.stale} tone="warn" icon={<AlertTriangle className="h-4 w-4" />} />
@@ -151,6 +169,9 @@ export default function AccountPoolPage() {
         )}
         {manualMsg && (
           <span className={`text-sm ${manualMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{manualMsg}</span>
+        )}
+        {retryMsg && (
+          <span className={`text-sm ${retryMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{retryMsg}</span>
         )}
       </div>
       {manualOpen && (
@@ -232,7 +253,11 @@ export default function AccountPoolPage() {
                   <StatusBadge status={a.status} />
                 </td>
                 <td className="px-4 py-3">
-                  {a.cookieFresh ? (
+                  {a.status === 'PENDING' ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-bold text-amber-500">
+                      <Clock className="h-3.5 w-3.5" /> pending
+                    </span>
+                  ) : a.cookieFresh ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-green-500/15 px-2.5 py-1 text-xs font-bold text-green-500">
                       <CheckCircle2 className="h-3.5 w-3.5" /> fresh
                     </span>
@@ -248,6 +273,21 @@ export default function AccountPoolPage() {
                 <td className="px-4 py-3">{a.profileCount}</td>
                 <td className="px-4 py-3 text-right">
                   <div className="flex justify-end gap-2">
+                    {a.status === 'PENDING' && (
+                      <button
+                        type="button"
+                        className="btn-primary h-8 gap-1.5 text-xs"
+                        onClick={() => { setRetryMsg(null); retryActivationMutation.mutate(a.id); }}
+                        disabled={retryActivationMutation.isPending && retryActivationMutation.variables === a.id}
+                      >
+                        {retryActivationMutation.isPending && retryActivationMutation.variables === a.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                        Retry activation
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn-secondary h-8 gap-1.5 text-xs"
@@ -301,6 +341,7 @@ function Stat({ label, value, tone, icon }: { label: string; value: number; tone
 
 function StatusBadge({ status }: { status: PoolItem['status'] }) {
   const map = {
+    PENDING: 'bg-amber-500/15 text-amber-500',
     ACTIVE: 'bg-green-500/15 text-green-500',
     BLOCKED: 'bg-red-500/15 text-red-500',
     COOLDOWN: 'bg-blue-500/15 text-blue-500',

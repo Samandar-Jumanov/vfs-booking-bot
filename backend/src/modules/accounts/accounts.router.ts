@@ -4,12 +4,12 @@ import { requireAuth } from '@middleware/auth.middleware';
 import { AppError } from '@middleware/errorHandler';
 import { accountPoolService } from './accountPool.service';
 import { prisma } from '@config/database';
-import { encrypt } from '@utils/crypto';
+import { decrypt, encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
 import { autoRegisterAccount, fetchEmailVerificationLink } from './accountAutoRegister.service';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
-import { EventType } from '@prisma/client';
+import { AccountStatus, EventType } from '@prisma/client';
 
 export const accountsRouter = Router();
 
@@ -26,6 +26,8 @@ const createAccountSchema = z.object({
 const cooldownSchema = z.object({
   minutes: z.number().int().positive(),
 });
+
+const PENDING_STATUS = 'PENDING' as AccountStatus;
 
 function cookieStoreHasDatadome(cookieStore: unknown): boolean {
   if (!cookieStore) return false;
@@ -241,6 +243,7 @@ accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: N
       stale: items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh).length,
       blocked: items.filter((i) => i.status === 'BLOCKED').length,
       cooldown: items.filter((i) => i.status === 'COOLDOWN').length,
+      pending: items.filter((i) => i.status === PENDING_STATUS).length,
     };
 
     res.json({ summary, items });
@@ -295,18 +298,51 @@ accountsRouter.post('/auto-create', async (req: Request, res: Response, next: Ne
 /**
  * Recover an account that was registered on VFS but failed mid-flow on our
  * side (e.g. operator clicked Register manually so EXT_REGISTER_SUBMITTED
- * never fired). Operator supplies { email, password, phone? }; backend
- * polls Mailsac for the verification link, GETs it, and persists the row.
+ * never fired). For pending pool rows, the operator supplies { accountId }
+ * and the backend decrypts the stored password server-side. The legacy
+ * { email, password, phone?, smsExternalId? } body is still supported.
  *
- * Body: { email, password, phone?, smsExternalId? }
+ * Body: { accountId } or { email, password, phone?, smsExternalId? }
  */
 accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
-    const email = String(req.body?.email ?? '').trim();
-    const password = String(req.body?.password ?? '');
-    const phone = req.body?.phone ? String(req.body.phone) : null;
-    const smsExternalId = req.body?.smsExternalId ? String(req.body.smsExternalId) : null;
+    const accountId = req.body?.accountId ? String(req.body.accountId) : null;
+    let email = String(req.body?.email ?? '').trim();
+    let password = String(req.body?.password ?? '');
+    let phone = req.body?.phone ? String(req.body.phone) : null;
+    let smsExternalId = req.body?.smsExternalId ? String(req.body.smsExternalId) : null;
+    let existingAccount: {
+      id: string;
+      email: string;
+      encryptedPassword: string;
+      phone: string | null;
+      smsExternalId: string | null;
+      status: AccountStatus;
+    } | null = null;
+
+    if (accountId) {
+      existingAccount = await prisma.vfsAccount.findUnique({
+        where: { id: accountId },
+        select: {
+          id: true,
+          email: true,
+          encryptedPassword: true,
+          phone: true,
+          smsExternalId: true,
+          status: true,
+        },
+      });
+      if (!existingAccount) {
+        res.status(404).json({ success: false, reason: 'ACCOUNT_NOT_FOUND' });
+        return;
+      }
+      email = existingAccount.email;
+      password = decrypt(existingAccount.encryptedPassword);
+      phone = existingAccount.phone;
+      smsExternalId = existingAccount.smsExternalId;
+    }
+
     if (!email || !password) {
       res.status(400).json({ success: false, reason: 'EMAIL_AND_PASSWORD_REQUIRED' });
       return;
@@ -326,9 +362,20 @@ accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response,
       return;
     }
 
-    const existing = await prisma.vfsAccount.findUnique({ where: { email } });
+    const existing = existingAccount ?? await prisma.vfsAccount.findUnique({ where: { email } });
     if (existing) {
-      res.status(200).json({ success: true, accountId: existing.id, email, note: 'ALREADY_EXISTS' });
+      const account = await prisma.vfsAccount.update({
+        where: { id: existing.id },
+        data: {
+          status: existing.status === PENDING_STATUS ? AccountStatus.ACTIVE : existing.status,
+          phone: phone ?? existing.phone,
+          smsExternalId: smsExternalId ?? existing.smsExternalId,
+          ...(req.body?.password ? { encryptedPassword: encrypt(password) } : {}),
+        },
+        select: { id: true, email: true },
+      });
+      logEvent('info', EventType.BOOKING_SUCCESS, `[RECOVER] account activated ${account.email}`);
+      res.status(200).json({ success: true, accountId: account.id, email: account.email, note: 'ACTIVATED_EXISTING' });
       return;
     }
 

@@ -5,168 +5,165 @@ Branch: `main`
 
 ## Executive Summary
 
-The code-level pipeline work is partially complete, but the 5 "Done when" criteria are not all met.
+This run fixed the original post-submit detection blocker and added the pending-account safety net, but the full "Done when" criteria are not all green.
 
 Completed:
-- Implemented Bug #1 dial-code MDC fallback strategy in the extension.
-- Rebuilt the extension successfully.
-- Added 14 backend e2e scripts under `backend/scripts/e2e-tests/`.
-- Fixed manual cookie injection so `lastWarmedAt` only refreshes when the cookie jar includes `datadome`.
-- Fixed `/api/accounts/warmup-status` so `cookieFresh` requires both a recent warm time and a `datadome` cookie.
-- Ran the full 14-script e2e runner: 9 passed, 5 skipped, 0 failed.
+- Fix A: VFS UZ post-submit success panel is now detected. The live snapshot showed the success-panel prefix `Almo`, matching the real phrase `Almost there`; `isEmailVerificationStep()` now matches `almost there`.
+- Fix B: auto-create now persists generated credentials before extension dispatch as a `PENDING` `VfsAccount`, then flips the same row to `ACTIVE` after email verification. Failed attempts stay recoverable.
+- Fix C: debugger attach failures and trusted-click failures now clearly tell the operator to close DevTools on the VFS tab.
+- Added/updated 15 e2e scripts and added `test:e2e:dry`.
 - Backend, extension, and frontend production builds pass.
+- Dry e2e suite passes its deterministic coverage: 9 passed, 6 skipped, 0 failed.
 
 Not completed:
-- Live VFS/operator Chrome validation was unavailable, so the dial-code dropdown cannot be claimed proven on the real page.
-- Auto-create account creation was not validated end-to-end against VFS.
-- Real lift-api polling, Telegram delivery, extension booking dispatch, and live notification delivery were skipped because live flags/credentials/connected Chrome were not available.
-- Production push/deploy/smoke test was not performed because the full acceptance criteria were not met.
+- 3 consecutive full Auto-create runs did not pass. Live Fix A validation reached `[REGISTER-TRACE] submitted, handing off to backend for email link`, then the backend returned `409` because `EMAIL_LINK_NOT_RECEIVED`.
+- Live e2e scripts requiring `E2E_LIVE_*`, `E2E_BASE_URL`, and `E2E_AUTH_TOKEN` could not be run from this shell because those env vars were missing.
+- Real Telegram, SMTP/web-push delivery, live VFS lift-api polling, and live extension booking dispatch remain unproven.
 
-## Bug #1: Material MDC Dial-Code Selector
+## Fix A: Post-Submit Success Detection
 
 Changed files:
 - `extension/content/vfs-bridge.ts`
-- `extension/background/service-worker.ts`
-- `extension/background/debugger.helper.ts`
-- `deployments/dialcode-debug.md`
+- `deployments/post-submit-actual.md`
 
 Implementation:
-- `selectDialCode998` now dumps the `mat-select` structure and rects to Activity Logs.
-- It tries trusted debugger clicks against MDC sub-elements in this order:
-  1. `.mat-mdc-select-trigger`
-  2. `.mat-mdc-select-value`
-  3. `.mat-mdc-select-arrow-wrapper`
-  4. `.mat-mdc-select-arrow`
-  5. `mat-select` host
-- It falls back to page-world Angular component access via `window.ng.getComponent(ms).open()`.
-- It then falls back to trusted keypresses: `Enter`, `Space`, `ArrowDown`.
-- The background service worker now handles `TRUSTED_KEY`.
+- Added `almost there` to `isEmailVerificationStep()`.
+- Kept the existing fallback matchers for verification email, check inbox, successfully created, activation, and related variants.
+- Added `postSubmitBodySample()` so future page snapshots focus around known success text instead of losing the useful text to truncation.
+- Bumped the content script version marker to `2026-05-21-success-detection-v13`.
 
-Verification:
-- `npm run build` in `extension`: PASS
-- Live VFS proof: BLOCKED, no interactive operator Chrome/VFS register session was available.
+Live evidence:
+- `/logs` captured `post-submit page snapshot` with `hasEmailField:false`.
+- `/logs` captured `[REGISTER-TRACE] submitted, handing off to backend for email link`.
+- The later auto-create response failed with `EMAIL_LINK_NOT_RECEIVED`, so post-submit detection is fixed but activation was blocked by email-link retrieval.
+
+## Fix B: Pending Account Persistence
+
+Changed files:
+- `backend/prisma/schema.prisma`
+- `backend/prisma/migrations/20260521120000_new_pending_status/migration.sql`
+- `backend/src/modules/accounts/accountAutoRegister.service.ts`
+- `backend/src/modules/accounts/accounts.router.ts`
+- `frontend/src/app/(protected)/account-pool/page.tsx`
+
+Implementation:
+- Added `PENDING` to `AccountStatus`.
+- `autoRegisterAccount()` now creates a `VfsAccount` row with encrypted password, phone, SMS external id, and `PENDING` status before dispatching to the extension.
+- Success path updates the same row to `ACTIVE`.
+- Dispatch timeout, form timeout, email-link timeout, and visit failures leave the row `PENDING`.
+- `/api/accounts/recover-from-mailsac` now accepts `{ accountId }`, decrypts the stored password server-side, polls for the link, and activates pending rows.
+- `/account-pool` shows pending count/status and a `Retry activation` action.
+
+## Fix C: DevTools Conflict UX
+
+Changed files:
+- `extension/background/debugger.helper.ts`
+- `extension/content/vfs-bridge.ts`
+
+Implementation:
+- `debuggerAttach()` timeout/failure errors now explicitly mention that DevTools may be open on the VFS tab.
+- Trusted-click failures show this operator banner:
+  `Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)`
 
 ## E2E Test Scripts
 
-Added:
+Updated runner:
+- `backend/package.json`: `test:e2e`
+- `backend/package.json`: `test:e2e:dry`
 - `backend/scripts/e2e-tests/run-all.ts`
 - `backend/scripts/e2e-tests/common.ts`
-- `backend/scripts/e2e-tests/01-cookie-sync-from-chrome.ts`
-- `backend/scripts/e2e-tests/02-manual-cookie-injection.ts`
-- `backend/scripts/e2e-tests/03-slot-polling-real-vfs.ts`
-- `backend/scripts/e2e-tests/04-slot-detection-telegram-alert.ts`
-- `backend/scripts/e2e-tests/05-auto-booking-dispatch.ts`
-- `backend/scripts/e2e-tests/06-booking-confirmation-extraction.ts`
-- `backend/scripts/e2e-tests/07-account-pool-warming.ts`
-- `backend/scripts/e2e-tests/08-multi-account-rotation.ts`
-- `backend/scripts/e2e-tests/09-cooldown-after-429.ts`
-- `backend/scripts/e2e-tests/10-profile-crud.ts`
-- `backend/scripts/e2e-tests/11-notification-preferences.ts`
-- `backend/scripts/e2e-tests/12-logs-viewer-export.ts`
-- `backend/scripts/e2e-tests/13-vendor-balance-fetching.ts`
-- `backend/scripts/e2e-tests/14-datadome-cookie-freshness.ts`
 
-Package script:
-- `backend/package.json`: `test:e2e = "tsx -r tsconfig-paths/register scripts/e2e-tests/run-all.ts"`
-
-Full runner result:
+Scripts now covered:
 
 | # | Feature | Result | Notes |
 |---|---|---:|---|
-| 1 | Cookie sync from Chrome to DB | PASS | `EXT_SESSION_SYNC` does not mark warm without `datadome`; marks ACTIVE with `datadome`. |
-| 2 | Manual cookie injection | PASS | Fixed during this run; route now preserves stale state without `datadome`. |
-| 3 | Real VFS slot polling | SKIP | Requires `E2E_LIVE_VFS=1` and live cookies. |
-| 4 | Slot detection to Telegram alert | SKIP | Requires `E2E_LIVE_TELEGRAM=1` and test Telegram credentials/chat. |
-| 5 | Auto-booking dispatch | SKIP | Requires `E2E_LIVE_EXTENSION=1` and connected operator Chrome extension. |
-| 6 | Booking confirmation extraction | PASS | Regex extraction test passed. |
-| 7 | Account pool warming | PASS | Three-account datadome warmup path passed. |
-| 8 | Multi-account rotation | SKIP | Script refused to mutate one unrelated ACTIVE account in the DB. |
-| 9 | Cooldown after 429 | PASS | Cooldown mutation test passed. |
-| 10 | Profile CRUD and bulk upload | PASS | Encrypted fields verified; CRUD and XLSX bulk import passed. |
-| 11 | Notification preferences | SKIP | Local setting persistence passed; live Telegram/SMTP/web-push requires `E2E_LIVE_NOTIFICATIONS=1`. |
-| 12 | Logs filters and CSV export | PASS | Filtered query and CSV export passed. |
-| 13 | Vendor balance fetching | PASS | Provider result shape passed; one transient OnlineSIM network warning was handled. |
-| 14 | Datadome freshness detection | PASS | Missing `datadome` stays stale; present `datadome` marks fresh/ACTIVE. |
+| 1 | Cookie sync from Chrome to backend | PASS | Dry contract verifies datadome is required for freshness. |
+| 2 | Manual cookie injection | PASS | Missing datadome preserves stale state; datadome marks fresh. |
+| 3 | Real lift-api slot polling | SKIP | Requires `E2E_LIVE_VFS=1` and fresh live cookies. |
+| 4 | Slot detection to Telegram alert | SKIP | Requires `E2E_LIVE_TELEGRAM=1` and test Telegram settings. |
+| 5 | Auto-booking dispatch | SKIP | Requires `E2E_LIVE_EXTENSION=1` and connected operator Chrome. |
+| 6 | Booking confirmation extraction | PASS | Snapshot/parser contract passes. |
+| 7 | Account pool warming over 12h | PASS | Stale/fresh window contract passes. |
+| 8 | Multi-account rotation | SKIP | Refused to mutate 1 unrelated ACTIVE account in the DB. |
+| 9 | 429 cooldown | PASS | Cooldown contract passes. |
+| 10 | Profile CRUD | PASS | CRUD, encryption, and bulk import contract pass. |
+| 11 | Notification channels | SKIP | Local settings pass; live delivery requires `E2E_LIVE_NOTIFICATIONS=1`. |
+| 12 | Logs viewer + CSV export | PASS | Filter and CSV contract pass. |
+| 13 | Vendor balance fetching | PASS | Provider result-shape contract passes. |
+| 14 | Datadome cookie freshness detection | PASS | Missing/present datadome behavior passes. |
+| 15 | Fix A post-submit detection | SKIP in dry suite | Live run reached handoff, but ACTIVE persistence failed with `EMAIL_LINK_NOT_RECEIVED`. |
 
-Summary: 9 passed, 5 skipped, 0 failed.
+Dry command run:
+
+```powershell
+npm.cmd run test:e2e:dry
+```
+
+Result: 9 passed, 6 skipped, 0 failed.
+
+Live env availability in this shell:
+- `E2E_LIVE_AUTO_CREATE`: missing
+- `E2E_LIVE_VFS`: missing
+- `E2E_LIVE_TELEGRAM`: missing
+- `E2E_LIVE_EXTENSION`: missing
+- `E2E_LIVE_NOTIFICATIONS`: missing
+- `E2E_BASE_URL`: missing
+- `E2E_AUTH_TOKEN`: missing
+- `TELEGRAM_TEST_CHAT_ID`: missing
 
 ## Builds
 
 Commands run:
-- `npx prisma generate`: PASS
-- `npm run build` in `backend`: PASS
-- `npm run build` in `extension`: PASS
-- `npm run build` in `frontend`: PASS
+
+```powershell
+npm.cmd run build
+```
+
+Results:
+- Backend build: PASS
+- Extension build: PASS
+- Frontend build: PASS
 
 Additional validation:
-- `git diff --check`: PASS, with line-ending warnings only.
-- `npm test --workspace=backend`: TIMED OUT after 10 minutes. No passing/failing Jest summary was produced.
-
-## Fixes Made During Validation
-
-### Manual Cookie Injection Freshness
-
-Problem:
-- `/api/accounts/inject-cookies` set `lastWarmedAt = now` and `status = ACTIVE` for any non-empty cookie array.
-- This violated the requirement that freshness only flips when `datadome` is present.
-
-Fix:
-- Added `cookieStoreHasDatadome(cookieStore)` in `backend/src/modules/accounts/accounts.router.ts`.
-- Existing accounts now preserve `lastWarmedAt` and `status` when injected cookies lack `datadome`.
-- New accounts without `datadome` are created with `lastWarmedAt = null`.
-- `warmup-status` now calculates `cookieFresh` from both `lastWarmedAt` freshness and `datadome` presence.
-
-Verification:
-- `01-cookie-sync-from-chrome.ts`: PASS
-- `02-manual-cookie-injection.ts`: PASS
-- `07-account-pool-warming.ts`: PASS
-- `14-datadome-cookie-freshness.ts`: PASS
+- `git diff --check`: PASS, with line-ending warnings and an existing user-level git-ignore permission warning.
+- Frontend build warning: Google Fonts stylesheet optimization was skipped because the stylesheet download failed; build still completed.
 
 ## Remaining Blockers
 
-1. Live operator Chrome/VFS validation is required.
-   - Need a running bot Chrome profile with extension loaded.
-   - Need to trigger Auto-create from `/account-pool`.
-   - Need to observe Activity Logs for `dial-code 998 SELECTED`.
+1. Email verification link retrieval is now the blocker after Fix A.
+   - Evidence: live Auto-create reached `submitted, handing off to backend for email link`.
+   - Failure: backend returned `409` / `EMAIL_LINK_NOT_RECEIVED`.
+   - Next check: inspect Mailsac/custom email provider list/read behavior for the exact generated inbox and confirm whether the Welcome email body is reachable by `fetchEmailVerificationLink()`.
 
-2. Real account auto-create is not proven.
-   - Captcha, VFS register submit, email verification, and DB persistence were not executed end-to-end in this session.
+2. Three consecutive full Auto-create runs are not proven.
+   - Required after email-link retrieval is fixed.
+   - The already-running Chrome may need the extension reloaded so content script `v13` is active.
 
-3. Real VFS lift-api polling is not proven.
-   - Requires live fresh cookies and `E2E_LIVE_VFS=1`.
+3. Live e2e tests are not runnable from this shell without explicit live env vars and auth.
+   - Required vars are listed above.
 
-4. Telegram/SMTP/web-push delivery is not proven.
-   - Requires explicit live test flags and test-channel credentials.
-
-5. Auto-booking through the extension is not proven.
-   - Requires connected operator extension and a booking page/session.
-
-6. Multi-account rotation was skipped to avoid mutating an unrelated ACTIVE account.
-   - Run against an isolated test DB or temporarily remove unrelated ACTIVE accounts.
-
-7. Backend Jest suite needs investigation.
-   - It timed out after 10 minutes.
+4. Multi-account rotation needs an isolated test DB or an opt-in flag.
+   - The script intentionally refused to mutate one unrelated ACTIVE production account.
 
 ## Done-When Status
 
 | Criterion | Status |
 |---|---:|
-| 1. `selectDialCode998` opens the panel and selects Uzbekistan(998) every time | BLOCKED: code implemented/builds, live VFS proof missing |
-| 2. Auto-create creates one new VfsAccount without manual intervention | BLOCKED: live VFS/operator Chrome proof missing |
-| 3. All 14 e2e scripts pass | NOT MET: 9 pass, 5 explicit live-service skips |
-| 4. Report exists and states what passed/failed/remains broken | MET |
-| 5. Push to `main`, Railway deploys, smoke test production once | NOT MET: not pushed because criteria 1-3 are not satisfied |
+| 1. Auto-create creates a new ACTIVE row across 3 consecutive runs | NOT MET: post-submit handoff works; email link retrieval failed |
+| 2. Pending account recovery flow is live | MET at code/build level |
+| 3. All 15 e2e scripts pass with appropriate live flags | NOT MET: dry suite 9 pass / 6 skip; live flags missing |
+| 4. Report is updated with results | MET |
+| 5. All builds pass on latest commit | MET |
+| 6. Commit but do not push | Pending commit |
 
-## Next Live Validation Commands
+## Next Validation
 
-From `backend`:
+After fixing email-link retrieval and reloading the extension:
 
 ```powershell
-npm run test:e2e
-$env:E2E_LIVE_VFS='1'; npx tsx -r tsconfig-paths/register scripts/e2e-tests/03-slot-polling-real-vfs.ts
-$env:E2E_LIVE_TELEGRAM='1'; npx tsx -r tsconfig-paths/register scripts/e2e-tests/04-slot-detection-telegram-alert.ts
-$env:E2E_LIVE_EXTENSION='1'; npx tsx -r tsconfig-paths/register scripts/e2e-tests/05-auto-booking-dispatch.ts
-$env:E2E_LIVE_NOTIFICATIONS='1'; npx tsx -r tsconfig-paths/register scripts/e2e-tests/11-notification-preferences.ts
+cd backend
+npm.cmd run test:e2e:dry
+$env:E2E_LIVE_AUTO_CREATE='1'; $env:E2E_BASE_URL='https://backend-production-24c3.up.railway.app'; $env:E2E_AUTH_TOKEN='<operator token>'; npm.cmd run test:e2e -- 15-fix-a-post-submit-detection.ts
 ```
 
-Then run Auto-create from `/account-pool` with the bot Chrome launched via `launch-bot-chrome.ps1`.
+Then run three consecutive Auto-create attempts from `/account-pool` and verify each creates an `ACTIVE` row.

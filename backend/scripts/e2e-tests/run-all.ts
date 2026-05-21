@@ -25,9 +25,11 @@ const scripts = [
   '12-logs-viewer-export.ts',
   '13-vendor-balance-fetching.ts',
   '14-datadome-cookie-freshness.ts',
+  '15-fix-a-post-submit-detection.ts',
 ];
 
-const concurrency = Number(process.env.E2E_CONCURRENCY ?? 4);
+const dryRun = process.argv.includes('--dry') || process.env.E2E_DRY_RUN === '1';
+const concurrency = Number(process.env.E2E_CONCURRENCY ?? 1);
 const root = __dirname;
 
 async function runScript(file: string): Promise<Result> {
@@ -37,7 +39,7 @@ async function runScript(file: string): Promise<Result> {
     path.join(root, file),
   ], {
     cwd: path.resolve(root, '../..'),
-    env: { ...process.env, NODE_ENV: process.env.NODE_ENV ?? 'test' },
+    env: { ...process.env, NODE_ENV: process.env.NODE_ENV ?? 'test', ...(dryRun ? { E2E_DRY_RUN: '1' } : {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -73,6 +75,9 @@ async function runScript(file: string): Promise<Result> {
 }
 
 async function main() {
+  if (dryRun) {
+    console.log('E2E dry run enabled: live-only scripts will be skipped unless they have local contract coverage.');
+  }
   const queue = [...scripts];
   const results: Result[] = [];
   const workers = Array.from({ length: Math.min(concurrency, scripts.length) }, async () => {

@@ -17,8 +17,25 @@ export function skip(reason: string): never {
   throw new SkipE2e(reason);
 }
 
+export function isDryRun(): boolean {
+  return process.env.E2E_DRY_RUN === '1';
+}
+
+export function liveOnly(flag: string, reason: string): void {
+  if (isDryRun()) {
+    skip(`dry run: ${reason}`);
+  }
+  if (process.env[flag] !== '1') {
+    skip(`${flag}=1 is required: ${reason}`);
+  }
+}
+
 export function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
+}
+
+export async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function uniqueEmail(prefix: string): string {
@@ -106,6 +123,16 @@ export async function withTestServer<T>(fn: (ctx: { baseUrl: string; authHeader:
     });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  }
+}
+
+export async function readResponseBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
 }
 

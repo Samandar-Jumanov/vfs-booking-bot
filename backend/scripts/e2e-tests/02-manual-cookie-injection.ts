@@ -14,6 +14,9 @@ runE2e('2. Manual cookie injection via /inject-cookies page backend route', asyn
         body: JSON.stringify({ email: account.email, cookies: [sessionCookie('manual-no-dd')] }),
       });
       assert(noDd.ok, `inject without datadome returned HTTP ${noDd.status}`);
+      const noDdBody = await noDd.json() as { success?: boolean; cookiesCount?: number; lastWarmedAt?: string | null };
+      assert(noDdBody.success === true, 'inject without datadome did not return success=true');
+      assert(noDdBody.cookiesCount === 1, 'inject without datadome returned wrong cookiesCount');
     });
 
     const afterNoDd = await prisma.vfsAccount.findUniqueOrThrow({ where: { id: account.id } });
@@ -27,6 +30,10 @@ runE2e('2. Manual cookie injection via /inject-cookies page backend route', asyn
         body: JSON.stringify({ email: account.email, cookies: [datadomeCookie('manual-dd'), sessionCookie('manual-with-dd')] }),
       });
       assert(withDd.ok, `inject with datadome returned HTTP ${withDd.status}`);
+      const withDdBody = await withDd.json() as { success?: boolean; cookiesCount?: number; lastWarmedAt?: string | null };
+      assert(withDdBody.success === true, 'inject with datadome did not return success=true');
+      assert(withDdBody.cookiesCount === 2, 'inject with datadome returned wrong cookiesCount');
+      assert(Boolean(withDdBody.lastWarmedAt), 'inject with datadome did not return lastWarmedAt');
     });
 
     const afterDd = await prisma.vfsAccount.findUniqueOrThrow({ where: { id: account.id } });

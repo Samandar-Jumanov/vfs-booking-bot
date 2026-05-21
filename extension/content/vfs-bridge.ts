@@ -11,7 +11,8 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-success-detection-v12';
+const VFS_BRIDGE_VERSION = '2026-05-21-success-detection-v13';
+const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
@@ -188,10 +189,10 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   // Snapshot the page state RIGHT AFTER submit attempts so we can see what
   // VFS actually rendered. Helps diagnose "click fired but no transition".
   setTimeout(() => {
-    const bodySample = document.body.innerText.slice(0, 800);
+    const bodySample = postSubmitBodySample(document.body.innerText);
     const hasForm = Boolean(document.querySelector('input[formcontrolname="emailid"]'));
     const url = window.location.href;
-    void postRegisterTrace('post-submit page snapshot', { url, hasEmailField: hasForm, bodyTextSample: bodySample });
+    void postRegisterTrace('post-submit page snapshot', { bodyTextSample: bodySample, url, hasEmailField: hasForm });
   }, 3000);
 
   // Wait up to 3 minutes for page transition OR "verification email sent"
@@ -567,7 +568,7 @@ async function selectDialCode998(): Promise<void> {
     expanded: trigger.getAttribute('aria-expanded'),
   });
   if (!clickAttempted || debuggerBlocked) {
-    showOperatorBanner('Bot click blocked (likely DevTools open on this tab). Close DevTools, then click Dial Code -> Uzbekistan(998) -> Register.');
+    showOperatorBanner(TRUSTED_CLICK_BLOCKED_BANNER);
     return;
   }
   showOperatorBanner('Bot could not auto-select dial code. Please click the Dial Code dropdown and choose "Uzbekistan(998)", then click Register.');
@@ -872,6 +873,7 @@ function isEmailVerificationStep(): boolean {
   // Look for any signal that VFS accepted the registration and is showing
   // a confirmation/email-sent message. Several possible variants observed.
   if (
+    text.includes('almost there') ||
     text.includes('verification email') ||
     text.includes('verify your email') ||
     text.includes('email sent') ||
@@ -893,6 +895,28 @@ function isEmailVerificationStep(): boolean {
   const stillHasForm = document.querySelector('input[formcontrolname="emailid"]') &&
     document.querySelector('input[formcontrolname="password"]');
   return !stillHasForm;
+}
+
+function postSubmitBodySample(bodyText: string): string {
+  const compact = bodyText.replace(/\s+/g, ' ').trim();
+  const lower = compact.toLowerCase();
+  const anchors = [
+    'almost there',
+    'verification email',
+    'verify your email',
+    'email sent',
+    'email has been sent',
+    'check your email',
+    'check your inbox',
+    'successfully registered',
+    'confirmation email',
+  ];
+  const hit = anchors
+    .map((anchor) => lower.indexOf(anchor))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  const start = hit === undefined ? 0 : Math.max(0, hit - 80);
+  return compact.slice(start, start + 800);
 }
 
 function isPhoneOtpStep(): boolean {
@@ -1004,9 +1028,11 @@ async function trustedClick(element: HTMLElement): Promise<boolean> {
     const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_CLICK', x, y });
     if (res && (res as { ok?: boolean }).ok) return true;
     void postRegisterTrace('trustedClick failed', { res });
+    showOperatorBanner(TRUSTED_CLICK_BLOCKED_BANNER);
     return false;
   } catch (e) {
     void postRegisterTrace('trustedClick threw', { err: (e as Error).message });
+    showOperatorBanner(TRUSTED_CLICK_BLOCKED_BANNER);
     return false;
   }
 }

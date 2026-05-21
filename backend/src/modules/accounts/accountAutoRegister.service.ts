@@ -7,6 +7,7 @@ import { sendToExtension } from '@modules/websocket/ws.server';
 import { encrypt } from '@utils/crypto';
 import { recordSpend } from '@modules/vendor/spend.recorder';
 import { getEmailProvider, getSmsProvider } from './providerFactory';
+import { AccountStatus } from '@prisma/client';
 
 // Approximate per-action vendor costs in USD. These are used for the
 // dashboard cost-tracking widget. They are sourced from each vendor's
@@ -34,6 +35,8 @@ type AutoRegisterResult =
   | { ok: false; reason: string };
 
 type PendingResult = { ok: true } | { ok: false; reason: string };
+
+const PENDING_STATUS = 'PENDING' as AccountStatus;
 
 const pending = new Map<string, {
   resolve: (result: PendingResult) => void;
@@ -103,6 +106,16 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
   const dob = '1995-06-15';
   const correlationId = randomUUID();
   const registerUrl = `https://visa.vfsglobal.com/${opts.source}/en/${opts.destination}/register`;
+  const account = await prisma.vfsAccount.create({
+    data: {
+      email,
+      encryptedPassword: encrypt(password),
+      phone: phone.number,
+      smsExternalId: phone.id,
+      status: PENDING_STATUS,
+    },
+    select: { id: true, email: true },
+  });
 
   try {
     // The extension's MV3 service worker can be in an idle state when we
@@ -129,8 +142,7 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
     }
 
     if (!accepted) {
-      await smsProvider.releaseNumber(phone.id);
-      throw new Error('OPERATOR_EXTENSION_OFFLINE_AFTER_45S');
+      return { ok: false, reason: 'OPERATOR_EXTENSION_OFFLINE_AFTER_45S' };
     }
 
     // Step 1: wait for extension to confirm the register form was submitted
@@ -170,24 +182,20 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
       return { ok: false, reason: `EMAIL_LINK_VISIT_ERROR_${(err as Error).message}` };
     }
 
-    // Step 4: persist the account. Keep the OnlineSIM number ACTIVE — we will
-    // reuse it for the SMS OTP step at first booking time.
-    const account = await prisma.vfsAccount.create({
+    // Step 4: activate the already-persisted row. Keep the OnlineSIM number
+    // active for the SMS OTP step at first booking time.
+    const activatedAccount = await prisma.vfsAccount.update({
+      where: { id: account.id },
       data: {
-        email,
-        encryptedPassword: encrypt(password),
-        phone: phone.number,
-        smsExternalId: phone.id,
-        status: 'ACTIVE',
+        status: AccountStatus.ACTIVE,
       },
       select: { id: true, email: true },
     });
 
-    return { ok: true, accountId: account.id, email: account.email };
+    return { ok: true, accountId: activatedAccount.id, email: activatedAccount.email };
   } catch (error) {
     pending.delete(correlationId);
     submittedWaiters.delete(correlationId);
-    await smsProvider.releaseNumber(phone.id).catch(() => undefined);
     throw error;
   }
 }

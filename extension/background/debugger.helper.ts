@@ -19,6 +19,10 @@ function lastError(): string | undefined {
   return chrome.runtime.lastError?.message;
 }
 
+function debuggerAttachBlockedMessage(detail: string): string {
+  return `debugger.attach ${detail}. DevTools may be open on this VFS tab. Close DevTools on this tab and retry Auto-create. Open DevTools on a different tab (for example the dashboard) instead.`;
+}
+
 export function debuggerAttach(tabId: number): Promise<void> {
   return new Promise((resolve, reject) => {
     if (attachedTabs.has(tabId)) {
@@ -32,7 +36,9 @@ export function debuggerAttach(tabId: number): Promise<void> {
     const timeout = self.setTimeout(() => {
       if (settled) return;
       settled = true;
-      reject(new Error('debugger.attach TIMEOUT (likely DevTools open on this tab)'));
+      const message = debuggerAttachBlockedMessage('timed out after 5000ms');
+      console.warn(`[VFS-SW] ${message}`);
+      reject(new Error(message));
     }, 5000);
     chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION, () => {
       if (settled) return;
@@ -40,7 +46,9 @@ export function debuggerAttach(tabId: number): Promise<void> {
       self.clearTimeout(timeout);
       const err = lastError();
       if (err && !/already attached/i.test(err)) {
-        reject(new Error(`debugger.attach failed: ${err}`));
+        const message = debuggerAttachBlockedMessage(`failed: ${err}`);
+        console.warn(`[VFS-SW] ${message}`);
+        reject(new Error(message));
         return;
       }
       attachedTabs.add(tabId);
