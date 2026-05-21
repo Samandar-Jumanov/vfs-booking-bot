@@ -1,19 +1,38 @@
-import { runE2e, liveOnly, assert, withTestServer } from './common';
+import { assert, liveOnly, runE2e, sleep } from './common';
 
 runE2e('4. Slot detection to Telegram alert pipeline', async () => {
-  liveOnly('E2E_LIVE_TELEGRAM', 'this test sends a real Telegram alert to a test chat');
-  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
-    throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required for the live Telegram assertion');
-  }
-  await withTestServer(async ({ baseUrl, authHeader }) => {
-    const res = await fetch(`${baseUrl}/api/monitor/_test/emit-slot`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...authHeader },
-      body: JSON.stringify({ destination: 'lva', date: '2026-06-15', time: '10:00' }),
-    });
-    assert(res.ok, `test emit slot returned HTTP ${res.status}`);
-    const body = await res.json() as { ok?: boolean; emitted?: boolean; destination?: string };
-    assert(body.ok === true && body.emitted === true, 'test emit slot did not report emitted=true');
-    assert(body.destination === 'lva', 'test emit slot returned wrong destination');
+  liveOnly('E2E_LIVE_TELEGRAM', 'this test sends a real Telegram alert to TELEGRAM_TEST_CHAT_ID');
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const testChatId = process.env.TELEGRAM_TEST_CHAT_ID;
+  assert(Boolean(token), 'TELEGRAM_BOT_TOKEN is required');
+  assert(Boolean(testChatId), 'TELEGRAM_TEST_CHAT_ID is required and must be different from production chat');
+  assert(testChatId !== process.env.TELEGRAM_CHAT_ID, 'TELEGRAM_TEST_CHAT_ID must be different from TELEGRAM_CHAT_ID');
+
+  const { getLastTelegramDelivery } = await import('../../src/modules/notifications/telegram.bot');
+  const { dispatchNotification } = await import('../../src/modules/notifications/notification.service');
+
+  const markerEmail = `telegram-e2e-${Date.now()}@mailsac.com`;
+  const slotDate = '2026-06-15';
+  await dispatchNotification({
+    event: 'SLOT_DETECTED',
+    destination: 'lva',
+    slotDate,
+    visaType: 'SCH',
+    accountEmail: markerEmail,
   });
+  await sleep(5_000);
+
+  const delivery = getLastTelegramDelivery();
+  assert(Boolean(delivery), 'Telegram sendMessage did not return a delivery record');
+  assert(delivery.chatId === String(testChatId), 'Telegram alert was not sent to TELEGRAM_TEST_CHAT_ID');
+  const text = delivery.text;
+  assert(text.includes('lva'), 'Telegram message does not include destination');
+  assert(text.includes(slotDate), 'Telegram message does not include slot date');
+  assert(text.includes(markerEmail), 'Telegram message does not include account email');
+
+  await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: testChatId, message_id: delivery.messageId }),
+  }).catch(() => undefined);
 });

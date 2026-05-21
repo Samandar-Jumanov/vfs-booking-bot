@@ -287,11 +287,12 @@ async function extractConfirmationNumber(page: Page): Promise<string> {
   try {
     const el = await page.waitForSelector(sel.confirmationNumber, { timeout: 10_000 });
     const text = await el.textContent();
-    return text?.trim() ?? 'UNKNOWN';
+    const match = text?.match(/(?:booking\s+reference|confirmation\s+(?:number|no\.?|#)|appointment\s+(?:id|number)|reference|confirmation|booking)[^\w]*([A-Z0-9-]{6,30})/i);
+    return match?.[1] ?? text?.trim() ?? 'UNKNOWN';
   } catch {
     // Try to extract from page text
     const body = await page.evaluate(() => document.body.innerText);
-    const match = body.match(/(?:reference|confirmation|booking)[^\w]*([A-Z0-9]{8,20})/i);
+    const match = body.match(/(?:booking\s+reference|confirmation\s+(?:number|no\.?|#)|appointment\s+(?:id|number)|reference|confirmation|booking)[^\w]*([A-Z0-9-]{6,30})/i);
     return match?.[1] ?? 'UNKNOWN';
   }
 }

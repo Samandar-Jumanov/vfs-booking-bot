@@ -26,6 +26,13 @@ runE2e('7. Account pool warming', async () => {
     assert(warmed.length === 3, 'not all test accounts were found after warming');
     assert(warmed.every((a) => a.status === 'ACTIVE' && a.lastWarmedAt), 'not all accounts are ACTIVE and fresh after session sync');
 
+    const staleAccount = warmed[0];
+    const thirteenHoursAgo = new Date(Date.now() - 13 * 60 * 60 * 1000);
+    await prisma.vfsAccount.update({
+      where: { id: staleAccount.id },
+      data: { lastWarmedAt: thirteenHoursAgo },
+    });
+
     await withTestServer(async ({ baseUrl, authHeader }) => {
       const res = await fetch(`${baseUrl}/api/accounts/warmup-status?source=uzb&destination=lva`, {
         headers: authHeader,
@@ -34,9 +41,12 @@ runE2e('7. Account pool warming', async () => {
       const body = await res.json() as { summary?: { active?: number; fresh?: number }; items?: Array<{ id: string; cookieFresh: boolean; loginUrl: string }> };
       const testItems = (body.items ?? []).filter((item) => accounts.some((account) => account.id === item.id));
       assert(testItems.length === 3, 'warmup-status did not include all warmed test accounts');
-      assert(testItems.every((item) => item.cookieFresh), 'warmup-status did not mark all warmed accounts fresh');
+      const staleItem = testItems.find((item) => item.id === staleAccount.id);
+      const freshItems = testItems.filter((item) => item.id !== staleAccount.id);
+      assert(staleItem?.cookieFresh === false, 'warmup-status did not mark a 13h-old datadome session stale');
+      assert(freshItems.every((item) => item.cookieFresh), 'warmup-status did not mark recently warmed accounts fresh');
       assert(testItems.every((item) => item.loginUrl === 'https://visa.vfsglobal.com/uzb/en/lva/login'), 'warmup-status returned an unexpected loginUrl');
-      assert((body.summary?.fresh ?? 0) >= 3, 'warmup-status summary did not count fresh accounts');
+      assert((body.summary?.fresh ?? 0) >= 2, 'warmup-status summary did not count fresh accounts');
     });
   } finally {
     await cleanupByEmailPrefix(prefix);

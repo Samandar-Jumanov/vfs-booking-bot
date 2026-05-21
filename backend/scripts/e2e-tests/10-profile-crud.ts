@@ -22,6 +22,7 @@ runE2e('10. Profile CRUD and bulk upload', async () => {
           phone: '+998901111111',
           gender: 'MALE',
           priority: 'NORMAL',
+          vfsPassword: 'ProfileCrudVfsPass1!',
         }),
       });
       assert(create.status === 201, `profile create returned HTTP ${create.status}`);
@@ -35,11 +36,12 @@ runE2e('10. Profile CRUD and bulk upload', async () => {
       const raw = await prisma.profile.findUniqueOrThrow({ where: { id: createdId } });
       assert(raw.passportNumberEnc !== 'CRUD12345', 'passport number was stored as plaintext');
       assert(raw.dobEnc !== '1991-02-03', 'DOB was stored as plaintext');
+      assert(raw.vfsPasswordEnc && raw.vfsPasswordEnc !== 'ProfileCrudVfsPass1!', 'VFS password was not encrypted at rest');
 
       const update = await fetch(`${baseUrl}/api/profiles/${createdId}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json', ...authHeader },
-        body: JSON.stringify({ fullName: 'E2E Profile Updated', passportNumber: 'CRUD67890' }),
+        body: JSON.stringify({ fullName: 'E2E Profile Updated', passportNumber: 'CRUD67890', vfsPassword: 'UpdatedVfsPass1!' }),
       });
       assert(update.ok, `profile update returned HTTP ${update.status}`);
       const updated = await update.json() as { fullName?: string };
@@ -49,6 +51,8 @@ runE2e('10. Profile CRUD and bulk upload', async () => {
       const fetched = await get.json() as { fullName?: string; passportNumber?: string };
       assert(fetched.fullName === 'E2E Profile Updated', 'profile get did not return updated name');
       assert(fetched.passportNumber === 'CRUD67890', 'encrypted passport update did not decrypt correctly');
+      const rawUpdated = await prisma.profile.findUniqueOrThrow({ where: { id: createdId } });
+      assert(rawUpdated.vfsPasswordEnc && rawUpdated.vfsPasswordEnc !== 'UpdatedVfsPass1!', 'updated VFS password was not encrypted at rest');
 
       const remove = await fetch(`${baseUrl}/api/profiles/${createdId}`, {
         method: 'DELETE',

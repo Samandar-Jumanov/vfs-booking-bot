@@ -19,6 +19,34 @@ const escapeHTML = (str: string) => {
 let bot: Telegraf | null = null;
 let isBotActive = false;
 
+export interface TelegramDelivery {
+  chatId: string;
+  messageId: number;
+  text: string;
+}
+
+let lastTelegramDelivery: TelegramDelivery | null = null;
+
+function createTelegramClient(): Telegraf {
+  if (!env.TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not configured');
+  const agent: any = env.TELEGRAM_PROXY ? new HttpsProxyAgent(env.TELEGRAM_PROXY) : undefined;
+  return new Telegraf(env.TELEGRAM_BOT_TOKEN, {
+    telegram: { agent }
+  });
+}
+
+function getTelegramClient(): Telegraf {
+  if (!bot) bot = createTelegramClient();
+  return bot;
+}
+
+function defaultTelegramChatId(): string | undefined {
+  if (process.env.E2E_LIVE_TELEGRAM === '1' && process.env.TELEGRAM_TEST_CHAT_ID) {
+    return process.env.TELEGRAM_TEST_CHAT_ID;
+  }
+  return env.TELEGRAM_CHAT_ID;
+}
+
 /**
  * Resiliently send a reply to Telegram, retrying up to 3 times on network failure.
  */
@@ -42,11 +70,7 @@ export function initTelegramBot(): Telegraf | null {
     return null;
   }
 
-  const agent: any = env.TELEGRAM_PROXY ? new HttpsProxyAgent(env.TELEGRAM_PROXY) : undefined;
-
-  bot = new Telegraf(env.TELEGRAM_BOT_TOKEN, {
-    telegram: { agent }
-  });
+  bot = getTelegramClient();
 
   // Global Error Handler
   bot.catch((err: any, ctx: Context) => {
@@ -151,9 +175,15 @@ export function getBotInstance(): Telegraf | null {
   return bot;
 }
 
+export function getLastTelegramDelivery(): TelegramDelivery | null {
+  return lastTelegramDelivery;
+}
+
 export async function sendTelegram(message: string, options: Record<string, unknown> = {}): Promise<void> {
-  if (!bot || !env.TELEGRAM_CHAT_ID) throw new Error('Telegram bot is not configured');
-  await bot.telegram.sendMessage(env.TELEGRAM_CHAT_ID, message, { parse_mode: 'HTML', ...options });
+  const target = defaultTelegramChatId();
+  if (!target) throw new Error('Telegram chat target is not configured');
+  const sent = await getTelegramClient().telegram.sendMessage(target, message, { parse_mode: 'HTML', ...options });
+  lastTelegramDelivery = { chatId: String(target), messageId: sent.message_id, text: message };
 }
 
 /**
@@ -161,8 +191,8 @@ export async function sendTelegram(message: string, options: Record<string, unkn
  * operator's TELEGRAM_CHAT_ID. Pass undefined chatId to use operator chat.
  */
 export async function sendTelegramTo(chatId: string | undefined | null, message: string, options: Record<string, unknown> = {}): Promise<void> {
-  if (!bot) throw new Error('Telegram bot is not configured');
-  const target = chatId || env.TELEGRAM_CHAT_ID;
+  const target = chatId || defaultTelegramChatId();
   if (!target) throw new Error('No Telegram chat target available');
-  await bot.telegram.sendMessage(target, message, { parse_mode: 'HTML', ...options });
+  const sent = await getTelegramClient().telegram.sendMessage(target, message, { parse_mode: 'HTML', ...options });
+  lastTelegramDelivery = { chatId: String(target), messageId: sent.message_id, text: message };
 }

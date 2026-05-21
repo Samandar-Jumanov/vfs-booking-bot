@@ -6,7 +6,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { prisma } from '@config/database';
 import { env } from '@config/env';
 import { logEvent } from '@modules/logs/logger';
-import { EventType } from '@prisma/client';
+import { AccountStatus, EventType } from '@prisma/client';
 import { decrypt, encrypt } from '@utils/crypto';
 import { warmSessionWithBrowser, keepSessionAlive, VfsCredentials } from './session.warmer';
 import { fetchSlotsViaBrowser, disposeContextFor, findPageForProfile } from './playwright.fetch';
@@ -48,6 +48,7 @@ export interface MonitorState extends MonitorConfig {
   cookiesValid?: boolean;
   userAgent?: string;
   secChUa?: string;
+  vfsLoginUser?: string;
   lastHttpStatus?: number;
   isCoolingDown?: boolean;
   lastEnqueuedAt?: number;
@@ -106,6 +107,49 @@ function parseCookieString(cookieStr: string): string[] {
     }
   }
   return trimmed.split(';').map(c => c.trim()).filter(Boolean);
+}
+
+function extractStoredCookieSession(cookieStore: unknown): { cookies: string[]; hasDatadome: boolean; userAgent?: string } {
+  const addCookie = (cookies: string[], name?: unknown, value?: unknown) => {
+    if (typeof name === 'string' && name && value !== undefined && value !== null) {
+      cookies.push(`${name}=${String(value)}`);
+    }
+  };
+
+  if (typeof cookieStore === 'string') {
+    const cookies = parseCookieString(cookieStore);
+    return { cookies, hasDatadome: cookies.some((c) => /^datadome=/i.test(c)) };
+  }
+
+  if (Array.isArray(cookieStore)) {
+    const cookies = cookieStore.flatMap((entry) => {
+      if (typeof entry === 'string') return parseCookieString(entry);
+      if (entry && typeof entry === 'object') {
+        const out: string[] = [];
+        addCookie(out, (entry as any).name, (entry as any).value);
+        return out;
+      }
+      return [];
+    });
+    return { cookies, hasDatadome: cookies.some((c) => /^datadome=/i.test(c)) };
+  }
+
+  if (cookieStore && typeof cookieStore === 'object') {
+    const store = cookieStore as any;
+    const cookies: string[] = [];
+    if (typeof store.raw === 'string') cookies.push(...parseCookieString(store.raw));
+    if (Array.isArray(store.jar)) {
+      for (const cookie of store.jar) addCookie(cookies, cookie?.name, cookie?.value);
+    }
+    const uniqueCookies = Array.from(new Map(cookies.map((cookie) => [cookie.split('=')[0].toLowerCase(), cookie])).values());
+    return {
+      cookies: uniqueCookies,
+      hasDatadome: Boolean(store.hasDatadome) || uniqueCookies.some((c) => /^datadome=/i.test(c)),
+      userAgent: typeof store.userAgent === 'string' ? store.userAgent : undefined,
+    };
+  }
+
+  return { cookies: [], hasDatadome: false };
 }
 
 function extractLtSnExpiresAt(rawCookieStr: string, fallback?: string): string | undefined {
@@ -389,6 +433,39 @@ function makeHttpsAgent(proxyConfig: any): https.Agent {
     return new https.Agent({ rejectUnauthorized: false });
 }
 
+async function getStoredVfsSession(profileIds: string[]): Promise<{
+  email: string;
+  cookies: string[];
+  userAgent?: string;
+  lastWarmedAt: Date;
+} | undefined> {
+  const staleCutoff = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  const candidates = await prisma.vfsAccount.findMany({
+    where: {
+      status: AccountStatus.ACTIVE,
+      lastWarmedAt: { gte: staleCutoff },
+      cookieStore: { not: undefined as never },
+    },
+    orderBy: { lastWarmedAt: 'desc' },
+    take: 25,
+  });
+
+  const account = profileIds.length
+    ? candidates.find((candidate) => candidate.profileIds.some((profileId) => profileIds.includes(profileId))) ?? candidates[0]
+    : candidates[0];
+  if (!account?.cookieStore || !account.lastWarmedAt) return undefined;
+
+  const session = extractStoredCookieSession(account.cookieStore);
+  if (!session.hasDatadome || session.cookies.length === 0) return undefined;
+
+  return {
+    email: account.email,
+    cookies: session.cookies,
+    userAgent: session.userAgent,
+    lastWarmedAt: account.lastWarmedAt,
+  };
+}
+
 /**
  * Ensures we have valid VFS session cookies. If standard Axios warming fails (403),
  * we fall back to a full stealth browser warming cycle.
@@ -421,6 +498,20 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
       userAgent: injected.userAgent || state?.userAgent,
     });
     return injected.cookies;
+  }
+
+  const stored = await getStoredVfsSession(state?.profileIds ?? []);
+  if (stored) {
+    logEvent('info', EventType.MONITOR_STARTED, `[Warmer] Using stored VFS cookies for ${stored.email}/${destinationCode}`);
+    setMonitor(id, {
+      ...getMonitor(id)!,
+      cookies: stored.cookies,
+      cookiesSetAt: stored.lastWarmedAt,
+      cookiesValid: true,
+      userAgent: stored.userAgent || state?.userAgent,
+      vfsLoginUser: stored.email,
+    });
+    return stored.cookies;
   }
 
   // If credentials are available, always use browser warming — plain HTTP GET only gets
@@ -606,19 +697,24 @@ export async function startMonitor(id: string): Promise<void> {
       
       const cookies = await warmSession(id, sourceCode, destCode, config.visaType, creds);
       if (!cookies) throw new Error('Failed to acquire VFS session.');
+      const latestConfig = getMonitor(id) ?? config;
+      const proxyConfig = await getProxyConfig(id);
+      if (!env.CDP_ENDPOINT && latestConfig.vfsLoginUser && !proxyConfig?.url) {
+        throw new Error('BrightData proxy is required for lift-api polling with stored VFS cookies.');
+      }
 
-      // Fetch slots through a real Chromium context (bypasses Cloudflare WAF
-      // that rejects raw axios). The context is reused across polls and only
-      // re-created when cookies change or after 30 min.
+      // With synced VFS cookies, hit lift-api through the configured BrightData
+      // proxy. CDP mode still delegates to the operator's attached Chrome tab.
       let browserResult = await fetchSlotsViaBrowser(
         sourceCode,
         destCode,
         config.visaType,
         cookies,
-        config.userAgent,
+        latestConfig.userAgent,
         {
           profileId: config.profileIds[0] ?? '*',
-          loginUser: creds?.email,
+          loginUser: latestConfig.vfsLoginUser || creds?.email,
+          proxyUrl: proxyConfig?.url,
         },
       );
 
@@ -635,10 +731,11 @@ export async function startMonitor(id: string): Promise<void> {
             destCode,
             config.visaType,
             cookies,
-            config.userAgent,
+            latestConfig.userAgent,
             {
               profileId,
-              loginUser: creds.email,
+              loginUser: latestConfig.vfsLoginUser || creds.email,
+              proxyUrl: proxyConfig?.url,
             },
           );
         } else {

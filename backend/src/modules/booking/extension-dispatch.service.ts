@@ -19,9 +19,8 @@
 import { randomUUID } from 'crypto';
 import { prisma } from '@config/database';
 import { logEvent } from '@modules/logs/logger';
-import { EventType } from '@prisma/client';
+import { EventType, type VfsAccount } from '@prisma/client';
 import { decrypt } from '@utils/crypto';
-import { accountPoolService } from '@modules/accounts/accountPool.service';
 import type { BookingJobPayload } from '@t/index';
 
 const DISPATCH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes per booking
@@ -61,23 +60,12 @@ export function resolveExtensionBooking(correlationId: string, result: Extension
  * timeout / no extension connected).
  */
 export async function bookViaExtension(payload: BookingJobPayload): Promise<ExtensionBookingResult> {
-  // 1. Pick an account from the pool (LRU + ACTIVE only).
-  let account;
-  try {
-    account = await accountPoolService.getAvailableAccount();
-  } catch (err) {
-    return { success: false, reason: 'NO_ACTIVE_ACCOUNTS_IN_POOL' };
+  // 1. Pick an ACTIVE account with a fresh Datadome session.
+  const account = await getAvailableFreshAccount();
+  if (!account) {
+    return { success: false, reason: 'NO_COOKIE_FRESH_ACTIVE_ACCOUNTS' };
   }
-
-  // 2. Check session freshness — extension can only book if a recent SESSION_SYNC came in.
-  const lastWarmedAt = (account as any).lastWarmedAt as Date | null | undefined;
-  const cookieStore = (account as any).cookieStore;
-  if (!cookieStore || !lastWarmedAt || Date.now() - new Date(lastWarmedAt).getTime() > STALE_THRESHOLD_MS) {
-    await accountPoolService.markCooldown(account.id, 60); // 1h cooldown — operator needs to re-warm
-    return { success: false, reason: 'ACCOUNT_STALE', accountEmail: account.email };
-  }
-
-  // 3. Load customer profile (passport data).
+  // 2. Load customer profile (passport data).
   const profile = await prisma.profile.findUnique({ where: { id: payload.profileId } });
   if (!profile) return { success: false, reason: 'PROFILE_NOT_FOUND' };
 
@@ -136,11 +124,52 @@ export async function bookViaExtension(payload: BookingJobPayload): Promise<Exte
   if (!result.success) {
     const r = result.reason || '';
     if (/403|datadome|blocked|forbidden/i.test(r)) {
-      await accountPoolService.markCooldown(account.id, 24 * 60); // 24h cooldown
+      await prisma.vfsAccount.update({
+        where: { id: account.id },
+        data: {
+          status: 'COOLDOWN',
+          cooldownUntil: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        },
+      });
     }
   }
 
   return { ...result, accountEmail: account.email };
+}
+
+async function getAvailableFreshAccount(): Promise<VfsAccount | null> {
+  const now = new Date();
+  const staleCutoff = new Date(Date.now() - STALE_THRESHOLD_MS);
+
+  await prisma.vfsAccount.updateMany({
+    where: {
+      status: 'COOLDOWN',
+      cooldownUntil: { lte: now },
+    },
+    data: {
+      status: 'ACTIVE',
+      cooldownUntil: null,
+    },
+  });
+
+  const rows = await prisma.$queryRaw<VfsAccount[]>`
+    UPDATE "VfsAccount"
+    SET    "lastUsedAt" = ${now}
+    WHERE  id = (
+      SELECT id
+      FROM   "VfsAccount"
+      WHERE  status = 'ACTIVE'
+      AND    "lastWarmedAt" >= ${staleCutoff}
+      AND    "cookieStore" IS NOT NULL
+      AND    "cookieStore"::text ILIKE '%datadome%'
+      ORDER BY "lastUsedAt" ASC NULLS FIRST
+      LIMIT  1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `;
+
+  return rows[0] ?? null;
 }
 
 async function resolveOperatorUserId(): Promise<string | undefined> {

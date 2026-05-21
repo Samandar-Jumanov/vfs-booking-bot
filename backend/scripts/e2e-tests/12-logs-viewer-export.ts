@@ -24,6 +24,7 @@ runE2e('12. Logs viewer with filters and CSV export', async () => {
       });
       assert(exportRes.ok, `logs export returned HTTP ${exportRes.status}`);
       assert(exportRes.headers.get('content-type')?.includes('text/csv'), 'logs export did not return text/csv');
+      assert(exportRes.headers.get('content-disposition')?.includes('attachment;'), 'logs export did not set attachment disposition');
       const csv = await exportRes.text();
       assert(csv.startsWith('timestamp,level,eventType,message'), 'CSV export headers are missing or wrong');
       assert(csv.includes(`${marker} slot`), 'CSV export did not contain expected filtered log row');

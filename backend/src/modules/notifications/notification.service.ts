@@ -24,6 +24,7 @@ interface NotificationPayload {
   destination?: string;
   visaType?: string;
   confirmationNo?: string;
+  accountEmail?: string;
   slotDate?: string;
   errorMessage?: string;
   reason?: string;
@@ -136,10 +137,23 @@ function alertButtons(p: NotificationPayload): { reply_markup?: { inline_keyboar
       };
   }
 }
+
+function escapeTelegramHtml(value?: string): string {
+  return (value ?? 'N/A')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function formatTelegramMessage(p: NotificationPayload & { profileName?: string }): string {
   switch (p.event) {
     case 'SLOT_DETECTED':
-      return `🎯 Slot available — *${p.destination ?? 'VFS'}* on ${p.slotDate ?? 'N/A'}`;
+      return [
+        'Slot available',
+        `Destination: <b>${escapeTelegramHtml(p.destination ?? 'VFS')}</b>`,
+        `Date: <b>${escapeTelegramHtml(p.slotDate)}</b>`,
+        `Account: <code>${escapeTelegramHtml(p.accountEmail)}</code>`,
+      ].join('\n');
     case 'BOOKING_SUCCESS':
       return `✅ Booked — *${p.profileName ?? 'Unknown'}* → ${p.destination ?? 'VFS'} on ${p.slotDate ?? 'N/A'}\nConf #: \`${p.confirmationNo ?? 'N/A'}\``;
     case 'BOOKING_FAILED':

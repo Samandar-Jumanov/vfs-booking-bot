@@ -25,7 +25,8 @@ const scripts = [
   '12-logs-viewer-export.ts',
   '13-vendor-balance-fetching.ts',
   '14-datadome-cookie-freshness.ts',
-  '15-fix-a-post-submit-detection.ts',
+  '15-auto-register-e2e.ts',
+  '15-cookie-sync-on-login.ts',
 ];
 
 const dryRun = process.argv.includes('--dry') || process.env.E2E_DRY_RUN === '1';

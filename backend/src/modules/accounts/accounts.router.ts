@@ -134,6 +134,26 @@ accountsRouter.post('/', async (req: Request, res: Response, next: NextFunction)
 
 // ── DELETE /api/accounts/:id ──────────────────────────────────────────────────
 
+accountsRouter.get('/:id/password', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const account = await prisma.vfsAccount.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, email: true, encryptedPassword: true },
+    });
+    if (!account) {
+      throw new AppError(404, `VfsAccount "${req.params.id}" not found`, 'NOT_FOUND');
+    }
+    res.json({
+      id: account.id,
+      email: account.email,
+      password: decrypt(account.encryptedPassword),
+      expiresInSeconds: 30,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 accountsRouter.delete('/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;

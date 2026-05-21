@@ -8,6 +8,15 @@ runE2e('2. Manual cookie injection via /inject-cookies page backend route', asyn
     const { prisma } = await import('../../src/config/database');
 
     await withTestServer(async ({ baseUrl, authHeader }) => {
+      const passwordRes = await fetch(`${baseUrl}/api/accounts/${account.id}/password`, {
+        headers: authHeader,
+      });
+      assert(passwordRes.ok, `reveal password returned HTTP ${passwordRes.status}`);
+      const passwordBody = await passwordRes.json() as { email?: string; password?: string; expiresInSeconds?: number };
+      assert(passwordBody.email === account.email, 'reveal password returned wrong account email');
+      assert(passwordBody.password === 'E2ePassw0rd!', 'reveal password did not decrypt stored password');
+      assert(passwordBody.expiresInSeconds === 30, 'reveal password did not return 30 second expiry');
+
       const noDd = await fetch(`${baseUrl}/api/accounts/inject-cookies`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authHeader },

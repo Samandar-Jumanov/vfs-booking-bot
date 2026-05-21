@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2, RefreshCw } from 'lucide-react';
+import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2, RefreshCw, Eye, Copy, X } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -37,6 +37,7 @@ interface PoolResponse {
 
 export default function AccountPoolPage() {
   const qc = useQueryClient();
+  const [revealed, setRevealed] = useState<{ accountId: string; email: string; password: string } | null>(null);
 
   const poolQuery = useQuery<PoolResponse>({
     queryKey: ['account-pool'],
@@ -112,8 +113,25 @@ export default function AccountPoolPage() {
 
   const staleAccounts = useMemo(() => items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh), [items]);
 
-  const openLoginTab = (loginUrl: string) => {
-    window.open(loginUrl, '_blank', 'noopener,noreferrer');
+  const revealPasswordMutation = useMutation({
+    mutationFn: (account: PoolItem) =>
+      api.get<{ email: string; password: string; expiresInSeconds: number }>(`/accounts/${account.id}/password`)
+        .then((r) => ({ accountId: account.id, email: r.data.email, password: r.data.password, expiresInSeconds: r.data.expiresInSeconds })),
+    onSuccess: (data) => {
+      setRevealed({ accountId: data.accountId, email: data.email, password: data.password });
+      window.setTimeout(() => {
+        setRevealed((current) => current?.accountId === data.accountId ? null : current);
+      }, data.expiresInSeconds * 1000);
+    },
+  });
+
+  const copyText = (text: string) => {
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+  };
+
+  const openLoginTab = (account: PoolItem) => {
+    copyText(account.email);
+    window.open(`${account.loginUrl}?email=${encodeURIComponent(account.email)}`, '_blank', 'noopener,noreferrer');
   };
 
   const openAllStale = () => {
@@ -226,6 +244,42 @@ export default function AccountPoolPage() {
         </div>
       )}
 
+      {revealed && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold">VFS password</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Auto-hides after 30 seconds.</p>
+              </div>
+              <button type="button" className="btn-secondary h-8 w-8 p-0" onClick={() => setRevealed(null)} aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-4 space-y-3">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Email</label>
+                <div className="mt-1 flex gap-2">
+                  <input className="input h-10 flex-1" readOnly value={revealed.email} />
+                  <button type="button" className="btn-secondary h-10 w-10 p-0" onClick={() => copyText(revealed.email)} aria-label="Copy email">
+                    <Copy className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Password</label>
+                <div className="mt-1 flex gap-2">
+                  <input className="input h-10 flex-1 font-mono" readOnly value={revealed.password} />
+                  <button type="button" className="btn-secondary h-10 w-10 p-0" onClick={() => copyText(revealed.password)} aria-label="Copy password">
+                    <Copy className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card mt-6 overflow-hidden bg-card/70 p-0">
         <table className="w-full text-sm">
           <thead className="bg-zinc-950 text-zinc-400">
@@ -291,10 +345,23 @@ export default function AccountPoolPage() {
                     <button
                       type="button"
                       className="btn-secondary h-8 gap-1.5 text-xs"
-                      onClick={() => openLoginTab(a.loginUrl)}
+                      onClick={() => openLoginTab(a)}
                     >
                       <ExternalLink className="h-3.5 w-3.5" />
                       Open login
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 gap-1.5 text-xs"
+                      onClick={() => revealPasswordMutation.mutate(a)}
+                      disabled={revealPasswordMutation.isPending && revealPasswordMutation.variables?.id === a.id}
+                    >
+                      {revealPasswordMutation.isPending && revealPasswordMutation.variables?.id === a.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                      Reveal password
                     </button>
                     {a.status === 'ACTIVE' && (
                       <button

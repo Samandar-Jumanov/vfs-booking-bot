@@ -14,6 +14,8 @@
  * or after errors.
  */
 import { chromium, Browser, BrowserContext, Page } from 'rebrowser-playwright';
+import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { prisma } from '@config/database';
 import { env } from '@config/env';
 import { getBrowserProfileDir, resolveChromeExecutablePath } from '@modules/engine/browser.factory';
@@ -338,7 +340,7 @@ export async function fetchSlotsViaBrowser(
   visaCategoryCode: string,
   cookies: string[],
   userAgent?: string,
-  opts: { vacCode?: string; loginUser?: string; roleName?: string; profileId?: string } = {},
+  opts: { vacCode?: string; loginUser?: string; roleName?: string; profileId?: string; proxyUrl?: string } = {},
 ): Promise<{ status: number; data: SlotCheckResponse | null; rawText: string }> {
   if (env.CDP_ENDPOINT) {
     const profileId = opts.profileId || opts.loginUser || '*';
@@ -387,6 +389,10 @@ export async function fetchSlotsViaBrowser(
     return { status: result.status, data: result.parsed, rawText: result.text };
   }
 
+  if (opts.proxyUrl) {
+    return fetchSlotsViaHttpProxy(sourceCode, destinationCode, visaCategoryCode, cookies, userAgent, opts);
+  }
+
   if (!process.env.BRIGHTDATA_WS && process.env.SCRAPER_API) {
     return fetchSlotsViaScraperApi(sourceCode, destinationCode, visaCategoryCode, cookies, opts);
   }
@@ -425,6 +431,49 @@ export async function fetchSlotsViaBrowser(
   }, { url: SLOT_API, body });
 
   return { status: result.status, data: result.parsed, rawText: result.text };
+}
+
+async function fetchSlotsViaHttpProxy(
+  sourceCode: string,
+  destinationCode: string,
+  visaCategoryCode: string,
+  cookies: string[],
+  userAgent?: string,
+  opts: { vacCode?: string; loginUser?: string; roleName?: string; proxyUrl?: string } = {},
+): Promise<{ status: number; data: SlotCheckResponse | null; rawText: string }> {
+  const body: SlotCheckRequest = {
+    countryCode: sourceCode,
+    missionCode: destinationCode,
+    vacCode: opts.vacCode || 'TAS',
+    visaCategoryCode,
+    roleName: opts.roleName || 'Individual',
+    loginUser: opts.loginUser || '',
+    payCode: '',
+  };
+
+  const response = await axios.post(SLOT_API, body, {
+    timeout: 180_000,
+    httpsAgent: new HttpsProxyAgent(opts.proxyUrl!) as any,
+    proxy: false,
+    validateStatus: () => true,
+    headers: {
+      'Content-Type': 'application/json;charset=UTF-8',
+      Accept: 'application/json, text/plain, */*',
+      Origin: 'https://visa.vfsglobal.com',
+      Referer: `https://visa.vfsglobal.com/${sourceCode}/en/${destinationCode}/schedule-appointment`,
+      'User-Agent': userAgent || UA,
+      Cookie: cookies.map((cookie) => cookie.split(';')[0].trim()).filter(Boolean).join('; '),
+    },
+  });
+
+  const rawText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+  const parsed = typeof response.data === 'object' && response.data !== null
+    ? response.data as SlotCheckResponse
+    : (() => {
+        try { return JSON.parse(rawText) as SlotCheckResponse; } catch { return null; }
+      })();
+
+  return { status: response.status, data: parsed, rawText };
 }
 
 async function fetchSlotsViaScraperApi(
