@@ -11,6 +11,7 @@
     "db:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
     "db:studio": "prisma studio",
     "test": "jest --runInBand",
+    "test:e2e": "tsx -r tsconfig-paths/register scripts/e2e-tests/run-all.ts",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
@@ -18,7 +19,6 @@
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",
-    "prisma": "^5.10.0",
     "axios": "^1.6.7",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.1.6",
@@ -38,6 +38,7 @@
     "patchright": "^1.59.4",
     "playwright": "1.42.1",
     "playwright-extra": "^4.3.6",
+    "prisma": "^5.10.0",
     "proxy-chain": "^2.7.1",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "rebrowser-playwright": "^1.52.0",
@@ -71,6 +72,7 @@
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "tsc-alias": "^1.8.17",
+    "tsx": "^4.22.3",
     "typescript": "^5.3.3"
   }
 }

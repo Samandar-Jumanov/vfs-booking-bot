@@ -1,9 +1,11 @@
 import { ExtensionWsClient } from '../shared/ws-client';
+import { debuggerClickAt, debuggerAttach, debuggerKeyPress } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
+const SW_VERSION = '2026-05-21-trusted-clicks-v7.2';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
 const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
-log('boot at', new Date().toISOString());
+log(`boot at ${new Date().toISOString()} version=${SW_VERSION}`);
 
 const DEFAULT_SETTINGS: ExtensionSettings = {
   backendUrl: 'https://backend-production-24c3.up.railway.app',
@@ -81,14 +83,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  void handleRuntimeMessage(message).then(sendResponse);
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  void handleRuntimeMessage(message as { type?: string; [key: string]: unknown }, sender as chrome.runtime.MessageSender).then(sendResponse);
   return true;
 });
 
 void connectFromStoredSettings();
 
-async function handleRuntimeMessage(message: { type?: string; [key: string]: unknown }) {
+async function handleRuntimeMessage(message: { type?: string; [key: string]: unknown }, sender?: chrome.runtime.MessageSender) {
+  log(`message received: type=${message?.type ?? '(no type)'} senderTab=${sender?.tab?.id ?? 'none'}`);
   if (message.type === 'GET_STATE') {
     return { settings: await getSettings(), state: runtimeState };
   }
@@ -111,6 +114,35 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
   if (message.type === 'OPEN_VFS') {
     await chrome.tabs.create({ url: 'https://visa.vfsglobal.com/uzb/en/lva/login' });
     return { ok: true };
+  }
+  if (message.type === 'TRUSTED_CLICK') {
+    // Content script asks us to perform a real OS-level mouse click at
+    // the given viewport coordinates in the sender's tab. This bypasses
+    // Angular Material MDC's `event.isTrusted` check.
+    const tabId = sender?.tab?.id;
+    if (!tabId) return { ok: false, error: 'NO_TAB_ID' };
+    try {
+      await debuggerAttach(tabId);
+      await debuggerClickAt(tabId, Number(message.x), Number(message.y));
+      return { ok: true };
+    } catch (e) {
+      const err = (e as Error).message;
+      warn('TRUSTED_CLICK failed:', err);
+      return { ok: false, error: err };
+    }
+  }
+  if (message.type === 'TRUSTED_KEY') {
+    const tabId = sender?.tab?.id;
+    if (!tabId) return { ok: false, error: 'NO_TAB_ID' };
+    try {
+      await debuggerAttach(tabId);
+      await debuggerKeyPress(tabId, String(message.key ?? ''));
+      return { ok: true };
+    } catch (e) {
+      const err = (e as Error).message;
+      warn('TRUSTED_KEY failed:', err);
+      return { ok: false, error: err };
+    }
   }
   if (message.type === 'REGISTER_TRACE') {
     // HTTP-only fallback trace path so register-flow events appear in

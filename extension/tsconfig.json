@@ -6,7 +6,7 @@
     "strict": true,
     "jsx": "react-jsx",
     "lib": ["DOM", "ES2022"],
-    "types": [],
+    "types": ["chrome"],
     "noEmit": false,
     "isolatedModules": true,
     "skipLibCheck": true

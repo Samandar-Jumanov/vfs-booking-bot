@@ -27,6 +27,25 @@ const cooldownSchema = z.object({
   minutes: z.number().int().positive(),
 });
 
+function cookieStoreHasDatadome(cookieStore: unknown): boolean {
+  if (!cookieStore) return false;
+  if (typeof cookieStore === 'string') return /datadome/i.test(cookieStore);
+  if (Array.isArray(cookieStore)) {
+    return cookieStore.some((cookie) => {
+      if (!cookie || typeof cookie !== 'object') return false;
+      const name = 'name' in cookie ? String((cookie as { name?: unknown }).name ?? '') : '';
+      return /datadome/i.test(name);
+    });
+  }
+  if (typeof cookieStore === 'object') {
+    const store = cookieStore as { raw?: unknown; jar?: unknown; hasDatadome?: unknown };
+    if (store.hasDatadome === true) return true;
+    if (typeof store.raw === 'string' && /datadome/i.test(store.raw)) return true;
+    return cookieStoreHasDatadome(store.jar);
+  }
+  return false;
+}
+
 // ── GET /api/accounts ─────────────────────────────────────────────────────────
 // Returns all VfsAccounts. encryptedPassword is NEVER included in the response.
 
@@ -199,18 +218,21 @@ accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: N
       },
     });
 
-    const items = accounts.map((a) => ({
-      id: a.id,
-      email: a.email,
-      status: a.status,
-      cookieFresh: !!a.lastWarmedAt && now - a.lastWarmedAt.getTime() < STALE_MS,
-      lastWarmedAt: a.lastWarmedAt,
-      tabUrl: a.tabUrl,
-      lastUsedAt: a.lastUsedAt,
-      cooldownUntil: a.cooldownUntil,
-      profileCount: a.profileIds.length,
-      loginUrl: `https://visa.vfsglobal.com/${sourceCode}/en/${destCode}/login`,
-    }));
+    const items = accounts.map((a) => {
+      const hasDatadome = cookieStoreHasDatadome(a.cookieStore);
+      return {
+        id: a.id,
+        email: a.email,
+        status: a.status,
+        cookieFresh: hasDatadome && !!a.lastWarmedAt && now - a.lastWarmedAt.getTime() < STALE_MS,
+        lastWarmedAt: a.lastWarmedAt,
+        tabUrl: a.tabUrl,
+        lastUsedAt: a.lastUsedAt,
+        cooldownUntil: a.cooldownUntil,
+        profileCount: a.profileIds.length,
+        loginUrl: `https://visa.vfsglobal.com/${sourceCode}/en/${destCode}/login`,
+      };
+    });
 
     const summary = {
       total: items.length,
@@ -365,6 +387,7 @@ accountsRouter.post('/inject-cookies', async (req: Request, res: Response, next:
   try {
     const body = injectCookiesSchema.parse(req.body);
     const now = new Date();
+    const hasDatadome = cookieStoreHasDatadome(body.cookies);
 
     const existing = await prisma.vfsAccount.findUnique({ where: { email: body.email } });
 
@@ -373,9 +396,9 @@ accountsRouter.post('/inject-cookies', async (req: Request, res: Response, next:
           where: { email: body.email },
           data: {
             cookieStore: body.cookies as never,
-            lastWarmedAt: now,
+            lastWarmedAt: hasDatadome ? now : existing.lastWarmedAt,
             tabUrl: body.tabUrl ?? existing.tabUrl,
-            status: 'ACTIVE',
+            status: hasDatadome ? 'ACTIVE' : existing.status,
             ...(body.password ? { encryptedPassword: encrypt(body.password) } : {}),
           },
           select: { id: true, email: true, status: true, lastWarmedAt: true },
@@ -385,7 +408,7 @@ accountsRouter.post('/inject-cookies', async (req: Request, res: Response, next:
             email: body.email,
             encryptedPassword: encrypt(body.password ?? ''),
             cookieStore: body.cookies as never,
-            lastWarmedAt: now,
+            lastWarmedAt: hasDatadome ? now : null,
             tabUrl: body.tabUrl ?? null,
             status: 'ACTIVE',
           },

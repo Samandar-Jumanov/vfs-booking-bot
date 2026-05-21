@@ -11,7 +11,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 90_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-20-mdc-dialcode-v2';
+const VFS_BRIDGE_VERSION = '2026-05-21-dialcode-mdc-target-sequence-v8';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
@@ -75,7 +75,11 @@ async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
 async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   console.log('[VFS-REG] runRegisterSteps starting on', location.href);
   void postRegisterTrace('runRegisterSteps START', { url: location.href });
-  await waitForElement('input[type="email"], input[type="password"]', 30_000);
+  // Wait for ALL the form controls we plan to touch, not just the early ones.
+  // Mobile was failing to fill because we proceeded before the contact input
+  // had rendered.
+  await waitForElement('input[formcontrolname="contact"]', 30_000).catch(() => undefined);
+  await waitForElement('mat-select[formcontrolname="dialcode"]', 10_000).catch(() => undefined);
   console.log('[VFS-REG] form fields detected, filling…');
   void postRegisterTrace('form fields detected', { url: location.href });
 
@@ -100,10 +104,8 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
     'input[formcontrolname="confirmPassword"]',
     'input[name="confirmPassword"]',
   ], payload.password);
-  // Select Dial Code "998" from the dropdown. The dropdown shows up as
-  // either a native select OR an Angular Material mat-select. Try both.
-  await selectDialCode998();
-  // Phone — VFS expects the LOCAL number (without country code).
+  // Fill Mobile FIRST so it's done before any dial-code dropdown weirdness
+  // can mess with the form state. VFS expects the LOCAL number (no country code).
   const localPhone = payload.phone.replace(/^\+?998/, '').replace(/^\+/, '');
   await typeIntoFirst([
     'input[formcontrolname="contact"]',  // ← real VFS UZ field name
@@ -117,6 +119,9 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   // Check all 3 consent checkboxes (Privacy Notice, Data Transfer, Terms).
   await checkAllRegisterConsents();
   console.log('[VFS-REG] consents checked');
+  // Now try dial code. If it fails, we show a banner asking the operator to
+  // click it manually — the page-transition watcher catches the submit either way.
+  await selectDialCode998();
 
   const turnstile = document.querySelector<HTMLElement>('[data-sitekey]');
   const siteKey = turnstile?.getAttribute('data-sitekey');
@@ -419,71 +424,273 @@ async function selectDialCode998(): Promise<void> {
     id: trigger.id,
   });
 
-  // Open the panel. Material MDC respects: focus → keydown Enter | Space | ArrowDown.
-  const innerTrigger = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
-  innerTrigger.focus();
-  // Try pointer events first (MDC primary path).
-  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) =>
-    innerTrigger.dispatchEvent(
-      type.startsWith('pointer')
-        ? new PointerEvent(type, { bubbles: true, cancelable: true, isPrimary: true, button: 0 })
-        : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 }),
-    ),
-  );
+  const findOption = (): HTMLElement | undefined =>
+    Array.from(document.querySelectorAll<HTMLElement>(
+      'mat-option, .mat-option, .mat-mdc-option, [role="option"], .ng-option',
+    )).find((el) => /\b\+?998\b|uzbekistan/i.test((el.textContent ?? '').trim()));
+  const hasOpenPanel = (): boolean =>
+    trigger.getAttribute('aria-expanded') === 'true' ||
+    Boolean(document.querySelector('.mat-mdc-select-panel, .mat-select-panel, [role="listbox"]'));
+  const isSelected = (): boolean => {
+    const disp = trigger.querySelector<HTMLElement>('.mat-mdc-select-value, .mat-select-value');
+    const text = ((disp?.textContent ?? '') || trigger.textContent || '').trim();
+    return /998/.test(text);
+  };
+  const waitForOption = async (timeoutMs: number): Promise<HTMLElement | undefined> => {
+    const deadline = Date.now() + timeoutMs;
+    let option: HTMLElement | undefined;
+    while (Date.now() < deadline && !option) {
+      option = findOption();
+      if (!option) await new Promise((r) => setTimeout(r, 100));
+    }
+    return option;
+  };
 
-  // Wait up to 3s for the overlay panel to actually appear.
-  const panelDeadline = Date.now() + 3000;
-  let panel: HTMLElement | null = null;
-  while (Date.now() < panelDeadline && !panel) {
-    panel = document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel, .cdk-overlay-pane [role="listbox"]');
-    if (!panel) await new Promise((r) => setTimeout(r, 100));
+  void postRegisterTrace('dial-code structure', dumpDialCodeSelectStructure(trigger));
+
+  if (isSelected()) {
+    void postRegisterTrace('dial-code already selected', {
+      display: (trigger.querySelector('.mat-mdc-select-value, .mat-select-value')?.textContent ?? '').trim(),
+    });
+    return;
   }
 
-  // Fallback: if panel didn't open via pointer events, send keyboard ENTER.
-  if (!panel) {
-    void postRegisterTrace('dial-code pointer click did not open panel — trying keyboard', {});
-    const opts: KeyboardEventInit = { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
-    innerTrigger.dispatchEvent(new KeyboardEvent('keydown', opts));
-    innerTrigger.dispatchEvent(new KeyboardEvent('keyup', opts));
-    const kbDeadline = Date.now() + 2000;
-    while (Date.now() < kbDeadline && !panel) {
-      panel = document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel, .cdk-overlay-pane [role="listbox"]');
-      if (!panel) await new Promise((r) => setTimeout(r, 100));
+  const clickTargets: Array<{ name: string; element: HTMLElement }> = [
+    { name: '.mat-mdc-select-trigger', element: trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger },
+    { name: '.mat-mdc-select-value', element: trigger.querySelector<HTMLElement>('.mat-mdc-select-value, .mat-select-value') ?? trigger },
+    { name: '.mat-mdc-select-arrow-wrapper', element: trigger.querySelector<HTMLElement>('.mat-mdc-select-arrow-wrapper, .mat-select-arrow-wrapper') ?? trigger },
+    { name: '.mat-mdc-select-arrow', element: trigger.querySelector<HTMLElement>('.mat-mdc-select-arrow, .mat-select-arrow') ?? trigger },
+    { name: 'mat-select host', element: trigger },
+  ];
+
+  let clickAttempted = false;
+  let debuggerBlocked = false;
+  for (const target of clickTargets) {
+    if (!target.element || !isVisible(target.element)) continue;
+    clickAttempted = true;
+    void postRegisterTrace('dial-code trying trusted click target', {
+      target: target.name,
+      rect: rectSummary(target.element),
+      expandedBefore: trigger.getAttribute('aria-expanded'),
+    });
+    const clicked = await trustedClick(target.element);
+    void postRegisterTrace('dial-code trusted click target result', {
+      target: target.name,
+      ok: clicked,
+      expandedAfter: trigger.getAttribute('aria-expanded'),
+      panelCount: document.querySelectorAll('.mat-mdc-select-panel, .mat-select-panel, [role="listbox"]').length,
+      anyOptions: document.querySelectorAll('mat-option, .mat-mdc-option, [role="option"]').length,
+    });
+    if (!clicked) {
+      debuggerBlocked = true;
+      continue;
+    }
+    const option = await waitForOption(hasOpenPanel() ? 2500 : 1000);
+    if (option) {
+      await selectDialCodeOption(trigger, option, 'trusted click on ' + target.name);
+      if (isSelected()) return;
+    }
+    if (hasOpenPanel()) break;
+  }
+
+  if (!findOption()) {
+    const openedByAngular = await tryAngularMaterialOpen(trigger);
+    void postRegisterTrace('dial-code angular open result', {
+      ok: openedByAngular,
+      expandedAfter: trigger.getAttribute('aria-expanded'),
+      panelCount: document.querySelectorAll('.mat-mdc-select-panel, .mat-select-panel, [role="listbox"]').length,
+    });
+    const option = openedByAngular ? await waitForOption(2500) : undefined;
+    if (option) {
+      await selectDialCodeOption(trigger, option, 'angular component open');
+      if (isSelected()) return;
     }
   }
 
-  if (!panel) {
-    void postRegisterTrace('dial-code panel NEVER opened', {});
+  for (const key of ['Enter', 'Space', 'ArrowDown']) {
+    const focusTarget = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
+    await trustedClick(focusTarget);
+    trigger.focus();
+    void postRegisterTrace('dial-code trying trusted key', {
+      key,
+      activeTag: document.activeElement?.tagName,
+      activeId: (document.activeElement as HTMLElement | null)?.id,
+      activeIsTrigger: document.activeElement === trigger,
+      expandedBefore: trigger.getAttribute('aria-expanded'),
+    });
+    const keyOk = await trustedKey(key);
+    void postRegisterTrace('dial-code trusted key result', {
+      key,
+      ok: keyOk,
+      expandedAfter: trigger.getAttribute('aria-expanded'),
+      panelCount: document.querySelectorAll('.mat-mdc-select-panel, .mat-select-panel, [role="listbox"]').length,
+    });
+    const option = await waitForOption(2000);
+    if (option) {
+      await selectDialCodeOption(trigger, option, 'trusted key ' + key);
+      if (isSelected()) return;
+    }
+  }
+
+  void postRegisterTrace('dial-code option not found after all open attempts', {
+    clickAttempted,
+    debuggerBlocked,
+    panelCount: document.querySelectorAll('.mat-mdc-select-panel, .mat-select-panel, [role="listbox"]').length,
+    anyOptions: document.querySelectorAll('mat-option, .mat-mdc-option, [role="option"]').length,
+    expanded: trigger.getAttribute('aria-expanded'),
+  });
+  if (!clickAttempted || debuggerBlocked) {
+    showOperatorBanner('Bot click blocked (likely DevTools open on this tab). Close DevTools, then click Dial Code -> Uzbekistan(998) -> Register.');
     return;
   }
-  void postRegisterTrace('dial-code panel opened', {});
+  showOperatorBanner('Bot could not auto-select dial code. Please click the Dial Code dropdown and choose "Uzbekistan(998)", then click Register.');
+  return;
+  /*
 
-  // Find the "998" / Uzbekistan option in the panel.
-  const optionDeadline = Date.now() + 2000;
+  const innerTrigger = trigger!.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger!;
+
+  // === TRUSTED-CLICK PATH ===
+  // Use chrome.debugger via the background SW to dispatch a real OS-level
+  // click on the trigger. This passes Material MDC's `event.isTrusted` check,
+  // which dispatched events from a content script never could.
+  // IMPORTANT: chrome.debugger fails if DevTools is open on this tab.
+  console.log('[VFS-REG] selectDialCode998 — about to request trusted click on trigger');
+  void postRegisterTrace('dial-code trying trusted click on trigger', {});
+  const triggerClicked = await trustedClick(innerTrigger);
+  console.log('[VFS-REG] selectDialCode998 — trusted click on trigger returned:', triggerClicked);
+  void postRegisterTrace('dial-code trusted click on trigger result', { ok: triggerClicked });
+  if (!triggerClicked) {
+    showOperatorBanner('Bot click blocked (likely DevTools open on this tab — close DevTools, then click Dial Code → Uzbekistan(998) → Register).');
+    return;
+  }
+
+  // Wait up to 3s for the option list to render after the trusted click.
+  const optDeadline = Date.now() + 3000;
   let option: HTMLElement | undefined;
-  while (Date.now() < optionDeadline && !option) {
-    option = Array.from(panel.querySelectorAll<HTMLElement>(
-      'mat-option, .mat-option, .mat-mdc-option, [role="option"]',
-    )).find((el) => /\b\+?998\b|uzbekistan/i.test((el.textContent ?? '').trim()));
+  while (Date.now() < optDeadline && !option) {
+    option = findOption();
     if (!option) await new Promise((r) => setTimeout(r, 100));
   }
   if (!option) {
-    const sample = Array.from(panel.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'))
-      .slice(0, 5).map((e) => (e.textContent ?? '').trim().slice(0, 40));
-    void postRegisterTrace('dial-code 998 option NOT in panel', { panelOptionsSample: sample });
+    void postRegisterTrace('dial-code option not found after trusted open', {
+      panelCount: document.querySelectorAll('.mat-mdc-select-panel, .mat-select-panel').length,
+      anyOptions: document.querySelectorAll('mat-option, .mat-mdc-option, [role="option"]').length,
+    });
+    showOperatorBanner('Bot could not auto-select dial code. Please click the Dial Code dropdown and choose "Uzbekistan(998)", then click Register.');
     return;
   }
 
-  option.scrollIntoView({ block: 'nearest' });
-  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) =>
-    option!.dispatchEvent(
-      type.startsWith('pointer')
-        ? new PointerEvent(type, { bubbles: true, cancelable: true, isPrimary: true, button: 0 })
-        : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 }),
-    ),
-  );
-  void postRegisterTrace('dial-code 998 selected', { text: (option.textContent ?? '').trim().slice(0, 40) });
-  console.log('[VFS-REG] dial-code 998 picked from dropdown');
+  void postRegisterTrace('dial-code option found, trusted-clicking', {
+    text: (option!.textContent ?? '').trim().slice(0, 40),
+  });
+  const optionClicked = await trustedClick(option!);
+  await new Promise((r) => setTimeout(r, 500));
+  if (isSelected()) {
+    void postRegisterTrace('dial-code 998 SELECTED via trusted click', {
+      display: (trigger!.querySelector('.mat-mdc-select-value, .mat-select-value')?.textContent ?? '').trim(),
+    });
+    console.log('[VFS-REG] dial-code 998 selected via trusted click');
+    return;
+  }
+
+  void postRegisterTrace('dial-code trusted click on option did not select', { ok: optionClicked });
+  showOperatorBanner('Bot could not auto-select dial code. Please click the Dial Code dropdown and choose "Uzbekistan(998)", then click Register.');
+  */
+}
+
+async function selectDialCodeOption(trigger: HTMLElement, option: HTMLElement, method: string): Promise<void> {
+  void postRegisterTrace('dial-code option found, trusted-clicking', {
+    method,
+    text: (option.textContent ?? '').trim().slice(0, 80),
+    rect: rectSummary(option),
+  });
+  const optionClicked = await trustedClick(option);
+  await new Promise((r) => setTimeout(r, 500));
+  const display = (trigger.querySelector('.mat-mdc-select-value, .mat-select-value')?.textContent ?? '').trim();
+  if (/998/.test(display)) {
+    void postRegisterTrace('dial-code 998 SELECTED', { method, display });
+    console.log('[VFS-REG] dial-code 998 selected via', method);
+    return;
+  }
+  void postRegisterTrace('dial-code option click did not select', { method, ok: optionClicked, display });
+}
+
+function dumpDialCodeSelectStructure(trigger: HTMLElement): Record<string, unknown> {
+  const query = (selector: string) => trigger.querySelector<HTMLElement>(selector);
+  return {
+    outerHTML: trigger.outerHTML.slice(0, 500),
+    rect: rectSummary(trigger),
+    triggerRect: rectSummary(query('.mat-mdc-select-trigger, .mat-select-trigger')),
+    valueRect: rectSummary(query('.mat-mdc-select-value, .mat-select-value')),
+    arrowWrapperRect: rectSummary(query('.mat-mdc-select-arrow-wrapper, .mat-select-arrow-wrapper')),
+    arrowRect: rectSummary(query('.mat-mdc-select-arrow, .mat-select-arrow')),
+    disabled: trigger.getAttribute('aria-disabled'),
+    ariaExpanded: trigger.getAttribute('aria-expanded'),
+    classList: Array.from(trigger.classList),
+  };
+}
+
+function rectSummary(element: HTMLElement | null | undefined): Record<string, number> | null {
+  if (!element) return null;
+  const rect = element.getBoundingClientRect();
+  return {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+    left: Math.round(rect.left),
+    top: Math.round(rect.top),
+    right: Math.round(rect.right),
+    bottom: Math.round(rect.bottom),
+  };
+}
+
+async function tryAngularMaterialOpen(trigger: HTMLElement): Promise<boolean> {
+  const marker = 'vfsDialCodeOpenResult_' + Math.random().toString(36).slice(2);
+  trigger.setAttribute('data-vfs-dialcode-open-marker', marker);
+  return new Promise((resolve) => {
+    const script = document.createElement('script');
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, 1000);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener(marker, onResult as EventListener);
+      script.remove();
+      trigger.removeAttribute('data-vfs-dialcode-open-marker');
+    };
+    const onResult = (event: Event) => {
+      cleanup();
+      resolve(Boolean((event as CustomEvent<{ ok?: boolean }>).detail?.ok));
+    };
+    window.addEventListener(marker, onResult as EventListener, { once: true });
+    script.textContent = `
+      (() => {
+        let ok = false;
+        try {
+          const ms = document.querySelector('[data-vfs-dialcode-open-marker="${marker}"]');
+          const cmp = ms && window.ng && typeof window.ng.getComponent === 'function' ? window.ng.getComponent(ms) : null;
+          if (cmp && typeof cmp.open === 'function') {
+            cmp.open();
+            ok = true;
+          }
+        } catch {}
+        window.dispatchEvent(new CustomEvent('${marker}', { detail: { ok } }));
+      })();
+    `;
+    (document.documentElement || document.head || document.body).appendChild(script);
+  });
+}
+
+function showOperatorBanner(message: string): void {
+  // Idempotent: don't add duplicates.
+  if (document.getElementById('vfs-bot-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'vfs-bot-banner';
+  banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#fef3c7;color:#92400e;padding:12px 20px;font-family:sans-serif;font-size:14px;font-weight:600;z-index:2147483647;border-top:2px solid #f59e0b;text-align:center;box-shadow:0 -2px 8px rgba(0,0,0,0.1);';
+  banner.textContent = `[VFS Bot] ${message}`;
+  document.body.appendChild(banner);
 }
 
 // Check every consent checkbox on the VFS register form. There are 3:
@@ -567,7 +774,7 @@ async function clickRegisterSubmit(): Promise<void> {
     return Boolean(t?.value);
   };
   // Wait up to 60s for both: Turnstile token present AND button enabled.
-  // If only one becomes true, keep waiting — VFS won't accept submit without both.
+  // VFS won't accept submit without both.
   const deadline = Date.now() + 60_000;
   let lastLogAt = 0;
   while (Date.now() < deadline) {
@@ -575,10 +782,10 @@ async function clickRegisterSubmit(): Promise<void> {
     const tokenOk = hasTurnstileToken();
     const btnOk = btn ? isEnabled(btn) : false;
     if (btn && tokenOk && btnOk) {
-      ['mousedown', 'mouseup', 'click'].forEach((type) =>
-        btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 })),
-      );
-      void postRegisterTrace('register submit clicked', { tokenOk, btnOk });
+      // Use trusted click — Material MDC button uses a ripple handler that
+      // can reject dispatched clicks too.
+      const ok = await trustedClick(btn);
+      void postRegisterTrace('register submit trusted-clicked', { tokenOk, btnOk, ok });
       return;
     }
     if (Date.now() - lastLogAt > 5000) {
@@ -697,6 +904,43 @@ async function postRegisterTrace(step: string, meta?: Record<string, unknown>): 
     await chrome.runtime.sendMessage({ type: 'REGISTER_TRACE', step, meta });
   } catch {
     /* ignore */
+  }
+}
+
+// Request a TRUSTED click at the given element's center coordinates. Uses
+// chrome.debugger via the background service worker to send a real OS-level
+// mouse event that passes Angular Material MDC's `event.isTrusted` check.
+async function trustedClick(element: HTMLElement): Promise<boolean> {
+  const rect = element.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) {
+    void postRegisterTrace('trustedClick element has zero size', {});
+    return false;
+  }
+  element.scrollIntoView({ block: 'center', behavior: 'instant' as ScrollBehavior });
+  // Re-read rect after scroll.
+  const r2 = element.getBoundingClientRect();
+  const x = Math.round(r2.left + r2.width / 2);
+  const y = Math.round(r2.top + r2.height / 2);
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_CLICK', x, y });
+    if (res && (res as { ok?: boolean }).ok) return true;
+    void postRegisterTrace('trustedClick failed', { res });
+    return false;
+  } catch (e) {
+    void postRegisterTrace('trustedClick threw', { err: (e as Error).message });
+    return false;
+  }
+}
+
+async function trustedKey(key: string): Promise<boolean> {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_KEY', key });
+    if (res && (res as { ok?: boolean }).ok) return true;
+    void postRegisterTrace('trustedKey failed', { key, res });
+    return false;
+  } catch (e) {
+    void postRegisterTrace('trustedKey threw', { key, err: (e as Error).message });
+    return false;
   }
 }
 
