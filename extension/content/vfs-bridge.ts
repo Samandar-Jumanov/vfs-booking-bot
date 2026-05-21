@@ -9,9 +9,9 @@ import type {
 } from '../shared/types';
 
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
-const REGISTER_STEP_TIMEOUT_MS = 90_000;
+const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-dialcode-mobile-refill-v9';
+const VFS_BRIDGE_VERSION = '2026-05-21-timeout-180s-v10';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
