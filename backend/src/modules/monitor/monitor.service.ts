@@ -317,36 +317,53 @@ function getScrapingProviderMode(): 'local' | 'brightdata' | 'scraperapi' {
   return 'local';
 }
 
+// Strip any existing -session-XYZ suffix in a BrightData username and
+// append a fresh random one. Called on every poll so each lift-api
+// request goes through a different residential IP — VFS sees uncorrelated
+// traffic, no 429201 accumulation.
+function rotateBrightDataSession(username: string): string {
+    const stripped = username.replace(/-session-[A-Za-z0-9]+/g, '');
+    const fresh = 'auto' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    return `${stripped}-session-${fresh}`;
+}
+
 async function getProxyConfig(id: string) {
-    const cached = proxyCache.get(id);
-    if (cached && cached.expiresAt > Date.now()) return cached.config;
+    // Do NOT use the cache for session-rotating proxies: every call must
+    // generate a fresh session ID. Only static (non-BrightData-session)
+    // proxies benefit from caching, and the perf cost of building a URL
+    // string per call is negligible.
 
     // Prefer DB proxy pool (Global Settings / added via API) over env vars
     try {
         const dbProxy = await getProxy();
         if (dbProxy) {
-            const auth = `${dbProxy.username}:${dbProxy.password}@`;
+            // Rotate session if the username looks like a BrightData zone username.
+            const rotatedUser = /^brd-customer-/.test(dbProxy.username)
+                ? rotateBrightDataSession(dbProxy.username)
+                : dbProxy.username;
+            const auth = `${encodeURIComponent(rotatedUser)}:${encodeURIComponent(dbProxy.password)}@`;
             const config = {
                 host: dbProxy.server.split(':')[0],
                 port: Number(dbProxy.server.split(':')[1]),
-                auth: { username: dbProxy.username, password: dbProxy.password },
+                auth: { username: rotatedUser, password: dbProxy.password },
                 url: `http://${auth}${dbProxy.server}`,
             };
-            proxyCache.set(id, { config, expiresAt: Date.now() + CACHE_TTL });
             return config;
         }
     } catch {}
 
     // Fall back to env vars
     if (env.PROXY_HOST && env.PROXY_PORT) {
-        const auth = env.PROXY_USERNAME ? `${env.PROXY_USERNAME}:${env.PROXY_PASSWORD}@` : '';
+        const rotatedUser = env.PROXY_USERNAME && /^brd-customer-/.test(env.PROXY_USERNAME)
+            ? rotateBrightDataSession(env.PROXY_USERNAME)
+            : env.PROXY_USERNAME;
+        const auth = rotatedUser ? `${encodeURIComponent(rotatedUser)}:${encodeURIComponent(env.PROXY_PASSWORD ?? '')}@` : '';
         const config = {
             host: env.PROXY_HOST,
             port: Number(env.PROXY_PORT),
-            auth: env.PROXY_USERNAME ? { username: env.PROXY_USERNAME, password: env.PROXY_PASSWORD } : undefined,
+            auth: rotatedUser ? { username: rotatedUser, password: env.PROXY_PASSWORD } : undefined,
             url: `http://${auth}${env.PROXY_HOST}:${env.PROXY_PORT}`,
         };
-        proxyCache.set(id, { config, expiresAt: Date.now() + CACHE_TTL });
         return config;
     }
     return null;
