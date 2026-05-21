@@ -237,13 +237,27 @@ export async function visitActivationLink(link: string): Promise<{ status: numbe
   return { status: resp.status };
 }
 
+// Strip any existing -session-XYZ suffix and append a fresh random one.
+// VFS rate-limits per residential IP. Sticky session = same IP for ~30 min.
+// Per-request rotation = different IP each call = no rate accumulation.
+function rotateSession(username: string): string {
+  // Match "-session-XXX" up to the next non-alphanumeric or end of string.
+  const stripped = username.replace(/-session-[A-Za-z0-9]+/g, '');
+  const fresh = 'auto' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  return `${stripped}-session-${fresh}`;
+}
+
 function buildBrightDataProxyUrl(): string | null {
   const host = process.env.PROXY_HOST || process.env.BRIGHTDATA_HOST;
   const port = process.env.PROXY_PORT || process.env.BRIGHTDATA_PORT;
   const user = process.env.PROXY_USERNAME || process.env.BRIGHTDATA_USERNAME;
   const pass = process.env.PROXY_PASSWORD || process.env.BRIGHTDATA_PASSWORD;
   if (!host || !port || !user || !pass) return null;
-  return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+  // Auto-rotate session on every call. Each backend request (activation
+  // link visit, slot poll) goes through a different residential IP, so
+  // VFS never sees enough traffic from one IP to trigger 429201.
+  const rotatedUser = rotateSession(user);
+  return `http://${encodeURIComponent(rotatedUser)}:${encodeURIComponent(pass)}@${host}:${port}`;
 }
 
 export async function fetchEmailVerificationLink(email: string): Promise<string | null> {
