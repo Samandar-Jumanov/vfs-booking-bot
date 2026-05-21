@@ -11,7 +11,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-success-detection-v13';
+const VFS_BRIDGE_VERSION = '2026-05-21-activation-resend-v14';
 const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
@@ -215,6 +215,13 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
         correlationId: payload.correlationId,
         email: payload.email,
       });
+      // INSURANCE: VFS often doesn't deliver the first activation email
+      // (especially to throwaway domains like mailsac). Navigate to the
+      // /email-activation page and trigger an explicit resend as a backup.
+      // Backend's poll loop has 240s — plenty for either email to arrive.
+      void triggerActivationResend(payload).catch((err) => {
+        void postRegisterTrace('activation resend failed (non-fatal)', { reason: (err as Error).message });
+      });
       return;
     }
     await new Promise((r) => setTimeout(r, 1000));
@@ -222,6 +229,72 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
 
   // Page never transitioned in 3 min — register really didn't go through.
   throw new Error('REGISTER_PAGE_NEVER_TRANSITIONED');
+}
+
+// Navigate to VFS's /email-activation page and trigger an explicit resend
+// of the activation email. Used as a fallback because VFS sometimes silently
+// skips the initial activation email send.
+async function triggerActivationResend(payload: RegisterFormPayload): Promise<void> {
+  // Don't fire immediately — let backend's poll start first so a successful
+  // first-email path can short-circuit before we even resend.
+  await new Promise((r) => setTimeout(r, 10_000));
+
+  // Build the email-activation URL from the original register URL pattern.
+  const activationUrl = location.href.replace(/\/register.*$/, '/email-activation');
+  void postRegisterTrace('navigating to /email-activation for resend', { url: activationUrl, email: payload.email });
+  window.location.href = activationUrl;
+
+  // Wait for the email-activation page to render its email input.
+  await waitForElement('input[type="email"], input[formcontrolname="emailid"], input[name="emailid"]', 30_000).catch(() => undefined);
+  await new Promise((r) => setTimeout(r, 1500));
+
+  // Fill the email field with the registered email.
+  await typeIntoFirst([
+    'input[formcontrolname="emailid"]',
+    'input[name="emailid"]',
+    'input[type="email"]',
+    'input[id*="email" i]',
+  ], payload.email);
+  void postRegisterTrace('activation resend: email filled', { email: payload.email });
+
+  // Solve Turnstile if present on this page (different site key possible).
+  const turnstile = document.querySelector<HTMLElement>('[data-sitekey]');
+  const siteKey = turnstile?.getAttribute('data-sitekey');
+  if (siteKey) {
+    await emitRegisterEvent({
+      type: 'EXT_REGISTER_NEED_CAPTCHA',
+      correlationId: payload.correlationId,
+      siteKey,
+      pageUrl: window.location.href,
+    });
+    const token = await waitForRegisterSignal('captchaToken', 90_000).catch(() => null);
+    if (token) {
+      await applyRegisterCaptchaToken(token);
+      void postRegisterTrace('activation resend: captcha token injected', {});
+    } else {
+      void postRegisterTrace('activation resend: captcha token MISSING', {});
+    }
+  }
+
+  // Wait for the Activate button to enable, then trusted-click it.
+  const findActivate = () =>
+    findButtonByText(['activate', 'send', 'submit', 'resend']) ?? document.querySelector<HTMLElement>('button[type="submit"]');
+  const dl = Date.now() + 30_000;
+  while (Date.now() < dl) {
+    const btn = findActivate();
+    if (btn && !(btn as HTMLButtonElement).disabled && btn.getAttribute('aria-disabled') !== 'true') {
+      void postRegisterTrace('activation resend: clicking Activate', {});
+      const ok = await trustedClick(btn);
+      void postRegisterTrace('activation resend: Activate clicked', { ok });
+      // Wait briefly for VFS's confirmation message.
+      await new Promise((r) => setTimeout(r, 4000));
+      const bodySample = document.body.innerText.slice(0, 400);
+      void postRegisterTrace('activation resend: post-click body sample', { bodyTextSample: bodySample });
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  void postRegisterTrace('activation resend: Activate button never enabled', {});
 }
 
 async function waitForCompletionOrOtp(payload: RegisterFormPayload): Promise<void> {
