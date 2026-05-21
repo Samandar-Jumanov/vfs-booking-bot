@@ -221,12 +221,19 @@ export function resolveAutoRegister(correlationId: string, result: PendingResult
 
 export async function fetchEmailVerificationLink(email: string): Promise<string | null> {
   const emailProvider = getEmailProvider();
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 240_000; // bumped from 120s
   while (Date.now() < deadline) {
     const messages = await emailProvider.listInbox(email).catch(() => []);
     for (const message of messages) {
-      const body = String(message.body ?? '');
-      const match = body.match(/https?:\/\/[^\s"<]+(?:verify|confirm|activate)[^\s"<]*/i);
+      // Defang URL line-wrapping that Mailsac's text endpoint adds:
+      //   1. Quoted-printable soft breaks (`=\r?\n`) split URLs at column 76.
+      //   2. Bare newlines inside URLs (some clients wrap without `=`).
+      // Remove both BEFORE running the link regex.
+      let body = String(message.body ?? '');
+      body = body.replace(/=\r?\n/g, ''); // QP soft breaks
+      // Also: HTML entity decode common cases (&amp; → &)
+      body = body.replace(/&amp;/g, '&');
+      const match = body.match(/https?:\/\/[^\s"<>]+(?:verify|confirm|activate)[^\s"<>]*/i);
       if (match) return match[0];
     }
     await sleep(5_000);
