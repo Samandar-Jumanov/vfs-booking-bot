@@ -9,12 +9,15 @@ import {
   Cookie,
   Download,
   ExternalLink,
+  ListChecks,
   Pause,
   Play,
   RefreshCcw,
+  ShieldCheck,
   StopCircle,
   Terminal,
   Trash2,
+  User,
   X,
   Zap,
 } from 'lucide-react';
@@ -40,6 +43,20 @@ interface MonitorCardModel extends MonitorStatus {
 interface ExtensionStatus {
   connected: boolean;
   lastHeartbeatAt?: string;
+}
+
+interface BookingSummary {
+  profiles: { active: number };
+  accounts: { total: number; fresh: number };
+  bookings: { queued: number; running: number; successToday: number; failedToday: number; last24h: number };
+  latest: Array<{
+    id: string;
+    status: string;
+    destination: string;
+    visaType: string;
+    createdAt: string;
+    profile: { fullName: string };
+  }>;
 }
 
 type WizardStep = 'explain' | 'open' | 'paste' | 'inject';
@@ -161,6 +178,12 @@ export default function DashboardPage() {
     queryKey: ['extension-status'],
     queryFn: () => api.get<ExtensionStatus>('/extension/status').then((response) => response.data),
     refetchInterval: 5000,
+  });
+
+  const { data: bookingSummary } = useQuery<BookingSummary>({
+    queryKey: ['booking-summary'],
+    queryFn: () => api.get<BookingSummary>('/booking/summary').then((response) => response.data),
+    refetchInterval: 10000,
   });
 
   const stopMutation = useMutation({
@@ -305,6 +328,15 @@ export default function DashboardPage() {
           <SummaryCard label="Event buffer" value={events.length.toString()} icon={Terminal} />
         </section>
 
+        <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+          <SummaryCard label="Queued" value={(bookingSummary?.bookings.queued ?? 0).toString()} icon={ListChecks} compact />
+          <SummaryCard label="Running" value={(bookingSummary?.bookings.running ?? 0).toString()} icon={RefreshCcw} compact />
+          <SummaryCard label="Success today" value={(bookingSummary?.bookings.successToday ?? 0).toString()} icon={CheckCircle2} compact />
+          <SummaryCard label="Failed today" value={(bookingSummary?.bookings.failedToday ?? 0).toString()} icon={AlertTriangle} compact />
+          <SummaryCard label="Fresh accounts" value={`${bookingSummary?.accounts.fresh ?? 0}/${bookingSummary?.accounts.total ?? 0}`} icon={ShieldCheck} compact />
+          <SummaryCard label="Active profiles" value={(bookingSummary?.profiles.active ?? 0).toString()} icon={User} compact />
+        </section>
+
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <div>
@@ -422,15 +454,15 @@ export default function DashboardPage() {
   );
 }
 
-function SummaryCard({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Zap }) {
+function SummaryCard({ label, value, icon: Icon, compact = false }: { label: string; value: string; icon: typeof Zap; compact?: boolean }) {
   return (
-    <div className="card p-5 bg-card/60">
+    <div className={cn('card bg-card/60', compact ? 'p-4' : 'p-5')}>
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{label}</p>
-          <p className="mt-2 text-3xl font-black">{value}</p>
+          <p className={cn('mt-2 font-black', compact ? 'text-2xl' : 'text-3xl')}>{value}</p>
         </div>
-        <div className="rounded-xl bg-primary/10 p-3 text-primary">
+        <div className={cn('rounded-xl bg-primary/10 text-primary', compact ? 'p-2' : 'p-3')}>
           <Icon className="h-5 w-5" />
         </div>
       </div>

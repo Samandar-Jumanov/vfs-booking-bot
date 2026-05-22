@@ -2,7 +2,7 @@ import { Queue } from 'bullmq';
 import { env } from '@config/env';
 import { prisma } from '@config/database';
 import { BookingJobPayload } from '@t/index';
-import { BookingStatus, Priority } from '@prisma/client';
+import { BookingStatus, Prisma, Priority } from '@prisma/client';
 import { AppError } from '@middleware/errorHandler';
 
 const QUEUE_NAME = 'booking-queue';
@@ -60,9 +60,37 @@ export async function cancelBooking(jobId: string): Promise<void> {
   });
 }
 
-export async function getBookingHistory(opts: { profileId?: string; limit?: number; offset?: number }) {
-  const where = {
+export interface BookingHistoryOpts {
+  profileId?: string;
+  status?: BookingStatus;
+  destination?: string;
+  from?: string;
+  to?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function getBookingHistory(opts: BookingHistoryOpts) {
+  const fromDate = opts.from ? boundaryDate(opts.from, 'start') : undefined;
+  const toDate = opts.to ? boundaryDate(opts.to, 'end') : undefined;
+  const where: Prisma.BookingWhereInput = {
     ...(opts.profileId && { profileId: opts.profileId }),
+    ...(opts.status && { status: opts.status }),
+    ...(opts.destination && { destination: { equals: opts.destination, mode: 'insensitive' } }),
+    ...((opts.from || opts.to) && {
+      createdAt: {
+        ...(fromDate && { gte: fromDate }),
+        ...(toDate && { lte: toDate }),
+      },
+    }),
+    ...(opts.search && {
+      OR: [
+        { confirmationNo: { contains: opts.search, mode: 'insensitive' } },
+        { errorMessage: { contains: opts.search, mode: 'insensitive' } },
+        { profile: { fullName: { contains: opts.search, mode: 'insensitive' } } },
+      ],
+    }),
   };
 
   const [total, items] = await Promise.all([
@@ -77,4 +105,59 @@ export async function getBookingHistory(opts: { profileId?: string; limit?: numb
   ]);
 
   return { total, items };
+}
+
+function boundaryDate(value: string, boundary: 'start' | 'end') {
+  const date = new Date(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    date.setHours(boundary === 'start' ? 0 : 23, boundary === 'start' ? 0 : 59, boundary === 'start' ? 0 : 59, boundary === 'start' ? 0 : 999);
+  }
+  return date;
+}
+
+export async function getBookingSummary() {
+  const now = new Date();
+  const dayStart = new Date(now);
+  dayStart.setHours(0, 0, 0, 0);
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const [
+    activeProfiles,
+    totalAccounts,
+    freshAccounts,
+    queued,
+    running,
+    successToday,
+    failedToday,
+    bookings24h,
+    latest,
+  ] = await Promise.all([
+    prisma.profile.count({ where: { isActive: true } }),
+    prisma.vfsAccount.count(),
+    prisma.vfsAccount.count({
+      where: {
+        status: 'ACTIVE',
+        lastWarmedAt: { gte: new Date(Date.now() - 12 * 60 * 60 * 1000) },
+        cookieStore: { not: Prisma.JsonNull },
+      },
+    }),
+    prisma.booking.count({ where: { status: 'QUEUED' } }),
+    prisma.booking.count({ where: { status: 'RUNNING' } }),
+    prisma.booking.count({ where: { status: 'SUCCESS', completedAt: { gte: dayStart } } }),
+    prisma.booking.count({ where: { status: 'FAILED', completedAt: { gte: dayStart } } }),
+    prisma.booking.count({ where: { createdAt: { gte: since24h } } }),
+    prisma.booking.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 6,
+      include: { profile: { select: { fullName: true } } },
+    }),
+  ]);
+
+  return {
+    profiles: { active: activeProfiles },
+    accounts: { total: totalAccounts, fresh: freshAccounts },
+    bookings: { queued, running, successToday, failedToday, last24h: bookings24h },
+    latest,
+    generatedAt: now.toISOString(),
+  };
 }

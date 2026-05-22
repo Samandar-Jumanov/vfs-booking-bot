@@ -14,6 +14,7 @@ import {
   Navigation,
   Wallet,
   Cookie,
+  CalendarClock,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -22,6 +23,7 @@ const menuItems = [
   { group: 'Operations', items: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Monitor Setup', href: '/setup', icon: Activity },
+    { label: 'Bookings', href: '/bookings', icon: CalendarClock },
     { label: 'Activity Logs', href: '/logs', icon: Terminal },
   ]},
   { group: 'Records', items: [

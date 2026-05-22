@@ -61,7 +61,7 @@ export function resolveExtensionBooking(correlationId: string, result: Extension
  */
 export async function bookViaExtension(payload: BookingJobPayload): Promise<ExtensionBookingResult> {
   // 1. Pick an ACTIVE account with a fresh Datadome session.
-  const account = await getAvailableFreshAccount();
+  const account = await getAvailableFreshAccount(payload.profileId);
   if (!account) {
     return { success: false, reason: 'NO_COOKIE_FRESH_ACTIVE_ACCOUNTS' };
   }
@@ -137,7 +137,7 @@ export async function bookViaExtension(payload: BookingJobPayload): Promise<Exte
   return { ...result, accountEmail: account.email };
 }
 
-async function getAvailableFreshAccount(): Promise<VfsAccount | null> {
+async function getAvailableFreshAccount(profileId: string): Promise<VfsAccount | null> {
   const now = new Date();
   const staleCutoff = new Date(Date.now() - STALE_THRESHOLD_MS);
 
@@ -162,7 +162,8 @@ async function getAvailableFreshAccount(): Promise<VfsAccount | null> {
       AND    "lastWarmedAt" >= ${staleCutoff}
       AND    "cookieStore" IS NOT NULL
       AND    "cookieStore"::text ILIKE '%datadome%'
-      ORDER BY "lastUsedAt" ASC NULLS FIRST
+      ORDER BY CASE WHEN "profileIds" @> ARRAY[${profileId}]::text[] THEN 0 ELSE 1 END,
+               "lastUsedAt" ASC NULLS FIRST
       LIMIT  1
       FOR UPDATE SKIP LOCKED
     )
