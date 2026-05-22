@@ -17,6 +17,7 @@ import { enqueueBooking } from '@modules/booking/booking.service';
 import { emitToAll } from '@modules/websocket/ws.server';
 import { dispatchNotification } from '@modules/notifications/notification.service';
 import { sendTelegram } from '@modules/notifications/telegram.bot';
+import { loginAccount } from '@modules/accounts/accountLoginService';
 import { getProxy } from '@modules/proxy/proxy.service';
 import { setSetting } from '@modules/settings/settings.service';
 import { getRedis } from '@config/redis';
@@ -49,6 +50,7 @@ export interface MonitorState extends MonitorConfig {
   userAgent?: string;
   secChUa?: string;
   vfsLoginUser?: string;
+  vfsAccountId?: string;
   lastHttpStatus?: number;
   isCoolingDown?: boolean;
   lastEnqueuedAt?: number;
@@ -237,6 +239,7 @@ export function injectManualCookies(profileId: string, destination: string, cook
         cookiesSetAt: new Date(),
         cookiesValid: true,
         userAgent: userAgent || state.userAgent,
+        vfsAccountId: undefined,
       });
     }
   }
@@ -451,6 +454,7 @@ function makeHttpsAgent(proxyConfig: any): https.Agent {
 }
 
 async function getStoredVfsSession(profileIds: string[]): Promise<{
+  accountId: string;
   email: string;
   cookies: string[];
   userAgent?: string;
@@ -476,11 +480,61 @@ async function getStoredVfsSession(profileIds: string[]): Promise<{
   if (!session.hasDatadome || session.cookies.length === 0) return undefined;
 
   return {
+    accountId: account.id,
     email: account.email,
     cookies: session.cookies,
     userAgent: session.userAgent,
     lastWarmedAt: account.lastWarmedAt,
   };
+}
+
+async function getStoredVfsSessionByAccountId(accountId: string): Promise<{
+  accountId: string;
+  email: string;
+  cookies: string[];
+  userAgent?: string;
+  lastWarmedAt: Date;
+} | undefined> {
+  const account = await prisma.vfsAccount.findUnique({
+    where: { id: accountId },
+    select: { id: true, email: true, cookieStore: true, lastWarmedAt: true },
+  });
+  if (!account?.cookieStore || !account.lastWarmedAt) return undefined;
+
+  const session = extractStoredCookieSession(account.cookieStore);
+  if (!session.hasDatadome || session.cookies.length === 0) return undefined;
+
+  return {
+    accountId: account.id,
+    email: account.email,
+    cookies: session.cookies,
+    userAgent: session.userAgent,
+    lastWarmedAt: account.lastWarmedAt,
+  };
+}
+
+function makeSlotFetchError(status: number, rawText: string): Error & { response: { status: number } } {
+  const err = new Error(`Slot fetch HTTP ${status}: ${rawText.slice(0, 200)}`) as Error & { response: { status: number } };
+  err.response = { status };
+  return err;
+}
+
+async function markStoredAccountSessionStale(accountId: string, destination: string, reason: string): Promise<void> {
+  await prisma.vfsAccount.update({
+    where: { id: accountId },
+    data: { lastWarmedAt: null },
+  }).catch((err: any) => {
+    logEvent('warn', EventType.SESSION_EXPIRED, `[Monitor] Failed to mark VFS account stale ${accountId}: ${err.message}`);
+  });
+
+  logEvent('warn', EventType.SESSION_EXPIRED, `[Monitor] Stored VFS account session stale for ${accountId}/${destination}: ${reason}`);
+  emitToAll('VFS_ACCOUNT_SESSION_STALE', {
+    accountId,
+    destination,
+    reason,
+    timestamp: Date.now(),
+  });
+  await sendTelegram(`VFS_ACCOUNT_SESSION_STALE - ${accountId}/${destination}: ${reason}`).catch(() => {});
 }
 
 /**
@@ -513,6 +567,7 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
       cookiesSetAt: injected.setAt,
       cookiesValid: true,
       userAgent: injected.userAgent || state?.userAgent,
+      vfsAccountId: undefined,
     });
     return injected.cookies;
   }
@@ -527,6 +582,7 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
       cookiesValid: true,
       userAgent: stored.userAgent || state?.userAgent,
       vfsLoginUser: stored.email,
+      vfsAccountId: stored.accountId,
     });
     return stored.cookies;
   }
@@ -538,7 +594,7 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
     const proxyConfig = await getProxyConfig(id);
     const result = await warmSessionWithBrowser(sourceCode, destinationCode, credentials, proxyConfig as any);
     if (result?.cookies) {
-      setMonitor(id, { ...getMonitor(id)!, cookies: result.cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: result.userAgent, secChUa: result.secChUa, lastHttpStatus: 200 });
+      setMonitor(id, { ...getMonitor(id)!, cookies: result.cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: result.userAgent, secChUa: result.secChUa, vfsAccountId: undefined, lastHttpStatus: 200 });
       await savePersistedCookies(sessionProfileId, destinationCode, result.cookies.join('; '), result.userAgent, result.ltSnExpiresAt);
       // Start keep-alive so one login lasts ~8 hours
       const prev = keepAliveHandles.get(storeKey);
@@ -570,7 +626,7 @@ async function warmSession(id: string, sourceCode: string, destinationCode: stri
 
     const cookies = response.headers['set-cookie'];
     if (cookies) {
-      setMonitor(id, { ...getMonitor(id)!, cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: agent.ua, secChUa: agent.ch, lastHttpStatus: 200 });
+      setMonitor(id, { ...getMonitor(id)!, cookies, cookiesSetAt: new Date(), cookiesValid: true, userAgent: agent.ua, secChUa: agent.ch, vfsAccountId: undefined, lastHttpStatus: 200 });
       return cookies;
     }
   } catch (err: any) {
@@ -600,6 +656,67 @@ async function getVfsCredentials(profileIds: string[]): Promise<VfsCredentials |
   }
 
   return undefined;
+}
+
+async function retrySlotPollAfterStoredAccountLogin(args: {
+  monitorId: string;
+  accountId: string;
+  sourceCode: string;
+  destCode: string;
+  visaType: string;
+  profileIds: string[];
+  originalStatus: number;
+  originalRawText: string;
+  userAgent?: string;
+  loginUser?: string;
+  proxyUrl?: string;
+}): Promise<any> {
+  logEvent('warn', EventType.SESSION_EXPIRED,
+    `[Monitor] lift-api returned ${args.originalStatus} for stored VFS account ${args.accountId}; auto-login then retrying once`);
+
+  const loginResult = await loginAccount(args.accountId);
+  if (!loginResult.success) {
+    await markStoredAccountSessionStale(args.accountId, args.destCode, `auto-login failed: ${loginResult.reason}`);
+    throw makeSlotFetchError(args.originalStatus, args.originalRawText);
+  }
+
+  const refreshed = await getStoredVfsSessionByAccountId(args.accountId);
+  if (!refreshed) {
+    await markStoredAccountSessionStale(args.accountId, args.destCode, 'auto-login completed but no fresh stored cookies were available');
+    throw makeSlotFetchError(args.originalStatus, args.originalRawText);
+  }
+
+  const current = getMonitor(args.monitorId);
+  if (current) {
+    setMonitor(args.monitorId, {
+      ...current,
+      cookies: refreshed.cookies,
+      cookiesSetAt: refreshed.lastWarmedAt,
+      cookiesValid: true,
+      userAgent: refreshed.userAgent || current.userAgent,
+      vfsLoginUser: refreshed.email,
+      vfsAccountId: refreshed.accountId,
+    });
+  }
+
+  const retryResult = await fetchSlotsViaBrowser(
+    args.sourceCode,
+    args.destCode,
+    args.visaType,
+    refreshed.cookies,
+    refreshed.userAgent || args.userAgent,
+    {
+      profileId: args.profileIds[0] ?? '*',
+      loginUser: refreshed.email || args.loginUser,
+      proxyUrl: args.proxyUrl,
+    },
+  );
+
+  if (retryResult.status >= 400) {
+    await markStoredAccountSessionStale(args.accountId, args.destCode, `retry poll failed with HTTP ${retryResult.status}`);
+  }
+
+  return retryResult;
 }
 
 // --- Main Service Logic ---
@@ -766,19 +883,35 @@ export async function startMonitor(id: string): Promise<void> {
         }
       }
 
+      const retryConfig = getMonitor(id) ?? latestConfig;
+      if ((browserResult.status === 401 || browserResult.status === 403) && retryConfig.vfsAccountId) {
+        browserResult = await retrySlotPollAfterStoredAccountLogin({
+          monitorId: id,
+          accountId: retryConfig.vfsAccountId,
+          sourceCode,
+          destCode,
+          visaType: config.visaType,
+          profileIds: config.profileIds,
+          originalStatus: browserResult.status,
+          originalRawText: browserResult.rawText || '',
+          userAgent: retryConfig.userAgent,
+          loginUser: retryConfig.vfsLoginUser || creds?.email,
+          proxyUrl: proxyConfig?.url,
+        });
+      }
+
       if (browserResult.status >= 400) {
-        const err: any = new Error(`Slot fetch HTTP ${browserResult.status}: ${browserResult.rawText.slice(0, 200)}`);
-        err.response = { status: browserResult.status };
-        throw err;
+        throw makeSlotFetchError(browserResult.status, browserResult.rawText || '');
       }
 
       const slots = Array.isArray(browserResult.data) ? browserResult.data : [];
       const count = slots.length;
       const signature = buildSlotSignature(slots);
       const previousSignature = config.lastSlotSignature || '';
+      const successConfig = getMonitor(id) ?? config;
 
       setMonitor(id, {
-        ...config,
+        ...successConfig,
         slotDetectedCount: count,
         lastCheckedAt: new Date(),
         lastHttpStatus: 200,
@@ -864,7 +997,7 @@ export async function startMonitor(id: string): Promise<void> {
       // 402 = VFS rejected our session (not authenticated). Invalidate cookies and retry quickly.
       if (status === 402) {
         logEvent('warn', EventType.IP_BLOCKED, `[Monitor] 402 Auth Required for ${config.destination} — session invalidated, re-warming in 30s`);
-        setMonitor(id, { ...config, cookiesValid: false, cookies: undefined, lastCheckedAt: new Date(), lastHttpStatus: 402 });
+        setMonitor(id, { ...config, cookiesValid: false, cookies: undefined, vfsAccountId: undefined, lastCheckedAt: new Date(), lastHttpStatus: 402 });
         const retryPoll = setTimeout(poll, 30000);
         monitorTimeouts.set(id, retryPoll);
         return;
