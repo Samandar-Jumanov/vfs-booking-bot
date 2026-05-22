@@ -24,6 +24,21 @@ jest.mock('@config/database', () => ({
   },
 }));
 
+const redisStore = new Map<string, string>();
+jest.mock('@config/redis', () => ({
+  getRedis: jest.fn(() => ({
+    set: jest.fn(async (key: string, value: string) => {
+      redisStore.set(key, value);
+      return 'OK';
+    }),
+    get: jest.fn(async (key: string) => redisStore.get(key) ?? null),
+    del: jest.fn(async (key: string) => {
+      const deleted = redisStore.delete(key);
+      return deleted ? 1 : 0;
+    }),
+  })),
+}));
+
 const dispatchNotification = jest.fn().mockResolvedValue(undefined);
 jest.mock('@modules/notifications/notification.service', () => ({
   dispatchNotification: (...args: unknown[]) => dispatchNotification(...args),

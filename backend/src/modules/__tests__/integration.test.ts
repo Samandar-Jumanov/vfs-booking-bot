@@ -115,10 +115,11 @@ const waitForSelectorMock = jest.fn(async (selector: string) => ({
 }));
 
 const pageMock = {
-  url: jest.fn(() => 'https://visa.vfsglobal.com/uzb/en/lva/schedule-appointment'),
+  url: jest.fn(() => 'https://visa.vfsglobal.com/uzb/en/lva/dashboard'),
   goto: jest.fn().mockResolvedValue(undefined),
   close: jest.fn().mockResolvedValue(undefined),
   screenshot: jest.fn().mockResolvedValue(undefined),
+  waitForLoadState: jest.fn().mockResolvedValue(undefined),
   waitForResponse: jest.fn().mockRejectedValue(new Error('Timeout 30000ms exceeded')),
   waitForSelector: waitForSelectorMock,
   click: jest.fn(async (selector: string) => {
@@ -127,9 +128,29 @@ const pageMock = {
   keyboard: { type: jest.fn().mockResolvedValue(undefined) },
   selectOption: jest.fn().mockResolvedValue(undefined),
   $: jest.fn().mockResolvedValue({}),
+  getByText: jest.fn(() => ({
+    first: jest.fn(() => ({
+      click: jest.fn().mockResolvedValue(undefined),
+    })),
+  })),
   locator: jest.fn((selector: string) => {
     if (selector === 'body') {
       return { innerText: jest.fn().mockResolvedValue('Review your appointment details') };
+    }
+    if (
+      selector.includes('Start New Booking') ||
+      selector.includes('Tashkent') ||
+      selector.includes('mat-calendar') ||
+      selector.includes('.mat-calendar')
+    ) {
+      return {
+        count: jest.fn().mockResolvedValue(1),
+        first: jest.fn(() => ({
+          count: jest.fn().mockResolvedValue(1),
+          click: jest.fn().mockResolvedValue(undefined),
+          waitFor: jest.fn().mockResolvedValue(undefined),
+        })),
+      };
     }
     if (selector.includes('slotTimeButton') || selector.includes('mat-radio-button') || selector.includes('.time-slot-option')) {
       return {
@@ -150,6 +171,7 @@ const pageMock = {
     return {
       count: jest.fn().mockResolvedValue(0),
       first: jest.fn(() => ({
+        count: jest.fn().mockResolvedValue(0),
         innerText: jest.fn().mockResolvedValue(''),
         click: jest.fn().mockResolvedValue(undefined),
       })),
