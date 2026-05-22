@@ -20,6 +20,7 @@ import { startBookingWorker, stopBookingWorker } from '@modules/booking/booking.
 import { initTelegramBot } from '@modules/notifications/telegram.bot';
 import { startNotificationQueues, stopNotificationQueues } from '@modules/notifications/queues';
 import { startCaptchaPoolSweeper } from '@modules/captcha/token.pool';
+import { startAccountLoginCron } from '@modules/accounts/accountLoginService';
 
 
 async function bootstrap() {
@@ -46,6 +47,9 @@ async function bootstrap() {
 
   startCaptchaPoolSweeper();
   console.info('✅ Captcha token pool sweeper running');
+
+  startAccountLoginCron();
+  console.info('Account auto-login cron scheduled');
 
   // Interactive Telegram Bot
   initTelegramBot();

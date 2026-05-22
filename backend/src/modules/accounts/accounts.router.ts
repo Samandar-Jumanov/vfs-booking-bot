@@ -7,6 +7,8 @@ import { prisma } from '@config/database';
 import { decrypt, encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
 import { autoRegisterAccount, fetchEmailVerificationLink, visitActivationLink } from './accountAutoRegister.service';
+import { accountBatchService } from './accountBatch.service';
+import { loginAccount } from './accountLoginService';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
 import { AccountStatus, EventType } from '@prisma/client';
@@ -25,6 +27,14 @@ const createAccountSchema = z.object({
 
 const cooldownSchema = z.object({
   minutes: z.number().int().positive(),
+});
+
+const autoCreateBatchSchema = z.object({
+  count: z.coerce.number().int().min(1).max(100),
+  spacingSeconds: z.coerce.number().int().min(0).max(1800).default(300),
+  source: z.string().min(1).default('uzb'),
+  destination: z.string().min(1).default('lva'),
+  countryCode: z.string().min(1).default('171'),
 });
 
 const PENDING_STATUS = 'PENDING' as AccountStatus;
@@ -210,6 +220,16 @@ accountsRouter.put('/:id/cooldown', async (req: Request, res: Response, next: Ne
   }
 });
 
+accountsRouter.post('/:id/auto-login', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const result = await loginAccount(req.params.id);
+    res.status(result.success ? 200 : 409).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── GET /api/accounts/warmup-status ──────────────────────────────────────────
 /**
  * Operator-facing pool warmup view. Returns each account with cookie freshness
@@ -312,6 +332,44 @@ accountsRouter.post('/auto-create', async (req: Request, res: Response, next: Ne
     const message = err instanceof Error ? err.message : String(err);
     logEvent('error', EventType.BOOKING_FAILED, `auto-register threw: ${message}`);
     res.status(500).json({ success: false, error: message });
+  }
+});
+
+accountsRouter.post('/auto-create-batch', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const body = autoCreateBatchSchema.parse(req.body ?? {});
+    const batch = accountBatchService.startBatch({
+      count: body.count,
+      source: body.source,
+      destination: body.destination,
+      countryCode: body.countryCode,
+      spacingSeconds: body.spacingSeconds,
+      operatorUserId: req.user.id,
+    });
+
+    logEvent('info', EventType.BOOKING_ATTEMPT, 'VFS auto-register batch queued', {
+      batchId: batch.batchId,
+      count: body.count,
+      spacingSeconds: body.spacingSeconds,
+    });
+
+    res.status(202).json(batch);
+  } catch (err) {
+    next(err);
+  }
+});
+
+accountsRouter.post('/auto-create-batch/:batchId/cancel', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const batch = accountBatchService.cancelBatch(req.params.batchId, req.user.id);
+    if (!batch) {
+      throw new AppError(404, `Auto-create batch "${req.params.batchId}" not found`, 'NOT_FOUND');
+    }
+    res.json(batch);
+  } catch (err) {
+    next(err);
   }
 });
 

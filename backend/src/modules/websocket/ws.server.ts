@@ -72,6 +72,10 @@ export function emitToAll(event: string, data: unknown): void {
   getIo().emit(event, data);
 }
 
+export function emitToUser(userId: string, event: string, data: unknown): void {
+  getIo().to(`user:${userId}`).emit(event, data);
+}
+
 export function sendToExtension(customerId: string, payload: unknown): boolean {
   const connection = extensionConnections.get(customerId);
   if (!connection) return false;

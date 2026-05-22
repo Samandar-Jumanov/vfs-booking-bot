@@ -29,6 +29,7 @@ void chrome.storage.local.get({ runtimeState: null }).then((stored) => {
   }
 });
 const activeRegisterTabs = new Map<string, number>();
+const activeLoginTabs = new Map<string, number>();
 
 // MV3 idle-kills service workers in ~30s. We arm two recurring alarms so
 // the SW is woken on a fixed cadence — keeps the WS reconnect logic alive
@@ -204,7 +205,10 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_REGISTER_NEED_SMS_OTP' ||
     message.type === 'EXT_REGISTER_NEED_CAPTCHA' ||
     message.type === 'EXT_REGISTER_COMPLETED' ||
-    message.type === 'EXT_REGISTER_FAILED'
+    message.type === 'EXT_REGISTER_FAILED' ||
+    message.type === 'EXT_LOGIN_NEED_CAPTCHA' ||
+    message.type === 'EXT_LOGIN_SUCCESS' ||
+    message.type === 'EXT_LOGIN_FAILED'
   ) {
     sendEvent(message as ExtensionEvent);
     return { ok: true };
@@ -238,6 +242,14 @@ async function connectFromStoredSettings(): Promise<void> {
 }
 
 function handleBackendMessage(message: BackendMessage): void {
+  if (message.type === 'BG_LOGIN_VFS_ACCOUNT') {
+    void runLoginFlow(message);
+    return;
+  }
+  if (message.type === 'BG_LOGIN_CAPTCHA_TOKEN') {
+    forwardToActiveLoginTab(message.correlationId, { type: 'LOGIN_CAPTCHA_TOKEN', token: message.token });
+    return;
+  }
   if (message.type === 'BG_REGISTER_VFS_ACCOUNT') {
     void runRegisterFlow(message);
     return;
@@ -281,6 +293,36 @@ function handleBackendMessage(message: BackendMessage): void {
   }
 }
 
+async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_ACCOUNT' }>): Promise<void> {
+  try {
+    const tab = await chrome.tabs.create({ url: msg.loginUrl, active: true } as { url: string });
+    if (!tab.id) {
+      sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_CREATE_FAILED' });
+      return;
+    }
+    activeLoginTabs.set(msg.correlationId, tab.id);
+    setTimeout(() => {
+      chrome.tabs.sendMessage(tab.id!, {
+        type: 'LOGIN_FILL_FORM',
+        payload: {
+          email: msg.email,
+          password: msg.password,
+          correlationId: msg.correlationId,
+        },
+      }).catch((err: Error) => {
+        sendEvent({
+          type: 'EXT_LOGIN_FAILED',
+          correlationId: msg.correlationId,
+          email: msg.email,
+          reason: 'CONTENT_SCRIPT_UNREACHABLE: ' + err.message,
+        });
+      });
+    }, 6000);
+  } catch (err) {
+    sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: (err as Error).message });
+  }
+}
+
 async function runRegisterFlow(msg: Extract<BackendMessage, { type: 'BG_REGISTER_VFS_ACCOUNT' }>): Promise<void> {
   try {
     const tab = await chrome.tabs.create({ url: msg.registerUrl, active: true } as { url: string });
@@ -317,6 +359,12 @@ async function runRegisterFlow(msg: Extract<BackendMessage, { type: 'BG_REGISTER
 
 function forwardToActiveRegisterTab(correlationId: string, payload: { type: string; [key: string]: unknown }): void {
   const tabId = activeRegisterTabs.get(correlationId);
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, payload).catch(() => undefined);
+}
+
+function forwardToActiveLoginTab(correlationId: string, payload: { type: string; [key: string]: unknown }): void {
+  const tabId = activeLoginTabs.get(correlationId);
   if (!tabId) return;
   chrome.tabs.sendMessage(tabId, payload).catch(() => undefined);
 }
@@ -486,6 +534,15 @@ function sendEvent(event: ExtensionEvent): void {
   }
   if (event.type === 'EXT_REGISTER_COMPLETED' || event.type === 'EXT_REGISTER_FAILED') {
     activeRegisterTabs.delete(event.correlationId);
+  }
+  if (event.type === 'EXT_LOGIN_SUCCESS' || event.type === 'EXT_LOGIN_FAILED') {
+    const tabId = activeLoginTabs.get(event.correlationId);
+    activeLoginTabs.delete(event.correlationId);
+    if (tabId) {
+      self.setTimeout(() => {
+        chrome.tabs.remove(tabId).catch(() => undefined);
+      }, 5000);
+    }
   }
   wsClient?.send(event);
 }

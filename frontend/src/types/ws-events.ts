@@ -10,6 +10,7 @@ export const WS_EVENTS = {
   MONITOR_DEAD: 'MONITOR_DEAD',
   LOG_ENTRY: 'LOG_ENTRY',
   MONITOR_STATUS: 'MONITOR_STATUS',
+  BATCH_PROGRESS: 'BATCH_PROGRESS',
   CAPTCHA_SOLVED: 'CAPTCHA_SOLVED',
 } as const;
 
@@ -53,6 +54,27 @@ export interface BookingProgressPayload {
   jobId?: string | number;
   profileId?: string;
   status?: string;
+}
+
+export interface BatchProgressPayload {
+  batchId: string;
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'CANCELLED';
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  spacingSeconds: number;
+  nextSpacingSeconds: number;
+  cancelRequested: boolean;
+  lastResult?: {
+    index: number;
+    ok: boolean;
+    accountId?: string;
+    email?: string;
+    reason?: string;
+  };
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 export interface CaptchaManualNeededPayload {

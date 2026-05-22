@@ -1,11 +1,13 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2, RefreshCw, Eye, Copy, X } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { addWebSocketListener } from '@/hooks/useWebSocket';
+import type { BatchProgressPayload } from '@/types/ws-events';
 
 interface PoolItem {
   id: string;
@@ -38,6 +40,11 @@ interface PoolResponse {
 export default function AccountPoolPage() {
   const qc = useQueryClient();
   const [revealed, setRevealed] = useState<{ accountId: string; email: string; password: string } | null>(null);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchCount, setBatchCount] = useState(5);
+  const [batchSpacingSeconds, setBatchSpacingSeconds] = useState(300);
+  const [batchProgress, setBatchProgress] = useState<BatchProgressPayload | null>(null);
+  const [batchMsg, setBatchMsg] = useState<string | null>(null);
 
   const poolQuery = useQuery<PoolResponse>({
     queryKey: ['account-pool'],
@@ -69,6 +76,34 @@ export default function AccountPoolPage() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['account-pool'] }),
   });
 
+  const batchCreateMutation = useMutation({
+    mutationFn: () =>
+      api.post<BatchProgressPayload>('/accounts/auto-create-batch', {
+        count: batchCount,
+        spacingSeconds: batchSpacingSeconds,
+        source: 'uzb',
+        destination: 'lva',
+        countryCode: '171',
+      }).then((r) => r.data),
+    onSuccess: (data) => {
+      setBatchProgress(data);
+      setBatchMsg(null);
+      setBatchOpen(false);
+    },
+    onError: (err: any) => {
+      const reason = err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
+      setBatchMsg(`Failed: ${reason}`);
+    },
+  });
+
+  const cancelBatchMutation = useMutation({
+    mutationFn: (batchId: string) => api.post<BatchProgressPayload>(`/accounts/auto-create-batch/${batchId}/cancel`).then((r) => r.data),
+    onSuccess: (data) => {
+      setBatchProgress(data);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
+  });
+
   const [retryMsg, setRetryMsg] = useState<string | null>(null);
   const retryActivationMutation = useMutation({
     mutationFn: (accountId: string) =>
@@ -80,6 +115,20 @@ export default function AccountPoolPage() {
     onError: (err: any) => {
       const reason = err?.response?.data?.reason ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
       setRetryMsg(`Failed: ${reason}`);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
+  });
+
+  const [autoLoginMsg, setAutoLoginMsg] = useState<string | null>(null);
+  const autoLoginMutation = useMutation({
+    mutationFn: (accountId: string) => api.post(`/accounts/${accountId}/auto-login`).then((r) => r.data),
+    onSuccess: (data) => {
+      setAutoLoginMsg(data?.success ? `Warmed ${data.email}` : `Failed: ${data?.reason ?? 'unknown'}`);
+      qc.invalidateQueries({ queryKey: ['account-pool'] });
+    },
+    onError: (err: any) => {
+      const reason = err?.response?.data?.reason ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
+      setAutoLoginMsg(`Failed: ${reason}`);
       qc.invalidateQueries({ queryKey: ['account-pool'] });
     },
   });
@@ -112,6 +161,15 @@ export default function AccountPoolPage() {
   const items = poolQuery.data?.items ?? [];
 
   const staleAccounts = useMemo(() => items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh), [items]);
+
+  useEffect(() => {
+    return addWebSocketListener<BatchProgressPayload>('BATCH_PROGRESS', (data) => {
+      setBatchProgress((current) => current && current.batchId !== data.batchId ? current : data);
+      if (data.completed > 0 || data.status === 'COMPLETED' || data.status === 'CANCELLED') {
+        qc.invalidateQueries({ queryKey: ['account-pool'] });
+      }
+    });
+  }, [qc]);
 
   const revealPasswordMutation = useMutation({
     mutationFn: (account: PoolItem) =>
@@ -159,11 +217,19 @@ export default function AccountPoolPage() {
         <button
           type="button"
           className="btn-primary h-10 gap-2"
+          onClick={() => { setBatchMsg(null); setBatchOpen(true); }}
+        >
+          <Plus className="h-4 w-4" />
+          Create accounts
+        </button>
+        <button
+          type="button"
+          className="btn-secondary h-10 gap-2"
           onClick={() => { setAutoCreateMsg(null); autoCreateMutation.mutate(); }}
           disabled={autoCreateMutation.isPending}
         >
           {autoCreateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-          {autoCreateMutation.isPending ? 'Auto-creating…' : 'Auto-create VFS account'}
+          {autoCreateMutation.isPending ? 'Auto-creating...' : 'Auto-create one'}
         </button>
         <button
           type="button"
@@ -185,13 +251,60 @@ export default function AccountPoolPage() {
         {autoCreateMsg && (
           <span className={`text-sm ${autoCreateMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{autoCreateMsg}</span>
         )}
+        {batchMsg && (
+          <span className={`text-sm ${batchMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{batchMsg}</span>
+        )}
         {manualMsg && (
           <span className={`text-sm ${manualMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{manualMsg}</span>
         )}
         {retryMsg && (
           <span className={`text-sm ${retryMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{retryMsg}</span>
         )}
+        {autoLoginMsg && (
+          <span className={`text-sm ${autoLoginMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{autoLoginMsg}</span>
+        )}
       </div>
+      {batchProgress && (
+        <div className="card mt-4 bg-card/70 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Batch auto-create</p>
+              <h3 className="mt-1 text-lg font-black">
+                {batchProgress.completed}/{batchProgress.total} complete
+              </h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {batchProgress.succeeded} succeeded, {batchProgress.failed} failed
+                {batchProgress.status === 'RUNNING' ? `, next spacing ${batchProgress.nextSpacingSeconds}s` : ''}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <BatchStatusBadge status={batchProgress.status} />
+              {(batchProgress.status === 'QUEUED' || batchProgress.status === 'RUNNING') && (
+                <button
+                  type="button"
+                  className="btn-danger h-9 gap-2"
+                  onClick={() => cancelBatchMutation.mutate(batchProgress.batchId)}
+                  disabled={cancelBatchMutation.isPending}
+                >
+                  {cancelBatchMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="mt-4 h-2 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full bg-primary transition-all"
+              style={{ width: `${batchProgress.total ? (batchProgress.completed / batchProgress.total) * 100 : 0}%` }}
+            />
+          </div>
+          {batchProgress.lastResult && (
+            <p className={`mt-3 text-sm ${batchProgress.lastResult.ok ? 'text-green-500' : 'text-red-500'}`}>
+              #{batchProgress.lastResult.index}: {batchProgress.lastResult.ok ? `Created ${batchProgress.lastResult.email}` : `Failed: ${batchProgress.lastResult.reason ?? 'unknown'}`}
+            </p>
+          )}
+        </div>
+      )}
       {manualOpen && (
         <div className="card mt-4 p-4">
           <h3 className="mb-3 font-semibold">Add existing VFS account</h3>
@@ -240,6 +353,61 @@ export default function AccountPoolPage() {
             >
               Cancel
             </button>
+          </div>
+        </div>
+      )}
+
+      {batchOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold">Create VFS accounts</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Queued sequentially. Default spacing is 300 seconds.</p>
+              </div>
+              <button type="button" className="btn-secondary h-8 w-8 p-0" onClick={() => setBatchOpen(false)} aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3">
+              <label className="text-xs font-bold text-muted-foreground">
+                Count
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={batchCount}
+                  onChange={(e) => setBatchCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+                  className="input mt-1 h-10 w-full"
+                />
+              </label>
+              <label className="text-xs font-bold text-muted-foreground">
+                Spacing seconds
+                <input
+                  type="number"
+                  min={0}
+                  max={1800}
+                  step={30}
+                  value={batchSpacingSeconds}
+                  onChange={(e) => setBatchSpacingSeconds(Math.max(0, Math.min(1800, Number(e.target.value) || 0)))}
+                  className="input mt-1 h-10 w-full"
+                />
+              </label>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="btn-secondary h-9" onClick={() => setBatchOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary h-9 gap-2"
+                onClick={() => batchCreateMutation.mutate()}
+                disabled={batchCreateMutation.isPending}
+              >
+                {batchCreateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Queue batch
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -353,6 +521,19 @@ export default function AccountPoolPage() {
                     <button
                       type="button"
                       className="btn-secondary h-8 gap-1.5 text-xs"
+                      onClick={() => { setAutoLoginMsg(null); autoLoginMutation.mutate(a.id); }}
+                      disabled={autoLoginMutation.isPending && autoLoginMutation.variables === a.id}
+                    >
+                      {autoLoginMutation.isPending && autoLoginMutation.variables === a.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      Auto-login
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 gap-1.5 text-xs"
                       onClick={() => revealPasswordMutation.mutate(a)}
                       disabled={revealPasswordMutation.isPending && revealPasswordMutation.variables?.id === a.id}
                     >
@@ -412,6 +593,16 @@ function StatusBadge({ status }: { status: PoolItem['status'] }) {
     ACTIVE: 'bg-green-500/15 text-green-500',
     BLOCKED: 'bg-red-500/15 text-red-500',
     COOLDOWN: 'bg-blue-500/15 text-blue-500',
+  } as const;
+  return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', map[status])}>{status}</span>;
+}
+
+function BatchStatusBadge({ status }: { status: BatchProgressPayload['status'] }) {
+  const map = {
+    QUEUED: 'bg-amber-500/15 text-amber-500',
+    RUNNING: 'bg-blue-500/15 text-blue-500',
+    COMPLETED: 'bg-green-500/15 text-green-500',
+    CANCELLED: 'bg-red-500/15 text-red-500',
   } as const;
   return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', map[status])}>{status}</span>;
 }

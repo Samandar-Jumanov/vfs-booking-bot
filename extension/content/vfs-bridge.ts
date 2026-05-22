@@ -3,6 +3,7 @@ import type {
   ContentCommand,
   CustomerBookingPayload,
   ExtensionEvent,
+  LoginFormPayload,
   MonitorConfig,
   PollSlotResult,
   RegisterFormPayload,
@@ -46,6 +47,13 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
       resolveRegisterWaiter('captchaToken', command.token);
       void applyRegisterCaptchaToken(command.token);
       return { ok: true };
+    case 'LOGIN_FILL_FORM':
+      void handleLoginFlow(command.payload);
+      return { ok: true };
+    case 'LOGIN_CAPTCHA_TOKEN':
+      resolveRegisterWaiter('loginCaptchaToken', command.token);
+      void applyRegisterCaptchaToken(command.token);
+      return { ok: true };
     case 'POLL_SLOT':
       return pollSlot(command.monitor);
     case 'FILL_FORM':
@@ -57,6 +65,72 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
     default:
       throw new Error('Unsupported content command');
   }
+}
+
+async function handleLoginFlow(payload: LoginFormPayload): Promise<void> {
+  currentCorrelationId = payload.correlationId;
+  try {
+    await withTimeout(runLoginSteps(payload), 90_000, 'LOGIN_TIMEOUT');
+  } catch (error) {
+    await emitLoginEvent({
+      type: 'EXT_LOGIN_FAILED',
+      correlationId: payload.correlationId,
+      email: payload.email,
+      reason: (error as Error).message,
+    });
+  }
+}
+
+async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
+  await waitForElement(
+    'input[type="email"], input[formcontrolname="emailid"], input[name="emailid"], input[formcontrolname="username"]',
+    30_000,
+  ).catch(() => undefined);
+
+  await typeIntoFirst([
+    'input[formcontrolname="emailid"]',
+    'input[name="emailid"]',
+    'input[formcontrolname="username"]',
+    'input[name="username"]',
+    'input[id*="email" i]',
+    'input[type="email"]',
+    'input[name="email"]',
+  ], payload.email);
+  await typeIntoFirst([
+    'input[type="password"]',
+    'input[formcontrolname="password"]',
+    'input[name="password"]',
+  ], payload.password);
+
+  const turnstile = document.querySelector<HTMLElement>('[data-sitekey], .cf-turnstile');
+  const siteKey = turnstile?.getAttribute('data-sitekey');
+  if (siteKey) {
+    await emitLoginEvent({
+      type: 'EXT_LOGIN_NEED_CAPTCHA',
+      correlationId: payload.correlationId,
+      siteKey,
+      pageUrl: window.location.href,
+    });
+    const token = await waitForRegisterSignal('loginCaptchaToken', 75_000);
+    if (!token) throw new Error('LOGIN_CAPTCHA_TOKEN_MISSING');
+    await applyRegisterCaptchaToken(token);
+  }
+
+  const initialUrl = window.location.href;
+  const button = await waitUntil(() => findLoginButton(), 30_000);
+  const clicked = await trustedClick(button);
+  if (!clicked) throw new Error('LOGIN_TRUSTED_CLICK_FAILED');
+
+  await waitUntil(() => isLoginSuccess(initialUrl) || isLoginFailureVisible(), 45_000);
+  if (isLoginFailureVisible()) throw new Error(readLoginFailureReason());
+
+  await syncSessionToBackend();
+  await emitLoginEvent({
+    type: 'EXT_LOGIN_SUCCESS',
+    correlationId: payload.correlationId,
+    email: payload.email,
+    url: window.location.href,
+  });
 }
 
 async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
@@ -941,6 +1015,43 @@ function findButtonByText(words: string[]): HTMLElement | null {
     }) ?? null;
 }
 
+function findLoginButton(): HTMLElement | null {
+  return findButtonByText(['sign in', 'login', 'log in', 'continue']) ??
+    document.querySelector<HTMLElement>('button[type="submit"], input[type="submit"]');
+}
+
+function isLoginSuccess(initialUrl: string): boolean {
+  const url = window.location.href.toLowerCase();
+  const text = document.body.innerText.toLowerCase();
+  if (url !== initialUrl.toLowerCase() && !url.includes('/login')) return true;
+  return url.includes('/dashboard') ||
+    url.includes('/account') ||
+    text.includes('dashboard') ||
+    text.includes('logout') ||
+    text.includes('sign out') ||
+    text.includes('book an appointment') ||
+    text.includes('schedule appointment');
+}
+
+function isLoginFailureVisible(): boolean {
+  const text = document.body.innerText.toLowerCase();
+  return text.includes('invalid') ||
+    text.includes('incorrect') ||
+    text.includes('login failed') ||
+    text.includes('sign in failed') ||
+    text.includes('mandatory field') ||
+    text.includes('try again later');
+}
+
+function readLoginFailureReason(): string {
+  const errors = Array.from(document.querySelectorAll<HTMLElement>(
+    '.error, .mat-error, .invalid-feedback, [class*="error" i], [role="alert"]',
+  ))
+    .map((element) => element.innerText.trim())
+    .filter((text) => text.length > 0 && text.length < 200);
+  return errors[0] || 'LOGIN_FAILED';
+}
+
 function isEmailVerificationStep(): boolean {
   const text = document.body.innerText.toLowerCase();
   // Look for any signal that VFS accepted the registration and is showing
@@ -1123,6 +1234,10 @@ async function trustedKey(key: string): Promise<boolean> {
 }
 
 async function emitRegisterEvent(event: ExtensionEvent): Promise<void> {
+  await chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+async function emitLoginEvent(event: ExtensionEvent): Promise<void> {
   await chrome.runtime.sendMessage(event).catch(() => undefined);
 }
 

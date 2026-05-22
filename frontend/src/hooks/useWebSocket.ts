@@ -20,6 +20,23 @@ import type {
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? '';
 
 let socket: Socket | null = null;
+const listenerRegistry = new Map<string, Set<(data: any) => void>>();
+
+export function addWebSocketListener<T = unknown>(event: string, handler: (data: T) => void) {
+  let handlers = listenerRegistry.get(event);
+  if (!handlers) {
+    handlers = new Set();
+    listenerRegistry.set(event, handlers);
+  }
+  handlers.add(handler as (data: any) => void);
+  socket?.on(event, handler as (data: any) => void);
+
+  return () => {
+    handlers?.delete(handler as (data: any) => void);
+    socket?.off(event, handler as (data: any) => void);
+    if (handlers?.size === 0) listenerRegistry.delete(event);
+  };
+}
 
 function destinationLabel(destination?: string) {
   return destination ? destination.toUpperCase() : 'unknown destination';
@@ -49,6 +66,9 @@ export function useWebSocket() {
 
     socket.on('connect', () => { connected.current = true; });
     socket.on('disconnect', () => { connected.current = false; });
+    listenerRegistry.forEach((handlers, event) => {
+      handlers.forEach((handler) => socket?.on(event, handler));
+    });
 
     socket.on('SLOT_DETECTED', (data: SlotDetectedPayload) => {
       const slots: SlotInfo[] = data.slots?.length

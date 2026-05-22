@@ -137,6 +137,7 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   if (event.type && !['EXT_HEARTBEAT', 'EXT_SESSION_SYNC', 'EXT_SLOT_DETECTED',
     'EXT_SESSION_LOST', 'EXT_REGISTER_NEED_EMAIL_LINK', 'EXT_REGISTER_NEED_SMS_OTP',
     'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_SUBMITTED', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
+    'EXT_LOGIN_NEED_CAPTCHA', 'EXT_LOGIN_SUCCESS', 'EXT_LOGIN_FAILED',
     'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT'].includes(String(event.type))) {
     const { logEvent } = await import('@modules/logs/logger');
     const { EventType } = await import('@prisma/client');
@@ -270,6 +271,28 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   }
 
   // ── Auto-register bridge events ──────────────────────────────────────────
+  if (event.type === 'EXT_LOGIN_NEED_CAPTCHA' && typeof event.correlationId === 'string') {
+    const { handleLoginNeedsCaptcha } = await import('@modules/accounts/accountLoginService');
+    await handleLoginNeedsCaptcha(customerId, {
+      correlationId: event.correlationId,
+      siteKey: String(event.siteKey ?? ''),
+      pageUrl: String(event.pageUrl ?? ''),
+    });
+    return;
+  }
+
+  if (event.type === 'EXT_LOGIN_SUCCESS' && typeof event.correlationId === 'string') {
+    const { resolveLoginSuccess } = await import('@modules/accounts/accountLoginService');
+    await resolveLoginSuccess(event.correlationId);
+    return;
+  }
+
+  if (event.type === 'EXT_LOGIN_FAILED' && typeof event.correlationId === 'string') {
+    const { resolveLoginFailed } = await import('@modules/accounts/accountLoginService');
+    resolveLoginFailed(event.correlationId, String(event.reason ?? 'EXT_LOGIN_FAILED'));
+    return;
+  }
+
   // Extension asks backend for a verification link (poll Mailsac inbox).
   if (event.type === 'EXT_REGISTER_NEED_EMAIL_LINK' && typeof event.correlationId === 'string') {
     const { logEvent } = await import('@modules/logs/logger');
