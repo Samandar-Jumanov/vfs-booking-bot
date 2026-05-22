@@ -2,18 +2,27 @@ import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '@middleware/auth.middleware';
 import { validate } from '@middleware/validate.middleware';
-import { createProfileSchema, submitOtpSchema, updateProfileSchema } from './profiles.schema';
+import {
+  createProfileSchema,
+  onboardProfileSchema,
+  submitOtpSchema,
+  updateProfileAccountsSchema,
+  updateProfileSchema,
+} from './profiles.schema';
 import {
   listProfiles,
   getProfile,
   createProfile,
+  onboardProfile,
   updateProfile,
   deleteProfile,
   bulkUpload,
+  extractPassport,
   submitOtp,
+  updateProfileAccounts,
 } from './profiles.controller';
 
-const upload = multer({
+const bulkUploadStorage = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (_req, file, cb) => {
@@ -26,7 +35,18 @@ const upload = multer({
   },
 });
 
+const passportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    cb(null, ['image/jpeg', 'image/png'].includes(file.mimetype));
+  },
+});
+
 export const profilesRouter = Router();
+
+profilesRouter.post('/extract-passport', passportUpload.single('file'), extractPassport);
+profilesRouter.post('/onboard', validate(onboardProfileSchema), onboardProfile);
 
 profilesRouter.use(requireAuth);
 
@@ -34,6 +54,7 @@ profilesRouter.get('/', listProfiles);
 profilesRouter.get('/:id', getProfile);
 profilesRouter.post('/', validate(createProfileSchema), createProfile);
 profilesRouter.post('/:id/submit-otp', validate(submitOtpSchema), submitOtp);
+profilesRouter.put('/:id/accounts', validate(updateProfileAccountsSchema), updateProfileAccounts);
 profilesRouter.put('/:id', validate(updateProfileSchema), updateProfile);
 profilesRouter.delete('/:id', deleteProfile);
-profilesRouter.post('/bulk-upload', upload.single('file'), bulkUpload);
+profilesRouter.post('/bulk-upload', bulkUploadStorage.single('file'), bulkUpload);

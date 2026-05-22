@@ -84,6 +84,7 @@ model User {
 
 model Profile {
   id                String    @id @default(cuid())
+  statusToken       String    @unique
   fullName          String
   passportNumberEnc String // AES-256-GCM encrypted
   dobEnc            String // AES-256-GCM encrypted

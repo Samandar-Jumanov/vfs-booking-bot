@@ -21,6 +21,7 @@ import axios from 'axios';
 import { prisma } from '../src/config/database';
 import { signExtensionToken } from '../src/utils/jwt';
 import { encrypt } from '../src/utils/crypto';
+import { createProfile } from '../src/modules/profiles/profiles.service';
 
 const BASE = 'http://localhost:3001';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -39,20 +40,16 @@ async function login(): Promise<string> {
   // 1. Seed: ensure we have a profile and a warm pool account.
   let profile = await prisma.profile.findFirst({ where: { isActive: true } });
   if (!profile) {
-    const { passportNumberEnc } = { passportNumberEnc: encrypt('AA1234567') };
-    profile = await prisma.profile.create({
-      data: {
-        fullName: 'Demo Customer',
-        passportNumberEnc: encrypt('AA1234567'),
-        dobEnc: encrypt('1990-01-15'),
-        passportExpiry: new Date('2030-12-31'),
-        nationality: 'UZ',
-        email: 'demo@example.com',
-        phone: '+998901234567',
-        gender: 'MALE',
-        priority: 'HIGH',
-        isActive: true,
-      },
+    profile = await createProfile({
+      fullName: 'Demo Customer',
+      passportNumber: 'AA1234567',
+      dob: '1990-01-15',
+      passportExpiry: '2030-12-31',
+      nationality: 'UZ',
+      email: 'demo@example.com',
+      phone: '+998901234567',
+      gender: 'MALE',
+      priority: 'HIGH',
     });
     console.log(`[seed] created profile ${profile.id}`);
   } else {

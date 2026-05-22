@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as profilesService from './profiles.service';
 import { bulkImportProfiles } from './bulkImport';
+import { extractPassportFromImage } from './passportOcr.service';
 import { getRedis } from '@config/redis';
 
 export async function listProfiles(req: Request, res: Response, next: NextFunction) {
@@ -36,9 +37,27 @@ export async function createProfile(req: Request, res: Response, next: NextFunct
   }
 }
 
+export async function onboardProfile(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await profilesService.createOnboardProfile(req.body);
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function updateProfile(req: Request, res: Response, next: NextFunction) {
   try {
     const profile = await profilesService.updateProfile(req.params.id, req.body);
+    res.json(profile);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateProfileAccounts(req: Request, res: Response, next: NextFunction) {
+  try {
+    const profile = await profilesService.setProfileAccounts(req.params.id, req.body.accountIds ?? []);
     res.json(profile);
   } catch (err) {
     next(err);
@@ -64,6 +83,20 @@ export async function bulkUpload(req: Request, res: Response, next: NextFunction
     const succeeded = results.filter((r) => r.success).length;
     const failed = results.filter((r) => !r.success).length;
     res.json({ succeeded, failed, results });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function extractPassport(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    const result = await extractPassportFromImage(req.file.buffer);
+    res.json(result);
   } catch (err) {
     next(err);
   }

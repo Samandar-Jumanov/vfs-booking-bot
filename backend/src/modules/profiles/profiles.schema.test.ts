@@ -1,4 +1,4 @@
-import { createProfileSchema, updateProfileSchema, paginationSchema } from './profiles.schema';
+import { createProfileSchema, updateProfileSchema, paginationSchema, onboardProfileSchema } from './profiles.schema';
 
 const validProfile = {
   fullName: 'Oneeb Arif',
@@ -48,6 +48,31 @@ describe('updateProfileSchema', () => {
   it('allows a partial payload', () => {
     const parsed = updateProfileSchema.parse({ phone: '+244999999999' });
     expect(parsed.phone).toBe('+244999999999');
+  });
+});
+
+describe('onboardProfileSchema', () => {
+  it('accepts customer onboarding fields and omits operator-only profile fields', () => {
+    const parsed = onboardProfileSchema.parse({
+      ...validProfile,
+      destination: 'Portugal',
+      preferredStartDate: '2026-06-01',
+      preferredEndDate: '2026-06-30',
+    });
+
+    expect(parsed.paymentMethod).toBe('Operator follow-up');
+    expect('priority' in parsed).toBe(false);
+  });
+
+  it('rejects a preferred end date before the start date', () => {
+    expect(() =>
+      onboardProfileSchema.parse({
+        ...validProfile,
+        destination: 'Portugal',
+        preferredStartDate: '2026-06-30',
+        preferredEndDate: '2026-06-01',
+      }),
+    ).toThrow();
   });
 });
 

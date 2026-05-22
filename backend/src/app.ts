@@ -20,6 +20,7 @@ import { extensionRouter } from '@modules/extension/extension.router';
 import { emailRouter } from '@modules/email/email.router';
 import { vendorRouter } from '@modules/vendor/vendor.router';
 import { bootstrapRouter } from '@modules/auth/bootstrap.router';
+import { statusRouter } from '@modules/status/status.router';
 
 export function createApp() {
   const app = express();
@@ -126,6 +127,7 @@ export function createApp() {
   });
 
   app.use('/api/email', emailRouter);
+  app.use('/api/status', statusRouter);
   // Bootstrap endpoint must NOT be rate-limited or require auth (it creates the first admin).
   app.use('/api/bootstrap', bootstrapRouter);
 

@@ -14,7 +14,10 @@ import {
   X,
   FileText,
   AlertCircle,
-  MoreVertical
+  Link2,
+  MoreVertical,
+  ScanLine,
+  CheckCircle2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { CustomSelect } from '@/components/ui/CustomSelect';
@@ -36,12 +39,43 @@ interface Profile {
   priority: 'HIGH' | 'NORMAL';
   isActive: boolean;
   visaType?: string;
+  linkedAccounts?: LinkedAccount[];
+}
+
+interface LinkedAccount {
+  id: string;
+  email: string;
+  status: string;
+}
+
+interface VfsAccount {
+  id: string;
+  email: string;
+  status: 'PENDING' | 'ACTIVE' | 'BLOCKED' | 'COOLDOWN';
+}
+
+interface PassportExtraction {
+  extracted: boolean;
+  confidence?: number;
+  mrz?: string[];
+  data?: Partial<{
+    fullName: string;
+    passportNumber: string;
+    dob: string;
+    passportExpiry: string;
+    nationality: string;
+    gender: 'MALE' | 'FEMALE' | 'OTHER';
+  }>;
 }
 
 export default function ProfilesPage() {
   const qc = useQueryClient();
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<Profile | null>(null);
+  const [passportPrefill, setPassportPrefill] = useState<PassportExtraction['data'] | null>(null);
+  const [passportResult, setPassportResult] = useState<PassportExtraction | null>(null);
+  const [passportError, setPassportError] = useState('');
+  const [passportUploading, setPassportUploading] = useState(false);
   const [importResults, setImportResults] = useState<{ succeeded: number; failed: number; results: { row: number; success: boolean; error?: string }[] } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -53,6 +87,41 @@ export default function ProfilesPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/profiles/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  });
+
+  const {
+    getRootProps: getPassportRootProps,
+    getInputProps: getPassportInputProps,
+    isDragActive: isPassportDragActive,
+  } = useDropzone({
+    accept: { 'image/jpeg': ['.jpg', '.jpeg'], 'image/png': ['.png'] },
+    maxFiles: 1,
+    maxSize: 10 * 1024 * 1024,
+    onDrop: async (files) => {
+      if (!files[0]) return;
+      const fd = new FormData();
+      fd.append('file', files[0]);
+      setPassportUploading(true);
+      setPassportError('');
+      setPassportResult(null);
+      try {
+        const res = await api.post('/profiles/extract-passport', fd);
+        const result = res.data as PassportExtraction;
+        setPassportResult(result);
+        if (result.extracted && result.data) {
+          setEditing(null);
+          setPassportPrefill(result.data);
+          setShowModal(true);
+        } else {
+          setPassportPrefill(null);
+        }
+      } catch (err: any) {
+        setPassportError(err?.response?.data?.error || 'Passport scan failed');
+        setPassportPrefill(null);
+      } finally {
+        setPassportUploading(false);
+      }
+    },
   });
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -84,6 +153,75 @@ export default function ProfilesPage() {
       description="Manage profiles and personal records for automated booking."
     >
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        {/* Passport OCR Upload */}
+        <div
+          {...getPassportRootProps()}
+          className={cn(
+            "group border rounded-xl p-5 cursor-pointer transition-all duration-300 bg-card/50",
+            isPassportDragActive
+              ? "border-primary bg-primary/5 scale-[0.99]"
+              : "border-border hover:border-primary/50 hover:bg-accent/20"
+          )}
+        >
+          <input {...getPassportInputProps()} />
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="w-11 h-11 rounded-lg bg-primary/10 text-primary flex items-center justify-center group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+                {passportUploading ? (
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent animate-spin rounded-full" />
+                ) : passportResult?.extracted ? (
+                  <CheckCircle2 className="w-5 h-5" />
+                ) : (
+                  <ScanLine className="w-5 h-5" />
+                )}
+              </div>
+              <div>
+                <h4 className="text-sm font-semibold">Passport OCR Prefill</h4>
+                <p className="text-xs text-muted-foreground">
+                  Drop a JPG or PNG passport scan to read the MRZ and prefill a new applicant.
+                </p>
+              </div>
+            </div>
+            <button type="button" className="h-9 px-4 rounded-md bg-accent text-xs font-bold text-foreground group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+              Choose image
+            </button>
+          </div>
+
+          {(passportResult || passportError) && (
+            <div className={cn(
+              "mt-4 rounded-lg border p-3 text-xs",
+              passportResult?.extracted ? "border-green-500/20 bg-green-500/5" : "border-destructive/20 bg-destructive/5"
+            )}>
+              {passportError ? (
+                <div className="flex items-center gap-2 text-destructive">
+                  <AlertCircle className="w-4 h-4" />
+                  <span>{passportError}</span>
+                </div>
+              ) : passportResult?.extracted ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold text-green-600 dark:text-green-400">
+                      Extracted {passportResult.data?.passportNumber || 'passport data'}
+                    </span>
+                    {passportResult.confidence !== undefined && (
+                      <span className="font-mono text-muted-foreground">{passportResult.confidence}% confidence</span>
+                    )}
+                  </div>
+                  {passportResult.mrz && (
+                    <pre className="overflow-x-auto rounded-md bg-background/70 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                      {passportResult.mrz.join('\n')}
+                    </pre>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-destructive">
+                  <AlertCircle className="w-4 h-4" />
+                  <span>No valid passport MRZ found. The applicant form was left empty.</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         
         {/* Actions Bar */}
         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
@@ -99,7 +237,7 @@ export default function ProfilesPage() {
           </div>
           <div className="flex items-center gap-3 w-full md:w-auto">
             <button 
-              onClick={() => { setEditing(null); setShowModal(true); }}
+              onClick={() => { setEditing(null); setPassportPrefill(null); setShowModal(true); }}
               className="flex-1 md:flex-none btn-primary gap-2 h-11 px-6 shadow-lg shadow-primary/20"
             >
               <Plus className="w-4 h-4" /> New Applicant
@@ -203,8 +341,11 @@ export default function ProfilesPage() {
                       <p className="text-[11px] font-bold truncate">{p.nationality}</p>
                     </div>
                     <div className="space-y-1">
-                      <p className="text-[10px] uppercase font-black text-muted-foreground tracking-wider">Visa Category</p>
-                      <p className="text-[11px] font-bold truncate">{p.visaType || 'Standard'}</p>
+                      <p className="text-[10px] uppercase font-black text-muted-foreground tracking-wider">VFS Accounts</p>
+                      <p className="flex items-center gap-1 text-[11px] font-bold truncate">
+                        <Link2 className="h-3 w-3" />
+                        {p.linkedAccounts?.length ?? 0} linked
+                      </p>
                     </div>
                   </div>
 
@@ -241,12 +382,18 @@ export default function ProfilesPage() {
         </div>
       </div>
 
-      {showModal && <ProfileModal profile={editing} onClose={() => setShowModal(false)} />}
+      {showModal && (
+        <ProfileModal
+          profile={editing}
+          initialValues={editing ? null : passportPrefill}
+          onClose={() => setShowModal(false)}
+        />
+      )}
     </DashboardShell>
   );
 }
 
-function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: () => void }) {
+function ProfileModal({ profile, initialValues, onClose }: { profile: Profile | null; initialValues?: PassportExtraction['data'] | null; onClose: () => void }) {
   const qc = useQueryClient();
   interface FormState {
     fullName: string;
@@ -260,23 +407,30 @@ function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: 
     gender: 'MALE' | 'FEMALE' | 'OTHER';
     priority: 'NORMAL' | 'HIGH';
     vfsPassword: string;
+    accountIds: string[];
   }
 
   const [form, setForm] = useState<FormState>({
-    fullName: profile?.fullName ?? '',
-    passportNumber: '',
-    dob: profile?.dob ?? '',
-    passportExpiry: profile?.passportExpiry ?? '',
+    fullName: profile?.fullName ?? initialValues?.fullName ?? '',
+    passportNumber: initialValues?.passportNumber ?? '',
+    dob: profile?.dob ?? initialValues?.dob ?? '',
+    passportExpiry: profile?.passportExpiry ?? initialValues?.passportExpiry ?? '',
     passportIssueDate: profile?.passportIssueDate ?? '',
-    nationality: profile?.nationality ?? '',
+    nationality: profile?.nationality ?? initialValues?.nationality ?? '',
     email: profile?.email ?? '',
     phone: profile?.phone ?? '',
-    gender: profile?.gender ?? 'MALE',
+    gender: profile?.gender ?? initialValues?.gender ?? 'MALE',
     priority: profile?.priority ?? 'NORMAL',
     vfsPassword: '',
+    accountIds: profile?.linkedAccounts?.map((account) => account.id) ?? [],
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const accountsQuery = useQuery<VfsAccount[]>({
+    queryKey: ['accounts'],
+    queryFn: () => api.get<VfsAccount[]>('/accounts').then((r) => r.data),
+  });
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -293,16 +447,23 @@ function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: 
       // Remove falsy optional fields to avoid Zod validation errors on empty strings
       if (!payload.passportIssueDate) delete payload.passportIssueDate;
       if (!payload.passportExpiry) delete payload.passportExpiry;
+      const accountIds = form.accountIds;
+      delete payload.accountIds;
       
       // On update, only send passportNumber/vfsPassword if they were changed (not empty)
       if (profile) {
         if (!form.passportNumber) delete payload.passportNumber;
         if (!form.vfsPassword) delete payload.vfsPassword;
         await api.put(`/profiles/${profile.id}`, payload);
+        await api.put(`/profiles/${profile.id}/accounts`, { accountIds });
       } else {
-        await api.post('/profiles', payload);
+        const created = await api.post('/profiles', payload).then((r) => r.data);
+        if (accountIds.length > 0) {
+          await api.put(`/profiles/${created.id}/accounts`, { accountIds });
+        }
       }
       qc.invalidateQueries({ queryKey: ['profiles'] });
+      qc.invalidateQueries({ queryKey: ['accounts'] });
       onClose();
     } catch (err: any) {
       setError(err?.response?.data?.error || err?.response?.data?.message || 'Submission failed');
@@ -311,7 +472,7 @@ function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: 
     }
   }
 
-  const field = (key: keyof typeof form) => ({
+  const field = (key: Exclude<keyof typeof form, 'accountIds'>) => ({
     value: form[key],
     onChange: (e: any) => setForm((f) => ({ ...f, [key]: e.target.value })),
   });
@@ -389,6 +550,41 @@ function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: 
                   ]}
                 />
               </div>
+              <div className="md:col-span-2 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-muted-foreground">Linked VFS accounts</label>
+                  <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{form.accountIds.length} selected</span>
+                </div>
+                <div className="max-h-40 overflow-y-auto rounded-md border border-border bg-background">
+                  {(accountsQuery.data ?? []).map((account) => {
+                    const checked = form.accountIds.includes(account.id);
+                    return (
+                      <label key={account.id} className="flex cursor-pointer items-center justify-between gap-3 border-b border-border/60 px-3 py-2 last:border-b-0 hover:bg-accent/40">
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs font-bold">{account.email}</span>
+                          <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{account.status}</span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded border-border"
+                          checked={checked}
+                          onChange={(event) => {
+                            setForm((current) => ({
+                              ...current,
+                              accountIds: event.target.checked
+                                ? [...current.accountIds, account.id]
+                                : current.accountIds.filter((id) => id !== account.id),
+                            }));
+                          }}
+                        />
+                      </label>
+                    );
+                  })}
+                  {!accountsQuery.isLoading && (accountsQuery.data ?? []).length === 0 && (
+                    <div className="px-3 py-4 text-xs text-muted-foreground">No VFS accounts available.</div>
+                  )}
+                </div>
+              </div>
             </div>
           </form>
         </div>
@@ -416,4 +612,3 @@ function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: 
     </div>
   );
 }
-
