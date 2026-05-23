@@ -295,32 +295,32 @@ function handleBackendMessage(message: BackendMessage): void {
 
 async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_ACCOUNT' }>): Promise<void> {
   try {
-    const tab = await chrome.tabs.create({ url: msg.loginUrl, active: true } as { url: string });
-    if (!tab.id) {
-      sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_CREATE_FAILED' });
+    const tab = await findWarmVfsTab();
+    if (!tab?.id) {
+      sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'WARM_TAB_REQUIRED' });
       return;
     }
+    await chrome.tabs.update(tab.id, { active: true });
     activeLoginTabs.set(msg.correlationId, tab.id);
-    setTimeout(() => {
-      chrome.tabs.sendMessage(tab.id!, {
-        type: 'LOGIN_FILL_FORM',
-        payload: {
-          email: msg.email,
-          password: msg.password,
-          correlationId: msg.correlationId,
-        },
-      }).catch((err: Error) => {
-        sendEvent({
-          type: 'EXT_LOGIN_FAILED',
-          correlationId: msg.correlationId,
-          email: msg.email,
-          reason: 'CONTENT_SCRIPT_UNREACHABLE: ' + err.message,
-        });
-      });
-    }, 6000);
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'LOGIN_VIA_SPA',
+      payload: {
+        email: msg.email,
+        password: msg.password,
+        correlationId: msg.correlationId,
+      },
+    });
   } catch (err) {
     sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: (err as Error).message });
   }
+}
+
+async function findWarmVfsTab(): Promise<chrome.tabs.Tab | null> {
+  const tabs = await chrome.tabs.query({ url: '*://*.vfsglobal.com/*' });
+  const warm = tabs
+    .filter((t) => t.id != null && t.url && !t.url.includes('/page-not-found'))
+    .sort((a, b) => ((b as chrome.tabs.Tab & { lastAccessed?: number }).lastAccessed ?? b.id ?? 0) - ((a as chrome.tabs.Tab & { lastAccessed?: number }).lastAccessed ?? a.id ?? 0));
+  return warm[0] ?? null;
 }
 
 async function runRegisterFlow(msg: Extract<BackendMessage, { type: 'BG_REGISTER_VFS_ACCOUNT' }>): Promise<void> {
@@ -536,13 +536,7 @@ function sendEvent(event: ExtensionEvent): void {
     activeRegisterTabs.delete(event.correlationId);
   }
   if (event.type === 'EXT_LOGIN_SUCCESS' || event.type === 'EXT_LOGIN_FAILED') {
-    const tabId = activeLoginTabs.get(event.correlationId);
     activeLoginTabs.delete(event.correlationId);
-    if (tabId) {
-      self.setTimeout(() => {
-        chrome.tabs.remove(tabId).catch(() => undefined);
-      }, 5000);
-    }
   }
   wsClient?.send(event);
 }

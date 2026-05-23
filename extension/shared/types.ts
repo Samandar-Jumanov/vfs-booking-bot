@@ -128,6 +128,7 @@ export type ContentCommand =
   | { type: 'REGISTER_SMS_OTP'; otp: string | null }
   | { type: 'REGISTER_CAPTCHA_TOKEN'; token: string | null }
   | { type: 'LOGIN_FILL_FORM'; payload: LoginFormPayload }
+  | { type: 'LOGIN_VIA_SPA'; payload: LoginFormPayload }
   | { type: 'LOGIN_CAPTCHA_TOKEN'; token: string | null };
 
 export interface RegisterFormPayload {

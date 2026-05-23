@@ -50,6 +50,9 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
     case 'LOGIN_FILL_FORM':
       void handleLoginFlow(command.payload);
       return { ok: true };
+    case 'LOGIN_VIA_SPA':
+      void handleLoginViaSpa(command.payload);
+      return { ok: true };
     case 'LOGIN_CAPTCHA_TOKEN':
       resolveRegisterWaiter('loginCaptchaToken', command.token);
       void applyRegisterCaptchaToken(command.token);
@@ -79,6 +82,79 @@ async function handleLoginFlow(payload: LoginFormPayload): Promise<void> {
       reason: (error as Error).message,
     });
   }
+}
+
+async function handleLoginViaSpa(payload: LoginFormPayload): Promise<void> {
+  currentCorrelationId = payload.correlationId;
+  try {
+    if (!document.querySelector('input[formcontrolname="emailid"]')) {
+      await ensureOnLoginPage();
+    }
+    await withTimeout(runLoginSteps(payload), 90_000, 'LOGIN_TIMEOUT');
+  } catch (error) {
+    await emitLoginEvent({
+      type: 'EXT_LOGIN_FAILED',
+      correlationId: payload.correlationId,
+      email: payload.email,
+      reason: (error as Error).message,
+    });
+  }
+}
+
+async function ensureOnLoginPage(): Promise<void> {
+  const loginSelector = 'input[formcontrolname="emailid"]';
+  if (window.location.href.includes('/page-not-found')) throw new Error('WARM_TAB_NOT_VFS');
+  if (document.querySelector(loginSelector)) return;
+
+  const firstClick = findLogoutSpaElement();
+  if (!firstClick) throw new Error('LOGOUT_BUTTON_NOT_FOUND');
+  if (!(await trustedClick(firstClick))) throw new Error('LOGOUT_TRUSTED_CLICK_FAILED');
+
+  const loginAppeared = await waitForElement(loginSelector, 2_000).then(() => true).catch(() => false);
+  if (!loginAppeared) {
+    const secondClick = findLogoutSpaElement(false);
+    if (secondClick && secondClick !== firstClick && !(await trustedClick(secondClick))) {
+      throw new Error('LOGOUT_TRUSTED_CLICK_FAILED');
+    }
+  }
+  await waitForElement(loginSelector, 20_000).catch(() => {
+    throw new Error('LOGOUT_NEVER_REACHED_LOGIN_FORM');
+  });
+}
+
+function findLogoutSpaElement(includeProfileTrigger = true): HTMLElement | null {
+  const selectors = [
+    'button[aria-label*="logout" i]',
+    'a[href*="logout" i]',
+    '[data-test-id*="logout" i]',
+    ...(includeProfileTrigger ? ['button:has(svg[data-icon*="user"])'] : []),
+  ];
+  for (const selector of selectors) {
+    const match = safeQueryVisible(selector);
+    if (match) return match;
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>('button,a,[role="button"],mat-icon,span,div'))) {
+    if (!/logout|sign out/i.test(el.textContent ?? '')) continue;
+    const clickable = closestClickable(el);
+    if (clickable && isEnabledVisible(clickable)) return clickable;
+  }
+  return null;
+}
+
+function safeQueryVisible(selector: string): HTMLElement | null {
+  try {
+    return Array.from(document.querySelectorAll<HTMLElement>(selector)).find(isEnabledVisible) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function closestClickable(element: HTMLElement): HTMLElement | null {
+  return element.closest<HTMLElement>('button,a,[role="button"]') ?? element;
+}
+
+function isEnabledVisible(element: HTMLElement): boolean {
+  return isVisible(element) && !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true';
 }
 
 async function runLoginSteps(payload: LoginFormPayload): Promise<void> {

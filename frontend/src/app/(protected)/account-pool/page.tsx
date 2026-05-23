@@ -223,6 +223,7 @@ export default function AccountPoolPage() {
   const loginBatchDone = loginBatchJob?.items.filter((item) => item.state === 'success' || item.state === 'failed').length ?? 0;
   const loginBatchSuccess = loginBatchJob?.items.filter((item) => item.state === 'success').length ?? 0;
   const loginBatchFailed = loginBatchJob?.items.filter((item) => item.state === 'failed').length ?? 0;
+  const loginBatchNeedsWarmTab = loginBatchJob?.items.some((item) => item.error === 'WARM_TAB_REQUIRED') ?? false;
 
   useEffect(() => {
     return addWebSocketListener<BatchProgressPayload>('BATCH_PROGRESS', (data) => {
@@ -557,6 +558,11 @@ export default function AccountPoolPage() {
               </>
             ) : (
               <>
+                {loginBatchNeedsWarmTab && (
+                  <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm font-semibold text-amber-500">
+                    Open bot Chrome and navigate to any VFS page before running the batch. The bot reuses your warm tab to avoid Datadome.
+                  </div>
+                )}
                 <div className="mt-4 rounded-lg border">
                   <table className="w-full text-sm">
                     <thead className="bg-muted/40 text-muted-foreground">

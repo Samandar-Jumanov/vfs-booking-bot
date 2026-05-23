@@ -136,3 +136,20 @@
 ```
 - **Surprises / deviations:** `git diff --stat HEAD` does not include untracked files, so the new Stage 4 files `backend/src/modules/accounts/loginBatch.service.ts` and `backend/scripts/smoke-login-batch.ts` are not represented in the stat until the orchestrator stages them. Frontend build still prints existing lint warnings, but exits 0.
 - **Time spent:** ~10 minutes
+
+## SPA Login Refactor
+
+- **Status:** PASS
+- **Files changed:**
+  - extension/background/service-worker.ts (+20 / -26)
+  - extension/shared/types.ts (+1 / -0)
+  - extension/content/vfs-bridge.ts (+76 / -0)
+  - frontend/src/app/(protected)/account-pool/page.tsx (+6 / -0)
+- **Old code removed:** `chrome.tabs.create` call from `runLoginFlow`
+- **New helpers:** `findWarmVfsTab`, `ensureOnLoginPage`, `handleLoginViaSpa`, `LOGIN_VIA_SPA` command
+- **Verification:**
+  - extension build -> PASS
+  - backend build -> PASS
+  - frontend build -> PASS
+- **Surprises:** The login completion cleanup had to stop removing `activeLoginTabs` tab IDs from Chrome; the SPA path reuses the operator's warm tab, so completion now only clears the correlation map.
+- **Time spent:** ~20 minutes
