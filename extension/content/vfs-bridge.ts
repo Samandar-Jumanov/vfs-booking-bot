@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-21-activation-resend-v14';
+const VFS_BRIDGE_VERSION = '2026-05-23-login-submit-fix';
 const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
@@ -193,10 +193,7 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
   }
 
   const initialUrl = window.location.href;
-  const button = await waitUntil(() => findLoginButton(), 30_000);
-  const clicked = await trustedClick(button);
-  if (!clicked) throw new Error('LOGIN_TRUSTED_CLICK_FAILED');
-
+  await clickLoginSubmit(initialUrl);
   await waitUntil(() => isLoginSuccess(initialUrl) || isLoginFailureVisible(), 45_000);
   if (isLoginFailureVisible()) throw new Error(readLoginFailureReason());
 
@@ -1075,6 +1072,54 @@ async function clickRegisterSubmit(): Promise<void> {
     await new Promise((r) => setTimeout(r, 300));
   }
   throw new Error('REGISTER_SUBMIT_BUTTON_NEVER_ENABLED');
+}
+
+async function clickLoginSubmit(initialUrl: string): Promise<void> {
+  const findBtn = () => findLoginButton();
+  const isEnabled = (btn: HTMLElement): boolean => {
+    const asBtn = btn as HTMLButtonElement;
+    if (asBtn.disabled) return false;
+    if (btn.getAttribute('aria-disabled') === 'true') return false;
+    if (btn.hasAttribute('disabled')) return false;
+    return true;
+  };
+  const hasTurnstileToken = (): boolean => {
+    const sitekeyEl = document.querySelector('[data-sitekey], .cf-turnstile');
+    if (!sitekeyEl) return true;
+    const t = document.querySelector<HTMLTextAreaElement | HTMLInputElement>('[name="cf-turnstile-response"]');
+    return Boolean(t?.value);
+  };
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const btn = findBtn();
+    const tokenOk = hasTurnstileToken();
+    const btnOk = btn ? isEnabled(btn) : false;
+    if (btn && tokenOk && btnOk) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        await trustedClick(btn);
+        await new Promise((r) => setTimeout(r, 2000));
+        if (
+          window.location.href !== initialUrl ||
+          isLoginSuccess(initialUrl) ||
+          isLoginFailureVisible()
+        ) {
+          return;
+        }
+        const reBtn = findBtn();
+        if (!reBtn) break;
+        if (!isEnabled(reBtn)) {
+          const reDeadline = Date.now() + 3000;
+          while (Date.now() < reDeadline && !isEnabled(reBtn)) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        }
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error('LOGIN_SUBMIT_BUTTON_NEVER_ENABLED');
 }
 
 async function clickVerifyButton(): Promise<void> {
