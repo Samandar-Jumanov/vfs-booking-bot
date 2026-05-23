@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-23-autofill-guard';
+const VFS_BRIDGE_VERSION = '2026-05-23-register-trustedfill';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
 // id="email", formcontrolname="username", type="text" (NOT "emailid", which is
@@ -405,7 +405,11 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
   // failed silently → "Mandatory field cannot be left blank" → 5-min timeout.
   // VFS Uzbekistan uses 'emailid' and 'contact' as formcontrolname (not the
   // standard 'email' / 'mobileNumber'). Verified from real trace 2026-05-20.
-  await typeIntoFirst([
+  // Fill email + password + confirm-password with GENUINE keystrokes
+  // (chrome.debugger), exactly like runLoginSteps. Programmatic .value-setting
+  // (the old typeIntoFirst path) does NOT enable VFS's Angular Register button —
+  // VFS only marks the form valid when input arrives as real typed events.
+  await trustedFillFirst([
     'input[formcontrolname="emailid"]',
     'input[name="emailid"]',
     'input[id*="email" i]',
@@ -413,12 +417,19 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
     'input[formcontrolname="email"]',
     'input[name="email"]',
   ], payload.email);
-  await typeIntoFirst(['input[type="password"]', 'input[formcontrolname="password"]', 'input[name="password"]'], payload.password);
-  await typeIntoFirst([
+  await trustedFillFirst([
+    'input[formcontrolname="password"]',
+    'input[name="password"]',
+    'input[type="password"]',
+  ], payload.password);
+  await trustedFillFirst([
     'input[type="password"][formcontrolname="confirmPassword"]',
     'input[formcontrolname="confirmPassword"]',
     'input[name="confirmPassword"]',
   ], payload.password);
+  // Tab once to mark the form touched/validated, mirroring runLoginSteps.
+  await trustedKey('Tab');
+  await new Promise((r) => setTimeout(r, 300));
   // Fill Mobile FIRST so it's done before any dial-code dropdown weirdness
   // can mess with the form state. VFS expects the LOCAL number (no country code).
   const localPhone = payload.phone.replace(/^\+?998/, '').replace(/^\+/, '');
@@ -774,6 +785,19 @@ async function typeIntoFirst(selectors: string[], value: string): Promise<void> 
   if (actual !== value) {
     void postRegisterTrace('typeIntoFirst MISMATCH', { selector: selectors[0], expected: maskForLog(value), actual: maskForLog(actual) });
   }
+}
+
+// Like typeIntoFirst, but fills via trustedFill (real chrome.debugger keystrokes)
+// so VFS's Angular form actually enables its submit button. Used for the
+// register email/password fields — see runLoginSteps for the same pattern.
+async function trustedFillFirst(selectors: string[], value: string): Promise<void> {
+  const element = selectors.map((selector) => document.querySelector<HTMLInputElement>(selector)).find(Boolean);
+  if (!element) {
+    console.warn('[VFS-REG] trustedFillFirst no element matched any of:', selectors);
+    void postRegisterTrace('trustedFillFirst NO MATCH', { selectors });
+    return;
+  }
+  await trustedFill(element, value);
 }
 
 function maskForLog(s: string): string {

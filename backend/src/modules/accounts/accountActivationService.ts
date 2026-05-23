@@ -1,7 +1,8 @@
 import crypto from 'crypto';
-import { AccountStatus } from '@prisma/client';
+import { AccountStatus, EventType } from '@prisma/client';
 import { prisma } from '@config/database';
 import { sendToExtension } from '@modules/websocket/ws.server';
+import { logEvent } from '@modules/logs/logger';
 import { fetchEmailVerificationLink, visitActivationLink } from './accountAutoRegister.service';
 
 const ACTIVATION_TIMEOUT_MS = 180_000;
@@ -43,18 +44,52 @@ export async function runActivation(
   }
 
   const link = await fetchEmailVerificationLink(email);
-  if (!link) return { ok: false, reason: 'EMAIL_LINK_NOT_RECEIVED' };
+  if (!link) {
+    logEvent('warn', EventType.BOOKING_FAILED, `[ACTIVATE] email link never arrived for ${email}`, {
+      accountId,
+      result: 'EMAIL_LINK_NOT_RECEIVED',
+      correlationId,
+    });
+    return { ok: false, reason: 'EMAIL_LINK_NOT_RECEIVED' };
+  }
+  logEvent('info', EventType.BOOKING_ATTEMPT, `[ACTIVATE] activation email link found for ${email}`, {
+    accountId,
+    correlationId,
+  });
 
   try {
     const resp = await visitActivationLink(link);
-    if (resp.status >= 400) return { ok: false, reason: `EMAIL_LINK_VISIT_FAILED_${resp.status}` };
+    logEvent('info', EventType.BOOKING_ATTEMPT, `[ACTIVATE] activation link visit status=${resp.status} for ${email}`, {
+      accountId,
+      result: String(resp.status),
+      correlationId,
+    });
+    if (resp.status >= 400) {
+      logEvent('warn', EventType.BOOKING_FAILED, `[ACTIVATE] activation link visit failed status=${resp.status} for ${email}`, {
+        accountId,
+        result: `EMAIL_LINK_VISIT_FAILED_${resp.status}`,
+        correlationId,
+      });
+      return { ok: false, reason: `EMAIL_LINK_VISIT_FAILED_${resp.status}` };
+    }
   } catch (err) {
+    logEvent('error', EventType.BOOKING_FAILED, `[ACTIVATE] activation link visit threw for ${email}: ${(err as Error).message}`, {
+      accountId,
+      result: `EMAIL_LINK_VISIT_ERROR_${(err as Error).message}`,
+      correlationId,
+    });
     return { ok: false, reason: `EMAIL_LINK_VISIT_ERROR_${(err as Error).message}` };
   }
 
   await prisma.vfsAccount.update({
     where: { id: accountId },
     data: { status: AccountStatus.ACTIVE },
+  });
+
+  logEvent('info', EventType.BOOKING_SUCCESS, `[ACTIVATE] account flipped to ACTIVE for ${email}`, {
+    accountId,
+    result: 'ACTIVE',
+    correlationId,
   });
 
   sendToExtension(operatorUserId, {
