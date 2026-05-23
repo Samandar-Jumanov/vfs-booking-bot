@@ -193,6 +193,12 @@ enum AccountStatus {
   COOLDOWN
 }
 
+enum PollingRole {
+  WATCHER
+  BOOKER
+  BOTH
+}
+
 model VfsAccount {
   id                String        @id @default(uuid())
   email             String        @unique
@@ -200,6 +206,7 @@ model VfsAccount {
   phone             String?
   smsExternalId     String?
   status            AccountStatus @default(ACTIVE)
+  pollingRole       PollingRole   @default(BOTH)
   lastUsedAt        DateTime?
   cooldownUntil     DateTime?
   cookieStore       Json?

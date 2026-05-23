@@ -30,6 +30,7 @@ export interface BookingJobPayload {
   visaType: string;
   slot: SlotInfo;
   attempt?: number;
+  pollerAccountEmail?: string;
 }
 
 export interface ProxyConfig {

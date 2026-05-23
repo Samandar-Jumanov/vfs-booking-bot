@@ -6,7 +6,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { prisma } from '@config/database';
 import { env } from '@config/env';
 import { logEvent } from '@modules/logs/logger';
-import { AccountStatus, EventType } from '@prisma/client';
+import { AccountStatus, EventType, PollingRole } from '@prisma/client';
 import { decrypt, encrypt } from '@utils/crypto';
 import { warmSessionWithBrowser, keepSessionAlive, VfsCredentials } from './session.warmer';
 import { fetchSlotsViaBrowser, disposeContextFor, findPageForProfile } from './playwright.fetch';
@@ -466,10 +466,10 @@ function makeHttpsAgent(proxyConfig: any): https.Agent {
     return new https.Agent({ rejectUnauthorized: false });
 }
 
-async function getStoredVfsSession(profileIds: string[]): Promise<{
+export async function selectFreshWatcherAccount(profileIds: string[] = []): Promise<{
   accountId: string;
   email: string;
-  cookies: string[];
+  cookieStore: unknown;
   userAgent?: string;
   lastWarmedAt: Date;
 } | undefined> {
@@ -477,10 +477,11 @@ async function getStoredVfsSession(profileIds: string[]): Promise<{
   const candidates = await prisma.vfsAccount.findMany({
     where: {
       status: AccountStatus.ACTIVE,
+      pollingRole: { in: [PollingRole.WATCHER, PollingRole.BOTH] },
       lastWarmedAt: { gte: staleCutoff },
       cookieStore: { not: undefined as never },
     },
-    orderBy: { lastWarmedAt: 'desc' },
+    orderBy: [{ lastUsedAt: 'asc' }, { lastWarmedAt: 'desc' }],
     take: 25,
   });
 
@@ -492,11 +493,36 @@ async function getStoredVfsSession(profileIds: string[]): Promise<{
   const session = extractStoredCookieSession(account.cookieStore);
   if (!session.hasDatadome || session.cookies.length === 0) return undefined;
 
+  await prisma.vfsAccount.update({
+    where: { id: account.id },
+    data: { lastUsedAt: new Date() },
+  }).catch(() => undefined);
+
   return {
     accountId: account.id,
     email: account.email,
-    cookies: session.cookies,
+    cookieStore: account.cookieStore,
     userAgent: session.userAgent,
+    lastWarmedAt: account.lastWarmedAt,
+  };
+}
+
+async function getStoredVfsSession(profileIds: string[]): Promise<{
+  accountId: string;
+  email: string;
+  cookies: string[];
+  userAgent?: string;
+  lastWarmedAt: Date;
+} | undefined> {
+  const account = await selectFreshWatcherAccount(profileIds);
+  if (!account) return undefined;
+  const session = extractStoredCookieSession(account.cookieStore);
+  if (!session.hasDatadome || session.cookies.length === 0) return undefined;
+  return {
+    accountId: account.accountId,
+    email: account.email,
+    cookies: session.cookies,
+    userAgent: account.userAgent,
     lastWarmedAt: account.lastWarmedAt,
   };
 }
@@ -1049,6 +1075,7 @@ export async function startMonitor(id: string): Promise<void> {
                 sourceCountry: config.sourceCountry,
                 destination: config.destination,
                 visaType: config.visaType,
+                pollerAccountEmail: (getMonitor(id) ?? successConfig).pollerAccountEmail ?? successConfig.vfsLoginUser,
                 slot: {
                   date: firstSlot.date ?? '',
                   time: firstSlot.time ?? '',

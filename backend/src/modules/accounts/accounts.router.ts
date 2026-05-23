@@ -11,7 +11,7 @@ import { accountBatchService } from './accountBatch.service';
 import { loginAccount } from './accountLoginService';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
-import { AccountStatus, EventType } from '@prisma/client';
+import { AccountStatus, EventType, PollingRole } from '@prisma/client';
 
 export const accountsRouter = Router();
 
@@ -35,6 +35,10 @@ const autoCreateBatchSchema = z.object({
   source: z.string().min(1).default('uzb'),
   destination: z.string().min(1).default('lva'),
   countryCode: z.string().min(1).default('171'),
+});
+
+const pollingRoleSchema = z.object({
+  role: z.nativeEnum(PollingRole),
 });
 
 const PENDING_STATUS = 'PENDING' as AccountStatus;
@@ -61,16 +65,21 @@ function cookieStoreHasDatadome(cookieStore: unknown): boolean {
 // ── GET /api/accounts ─────────────────────────────────────────────────────────
 // Returns all VfsAccounts. encryptedPassword is NEVER included in the response.
 
-accountsRouter.get('/', async (_req: Request, res: Response, next: NextFunction) => {
+accountsRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const status = typeof req.query.status === 'string' ? req.query.status.toUpperCase() : undefined;
     const accounts = await prisma.vfsAccount.findMany({
+      where: status && status in AccountStatus ? { status: status as AccountStatus } : undefined,
       orderBy: { createdAt: 'asc' },
       select: {
         id: true,
         email: true,
         phone: true,
         status: true,
+        pollingRole: true,
         lastUsedAt: true,
+        lastWarmedAt: true,
+        cookieStore: true,
         cooldownUntil: true,
         profileIds: true,
         createdAt: true,
@@ -84,7 +93,11 @@ accountsRouter.get('/', async (_req: Request, res: Response, next: NextFunction)
       email: a.email,
       phone: a.phone ?? null,
       status: a.status,
+      pollingRole: a.pollingRole,
+      cookieFresh: cookieStoreHasDatadome(a.cookieStore) && !!a.lastWarmedAt && Date.now() - a.lastWarmedAt.getTime() < 12 * 60 * 60 * 1000,
       lastUsedAt: a.lastUsedAt,
+      lastWarmedAt: a.lastWarmedAt,
+      cookiesUpdatedAt: a.lastWarmedAt,
       cooldownUntil: a.cooldownUntil,
       profileCount: a.profileIds.length,
       createdAt: a.createdAt,
@@ -117,7 +130,10 @@ accountsRouter.post('/', async (req: Request, res: Response, next: NextFunction)
         email: true,
         phone: true,
         status: true,
+        pollingRole: true,
         lastUsedAt: true,
+        lastWarmedAt: true,
+        cookieStore: true,
         cooldownUntil: true,
         profileIds: true,
         createdAt: true,
@@ -131,7 +147,52 @@ accountsRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       email: account.email,
       phone: account.phone ?? null,
       status: account.status,
+      pollingRole: account.pollingRole,
+      cookieFresh: cookieStoreHasDatadome(account.cookieStore) && !!account.lastWarmedAt && Date.now() - account.lastWarmedAt.getTime() < 12 * 60 * 60 * 1000,
       lastUsedAt: account.lastUsedAt,
+      lastWarmedAt: account.lastWarmedAt,
+      cookiesUpdatedAt: account.lastWarmedAt,
+      cooldownUntil: account.cooldownUntil,
+      profileCount: account.profileIds.length,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+accountsRouter.patch('/:id/polling-role', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { role } = pollingRoleSchema.parse(req.body);
+    const account = await prisma.vfsAccount.update({
+      where: { id: req.params.id },
+      data: { pollingRole: role },
+      select: {
+        id: true,
+        email: true,
+        phone: true,
+        status: true,
+        pollingRole: true,
+        lastUsedAt: true,
+        lastWarmedAt: true,
+        cookieStore: true,
+        cooldownUntil: true,
+        profileIds: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    res.json({
+      id: account.id,
+      email: account.email,
+      phone: account.phone ?? null,
+      status: account.status,
+      pollingRole: account.pollingRole,
+      cookieFresh: cookieStoreHasDatadome(account.cookieStore) && !!account.lastWarmedAt && Date.now() - account.lastWarmedAt.getTime() < 12 * 60 * 60 * 1000,
+      lastUsedAt: account.lastUsedAt,
+      lastWarmedAt: account.lastWarmedAt,
+      cookiesUpdatedAt: account.lastWarmedAt,
       cooldownUntil: account.cooldownUntil,
       profileCount: account.profileIds.length,
       createdAt: account.createdAt,
@@ -251,6 +312,7 @@ accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: N
         id: true,
         email: true,
         status: true,
+        pollingRole: true,
         lastWarmedAt: true,
         cookieStore: true,
         tabUrl: true,
@@ -266,8 +328,10 @@ accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: N
         id: a.id,
         email: a.email,
         status: a.status,
+        pollingRole: a.pollingRole,
         cookieFresh: hasDatadome && !!a.lastWarmedAt && now - a.lastWarmedAt.getTime() < STALE_MS,
         lastWarmedAt: a.lastWarmedAt,
+        cookiesUpdatedAt: a.lastWarmedAt,
         tabUrl: a.tabUrl,
         lastUsedAt: a.lastUsedAt,
         cooldownUntil: a.cooldownUntil,

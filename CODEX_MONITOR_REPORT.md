@@ -35,3 +35,26 @@
 - **Manual smoke (if applicable):** Screenshot capture skipped. No local browser automation tool was exposed in this session, and `/setup` is auth-protected.
 - **Surprises / deviations:** Added minimal `frontend/.eslintrc.json` so `next lint` runs non-interactively. The wizard posts the existing `/monitor/start` payload shape (`visaType`, not a new `visaCategoryCode` field).
 - **Time spent:** ~35 minutes
+
+## Stage 3 - PollingRole (PASS after orchestrator unblock)
+
+- **Status:** PASS
+- **Files changed by Codex:**
+  - backend/prisma/schema.prisma (PollingRole enum + VfsAccount.pollingRole field)
+  - backend/prisma/migrations/20260523042315_add_polling_role/migration.sql
+  - backend/src/modules/accounts/accounts.controller.ts (PATCH /:id/polling-role)
+  - backend/src/modules/accounts/accounts.router.ts (route wiring)
+  - backend/src/modules/booking/extension-dispatch.service.ts (booker-only selection, BOOKING_ON_POLLER_ACCOUNT warn)
+  - backend/src/modules/monitor/monitor.service.ts (watcher-only polling selection)
+  - backend/scripts/smoke-polling-role.ts (smoke harness)
+- **Orchestrator unblock fix:**
+  - extension-dispatch.service.ts:168 — added explicit `(typeof candidates)[number] | null` annotation on `account` so the `?? null` fallback typechecks (TS was widening the array-element type to non-null and rejecting the `findFirst` reassignment).
+- **Endpoints added/changed:**
+  - PATCH /api/accounts/:id/polling-role
+- **Smoke script result:**
+  - `npx tsx scripts/smoke-polling-role.ts` -> exit 0
+  - Output: `poller=smoke-watcher-...` `booker=smoke-booker-...` (correct role routing verified)
+- **Verification:**
+  - `cd backend && npm run build` -> PASS
+  - `cd backend && npx prisma migrate status` -> PASS
+- **Resumption point:** Stage 4 (loginBatch service + endpoints).

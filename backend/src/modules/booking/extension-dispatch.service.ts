@@ -19,7 +19,7 @@
 import { randomUUID } from 'crypto';
 import { prisma } from '@config/database';
 import { logEvent } from '@modules/logs/logger';
-import { EventType, type VfsAccount } from '@prisma/client';
+import { EventType, PollingRole, type VfsAccount } from '@prisma/client';
 import { decrypt } from '@utils/crypto';
 import type { BookingJobPayload } from '@t/index';
 
@@ -61,7 +61,7 @@ export function resolveExtensionBooking(correlationId: string, result: Extension
  */
 export async function bookViaExtension(payload: BookingJobPayload): Promise<ExtensionBookingResult> {
   // 1. Pick an ACTIVE account with a fresh Datadome session.
-  const account = await getAvailableFreshAccount(payload.profileId);
+  const account = await selectFreshBookerAccount(payload.profileId, payload.pollerAccountEmail);
   if (!account) {
     return { success: false, reason: 'NO_COOKIE_FRESH_ACTIVE_ACCOUNTS' };
   }
@@ -137,7 +137,7 @@ export async function bookViaExtension(payload: BookingJobPayload): Promise<Exte
   return { ...result, accountEmail: account.email };
 }
 
-async function getAvailableFreshAccount(profileId: string): Promise<VfsAccount | null> {
+export async function selectFreshBookerAccount(profileId: string, pollerAccountEmail?: string | null): Promise<VfsAccount | null> {
   const now = new Date();
   const staleCutoff = new Date(Date.now() - STALE_THRESHOLD_MS);
 
@@ -152,25 +152,40 @@ async function getAvailableFreshAccount(profileId: string): Promise<VfsAccount |
     },
   });
 
-  const rows = await prisma.$queryRaw<VfsAccount[]>`
-    UPDATE "VfsAccount"
-    SET    "lastUsedAt" = ${now}
-    WHERE  id = (
-      SELECT id
-      FROM   "VfsAccount"
-      WHERE  status = 'ACTIVE'
-      AND    "lastWarmedAt" >= ${staleCutoff}
-      AND    "cookieStore" IS NOT NULL
-      AND    "cookieStore"::text ILIKE '%datadome%'
-      ORDER BY CASE WHEN "profileIds" @> ARRAY[${profileId}]::text[] THEN 0 ELSE 1 END,
-               "lastUsedAt" ASC NULLS FIRST
-      LIMIT  1
-      FOR UPDATE SKIP LOCKED
-    )
-    RETURNING *
-  `;
+  const baseWhere = {
+    status: 'ACTIVE' as const,
+    pollingRole: { in: [PollingRole.BOOKER, PollingRole.BOTH] },
+    lastWarmedAt: { gte: staleCutoff },
+    cookieStore: { not: null as never },
+  };
 
-  return rows[0] ?? null;
+  const candidates = await prisma.vfsAccount.findMany({
+    where: pollerAccountEmail ? { ...baseWhere, email: { not: pollerAccountEmail } } : baseWhere,
+    orderBy: [{ lastUsedAt: 'asc' }, { lastWarmedAt: 'desc' }],
+    take: 25,
+  });
+
+  let account: (typeof candidates)[number] | null =
+    candidates.find((candidate) => candidate.profileIds.includes(profileId)) ?? candidates[0] ?? null;
+  if (!account && pollerAccountEmail) {
+    account = await prisma.vfsAccount.findFirst({
+      where: { ...baseWhere, email: pollerAccountEmail },
+      orderBy: [{ lastUsedAt: 'asc' }, { lastWarmedAt: 'desc' }],
+    });
+    if (account) {
+      logEvent('warn', EventType.BOOKING_ATTEMPT, 'BOOKING_ON_POLLER_ACCOUNT', {
+        profileId,
+        accountEmail: account.email,
+      });
+    }
+  }
+
+  if (!account || !String(JSON.stringify(account.cookieStore)).match(/datadome/i)) return null;
+  await prisma.vfsAccount.update({
+    where: { id: account.id },
+    data: { lastUsedAt: now },
+  }).catch(() => undefined);
+  return account;
 }
 
 async function resolveOperatorUserId(): Promise<string | undefined> {
