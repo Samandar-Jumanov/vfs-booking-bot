@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-23-login-submit-fix';
+const VFS_BRIDGE_VERSION = '2026-05-23-login-tab-trigger';
 const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
@@ -177,6 +177,13 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     'input[formcontrolname="password"]',
     'input[name="password"]',
   ], payload.password);
+
+  // Press Tab to force Angular Material to mark the form as touched/dirty
+  // and run validation — on VFS UZ the Sign In button stays disabled until
+  // a real key/blur event fires after typing. setInputValue's dispatched
+  // blur isn't enough; only a trusted Tab keypress flips Angular's state.
+  await trustedKey('Tab');
+  await new Promise((r) => setTimeout(r, 300));
 
   const turnstile = document.querySelector<HTMLElement>('[data-sitekey], .cf-turnstile');
   const siteKey = turnstile?.getAttribute('data-sitekey');
