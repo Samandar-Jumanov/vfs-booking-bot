@@ -12,11 +12,18 @@ import {
 
 let io: SocketServer;
 const extensionConnections = new Map<string, ExtensionSocket>();
+// Commands dispatched while an extension is momentarily disconnected (MV3
+// service workers idle-kill ~every 30s, dropping the WS). Queued here and
+// flushed the instant the extension reconnects, so login/booking dispatches
+// are never silently dropped into a dead socket.
+const pendingExtensionMessages = new Map<string, unknown[]>();
+const MAX_PENDING_PER_USER = 25;
 
 interface ExtensionSocket {
   customerId: string;
   write: (payload: unknown) => void;
   close: () => void;
+  isWritable: () => boolean;
 }
 
 export function initWebSocket(server: HttpServer): SocketServer {
@@ -78,8 +85,22 @@ export function emitToUser(userId: string, event: string, data: unknown): void {
 
 export function sendToExtension(customerId: string, payload: unknown): boolean {
   const connection = extensionConnections.get(customerId);
-  if (!connection) return false;
-  connection.write(payload);
+  if (connection && connection.isWritable()) {
+    try {
+      connection.write(payload);
+      return true;
+    } catch {
+      // Socket died mid-write — drop it and fall through to queueing.
+      extensionConnections.delete(customerId);
+    }
+  }
+  // No live socket right now. Queue the command and deliver it the moment the
+  // extension reconnects (within the ~30s SW wake cadence). Returning true =
+  // "accepted for delivery" so the caller proceeds and awaits the result.
+  const queue = pendingExtensionMessages.get(customerId) ?? [];
+  queue.push(payload);
+  while (queue.length > MAX_PENDING_PER_USER) queue.shift();
+  pendingExtensionMessages.set(customerId, queue);
   return true;
 }
 
@@ -131,8 +152,22 @@ function initExtensionWebSocket(server: HttpServer): void {
       customerId,
       write: (message: unknown) => socket.write(encodeFrame(JSON.stringify(message))),
       close: () => socket.destroy(),
+      isWritable: () => socket.writable && !socket.destroyed,
     };
     extensionConnections.set(customerId, extensionSocket);
+
+    // Flush any commands queued while this extension was disconnected.
+    const queued = pendingExtensionMessages.get(customerId);
+    if (queued && queued.length) {
+      pendingExtensionMessages.delete(customerId);
+      for (const message of queued) {
+        try {
+          extensionSocket.write(message);
+        } catch {
+          /* ignore individual write failures */
+        }
+      }
+    }
 
     socket.on('data', (buffer) => {
       const message = decodeFrame(buffer);
@@ -143,14 +178,18 @@ function initExtensionWebSocket(server: HttpServer): void {
         extensionSocket.write({ type: 'ERROR', reason: 'Invalid JSON message' });
       }
     });
-    socket.on('close', () => {
-      extensionConnections.delete(customerId);
-      markExtensionDisconnected(customerId);
-    });
-    socket.on('error', () => {
-      extensionConnections.delete(customerId);
-      markExtensionDisconnected(customerId);
-    });
+    // Identity-checked cleanup: only forget this connection if the map still
+    // points at THIS socket. Prevents an old socket's delayed close from
+    // wiping out a newer reconnected socket — the race that was silently
+    // dropping login/booking dispatches.
+    const cleanup = () => {
+      if (extensionConnections.get(customerId) === extensionSocket) {
+        extensionConnections.delete(customerId);
+        markExtensionDisconnected(customerId);
+      }
+    };
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
   });
 }
 
