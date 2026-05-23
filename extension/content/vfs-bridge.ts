@@ -12,7 +12,13 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-23-activation-flow';
+const VFS_BRIDGE_VERSION = '2026-05-23-login-trusted-typing';
+
+// VFS UZ login page email field — verified from live DOM 2026-05-23:
+// id="email", formcontrolname="username", type="text" (NOT "emailid", which is
+// the REGISTER page's field). The SPA "am I on the login page?" check must use
+// this or it wrongly decides it's off-page and hunts for a Logout button.
+const LOGIN_EMAIL_SELECTOR = '#email, input[formcontrolname="username"], input[formcontrolname="emailid"]';
 const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
@@ -95,7 +101,7 @@ async function handleLoginFlow(payload: LoginFormPayload): Promise<void> {
 async function handleLoginViaSpa(payload: LoginFormPayload): Promise<void> {
   currentCorrelationId = payload.correlationId;
   try {
-    if (!document.querySelector('input[formcontrolname="emailid"]')) {
+    if (!document.querySelector(LOGIN_EMAIL_SELECTOR)) {
       await ensureOnLoginPage();
     }
     await withTimeout(runLoginSteps(payload), 90_000, 'LOGIN_TIMEOUT');
@@ -110,7 +116,7 @@ async function handleLoginViaSpa(payload: LoginFormPayload): Promise<void> {
 }
 
 async function ensureOnLoginPage(): Promise<void> {
-  const loginSelector = 'input[formcontrolname="emailid"]';
+  const loginSelector = LOGIN_EMAIL_SELECTOR;
   if (window.location.href.includes('/page-not-found')) throw new Error('WARM_TAB_NOT_VFS');
   if (document.querySelector(loginSelector)) return;
 
@@ -171,25 +177,17 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     30_000,
   ).catch(() => undefined);
 
-  await typeIntoFirst([
-    'input[formcontrolname="emailid"]',
-    'input[name="emailid"]',
-    'input[formcontrolname="username"]',
-    'input[name="username"]',
-    'input[id*="email" i]',
-    'input[type="email"]',
-    'input[name="email"]',
-  ], payload.email);
-  await typeIntoFirst([
-    'input[type="password"]',
-    'input[formcontrolname="password"]',
-    'input[name="password"]',
-  ], payload.password);
+  // Fill with GENUINE keystrokes (chrome.debugger), not setInputValue — VFS UZ
+  // leaves the Sign In button disabled unless input arrives as real typed
+  // events. The real login email field is #email / formcontrolname="username".
+  const emailEl = document.querySelector<HTMLInputElement>(LOGIN_EMAIL_SELECTOR);
+  const pwdEl = document.querySelector<HTMLInputElement>(
+    '#password, input[formcontrolname="password"], input[type="password"]',
+  );
+  if (emailEl) await trustedFill(emailEl, payload.email);
+  if (pwdEl) await trustedFill(pwdEl, payload.password);
 
-  // Press Tab to force Angular Material to mark the form as touched/dirty
-  // and run validation — on VFS UZ the Sign In button stays disabled until
-  // a real key/blur event fires after typing. setInputValue's dispatched
-  // blur isn't enough; only a trusted Tab keypress flips Angular's state.
+  // Tab once more to ensure Angular marks the form touched/validated.
   await trustedKey('Tab');
   await new Promise((r) => setTimeout(r, 300));
 
@@ -205,6 +203,19 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     const token = await waitForRegisterSignal('loginCaptchaToken', 75_000);
     if (!token) throw new Error('LOGIN_CAPTCHA_TOKEN_MISSING');
     await applyRegisterCaptchaToken(token);
+  }
+
+  // Replicate the human gesture the operator must do for VFS to accept the
+  // login: a genuine pointer click INSIDE the form before pressing Sign In.
+  // Observed 2026-05-23: filling fields programmatically + Tab leaves the
+  // form ng-valid and the button enabled, but VFS ignores the submit unless
+  // a real in-form pointer interaction happened first ("I always click the
+  // form box before Sign In"). A trusted click on the email field provides
+  // that transient user activation; setInputValue/Tab does not.
+  const emailField = document.querySelector<HTMLElement>('#email, input[formcontrolname="username"]');
+  if (emailField) {
+    await trustedClick(emailField);
+    await new Promise((r) => setTimeout(r, 250));
   }
 
   const initialUrl = window.location.href;
@@ -1526,6 +1537,36 @@ async function trustedKey(key: string): Promise<boolean> {
     void postRegisterTrace('trustedKey threw', { key, err: (e as Error).message });
     return false;
   }
+}
+
+async function trustedType(text: string): Promise<boolean> {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_TYPE', text });
+    if (res && (res as { ok?: boolean }).ok) return true;
+    void postRegisterTrace('trustedType failed', { res });
+    return false;
+  } catch (e) {
+    void postRegisterTrace('trustedType threw', { err: (e as Error).message });
+    return false;
+  }
+}
+
+// Fill a field with GENUINE keystrokes via chrome.debugger. VFS UZ's Angular
+// form keeps the Sign In button disabled unless input arrives as real typed
+// events (programmatic .value-setting is ignored). Also clears any Chrome
+// autofill first so we don't submit a stale/wrong email.
+async function trustedFill(el: HTMLInputElement, value: string): Promise<void> {
+  el.value = ''; // clear autofill without firing blur (keeps focus path clean)
+  const clicked = await trustedClick(el); // genuine focus + form-interaction gesture
+  if (!clicked) {
+    // Fall back to programmatic fill so we at least populate the field.
+    setInputValue(el, value);
+    return;
+  }
+  await new Promise((r) => setTimeout(r, 120));
+  const typed = await trustedType(value);
+  if (!typed) setInputValue(el, value);
+  await new Promise((r) => setTimeout(r, 120));
 }
 
 async function emitRegisterEvent(event: ExtensionEvent): Promise<void> {

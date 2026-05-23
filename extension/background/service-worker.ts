@@ -1,8 +1,8 @@
 import { ExtensionWsClient } from '../shared/ws-client';
-import { debuggerClickAt, debuggerAttach, debuggerKeyPress } from './debugger.helper';
+import { debuggerClickAt, debuggerAttach, debuggerKeyPress, debuggerTypeText } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
-const SW_VERSION = '2026-05-21-trusted-clicks-v7.2';
+const SW_VERSION = '2026-05-23-inject-content-script-v8';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
 const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
 log(`boot at ${new Date().toISOString()} version=${SW_VERSION}`);
@@ -143,6 +143,19 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     } catch (e) {
       const err = (e as Error).message;
       warn('TRUSTED_KEY failed:', err);
+      return { ok: false, error: err };
+    }
+  }
+  if (message.type === 'TRUSTED_TYPE') {
+    const tabId = sender?.tab?.id;
+    if (!tabId) return { ok: false, error: 'NO_TAB_ID' };
+    try {
+      await debuggerAttach(tabId);
+      await debuggerTypeText(tabId, String(message.text ?? ''));
+      return { ok: true };
+    } catch (e) {
+      const err = (e as Error).message;
+      warn('TRUSTED_TYPE failed:', err);
       return { ok: false, error: err };
     }
   }
@@ -319,7 +332,7 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
     }
     await chrome.tabs.update(tab.id, { active: true });
     activeLoginTabs.set(msg.correlationId, tab.id);
-    await chrome.tabs.sendMessage(tab.id, {
+    await sendToTabEnsuringContentScript(tab.id, {
       type: 'LOGIN_VIA_SPA',
       payload: {
         email: msg.email,
@@ -332,12 +345,30 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
   }
 }
 
+// Send a message to a tab's content script, injecting the content script
+// first if it isn't there. After an extension reload (or on a tab that
+// loaded before the script registered) chrome.tabs.sendMessage throws
+// "Receiving end does not exist" — we recover by injecting vfs-bridge.js
+// on-demand and retrying once.
+async function sendToTabEnsuringContentScript(tabId: number, message: unknown): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, message);
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content/vfs-bridge.js'] });
+    await new Promise((r) => setTimeout(r, 600));
+    await chrome.tabs.sendMessage(tabId, message);
+  }
+}
+
 async function findWarmVfsTab(): Promise<chrome.tabs.Tab | null> {
   const tabs = await chrome.tabs.query({ url: '*://*.vfsglobal.com/*' });
   const warm = tabs
     .filter((t) => t.id != null && t.url && !t.url.includes('/page-not-found'))
     .sort((a, b) => ((b as chrome.tabs.Tab & { lastAccessed?: number }).lastAccessed ?? b.id ?? 0) - ((a as chrome.tabs.Tab & { lastAccessed?: number }).lastAccessed ?? a.id ?? 0));
-  return warm[0] ?? null;
+  // Prefer an actual login/account page over any other VFS tab (e.g. a stray
+  // help/cookie page) so we drive the right one.
+  const loginTab = warm.find((t) => /\/(login|account|dashboard)/i.test(t.url ?? ''));
+  return loginTab ?? warm[0] ?? null;
 }
 
 async function runRegisterFlow(msg: Extract<BackendMessage, { type: 'BG_REGISTER_VFS_ACCOUNT' }>): Promise<void> {
@@ -401,7 +432,7 @@ async function runActivationFlow(msg: Extract<BackendMessage, { type: 'BG_ACTIVA
     }
     await chrome.tabs.update(tab.id, { active: true });
     activeActivationTabs.set(msg.correlationId, tab.id);
-    await chrome.tabs.sendMessage(tab.id, {
+    await sendToTabEnsuringContentScript(tab.id, {
       type: 'ACTIVATE_VIA_SPA',
       payload: { email: msg.email, correlationId: msg.correlationId },
     });
