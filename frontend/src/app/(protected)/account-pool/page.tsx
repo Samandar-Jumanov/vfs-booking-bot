@@ -573,13 +573,19 @@ export default function AccountPoolPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(loginBatchJob?.items ?? []).map((item) => (
-                        <tr key={item.accountId} className="border-t">
-                          <td className="px-3 py-2 font-semibold">{item.email}</td>
-                          <td className="px-3 py-2"><LoginBatchStatePill state={item.state} /></td>
-                          <td className="px-3 py-2 text-xs text-red-500">{item.error}</td>
-                        </tr>
-                      ))}
+                      {(loginBatchJob?.items ?? []).map((item) => {
+                        const isActivation = item.error?.startsWith('ACTIVATION_FAILED:');
+                        const errorText = isActivation
+                          ? `Activation: ${item.error!.slice('ACTIVATION_FAILED:'.length)}`
+                          : item.error;
+                        return (
+                          <tr key={item.accountId} className="border-t">
+                            <td className="px-3 py-2 font-semibold">{item.email}</td>
+                            <td className="px-3 py-2"><LoginBatchStatePill state={item.state} /></td>
+                            <td className={`px-3 py-2 text-xs ${isActivation ? 'text-amber-500' : 'text-red-500'}`}>{errorText}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

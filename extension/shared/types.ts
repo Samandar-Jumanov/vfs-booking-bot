@@ -58,6 +58,8 @@ export type BackendMessage =
   | { type: 'BG_REGISTER_CAPTCHA_TOKEN'; correlationId: string; token: string | null }
   | { type: 'BG_LOGIN_VFS_ACCOUNT'; email: string; password: string; loginUrl: string; correlationId: string }
   | { type: 'BG_LOGIN_CAPTCHA_TOKEN'; correlationId: string; token: string | null }
+  | { type: 'BG_ACTIVATE_VFS_ACCOUNT'; email: string; loginUrl: string; correlationId: string }
+  | { type: 'BG_ACTIVATION_DONE'; correlationId: string; ok: boolean; reason?: string }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -98,6 +100,10 @@ export type ExtensionEvent =
   | { type: 'EXT_LOGIN_NEED_CAPTCHA'; correlationId: string; siteKey: string; pageUrl: string }
   | { type: 'EXT_LOGIN_SUCCESS'; correlationId: string; email: string; url: string }
   | { type: 'EXT_LOGIN_FAILED'; correlationId: string; email: string; reason: string }
+  | { type: 'EXT_ACTIVATION_NEED_LINK'; correlationId: string; email: string }
+  | { type: 'EXT_ACTIVATION_SUBMITTED'; correlationId: string; email: string }
+  | { type: 'EXT_ACTIVATION_SUCCESS'; correlationId: string; email: string }
+  | { type: 'EXT_ACTIVATION_FAILED'; correlationId: string; email: string; reason: string }
   | { type: 'EXT_LOGGED_IN'; email?: string }
   | { type: 'EXT_POLL_RESULT'; destination: string; status: number; data?: unknown }
   | {
@@ -129,7 +135,9 @@ export type ContentCommand =
   | { type: 'REGISTER_CAPTCHA_TOKEN'; token: string | null }
   | { type: 'LOGIN_FILL_FORM'; payload: LoginFormPayload }
   | { type: 'LOGIN_VIA_SPA'; payload: LoginFormPayload }
-  | { type: 'LOGIN_CAPTCHA_TOKEN'; token: string | null };
+  | { type: 'LOGIN_CAPTCHA_TOKEN'; token: string | null }
+  | { type: 'ACTIVATE_VIA_SPA'; payload: { email: string; correlationId: string } }
+  | { type: 'ACTIVATION_LINK_VISITED'; correlationId: string; ok: boolean; reason?: string };
 
 export interface RegisterFormPayload {
   email: string;

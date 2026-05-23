@@ -7,6 +7,7 @@ import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { logEvent } from '@modules/logs/logger';
 import { sendToExtension } from '@modules/websocket/ws.server';
 import { decrypt } from '@utils/crypto';
+import { runActivation } from './accountActivationService';
 
 const LOGIN_TIMEOUT_MS = 90_000;
 const CRON_STALE_MS = 10 * 60 * 60 * 1000;
@@ -41,6 +42,22 @@ export async function loginAccount(accountId: string): Promise<LoginResult> {
   const operatorUserId = await resolveOperatorUserId();
   if (!operatorUserId) {
     return { success: false, accountId: account.id, email: account.email, reason: 'OPERATOR_NOT_FOUND' };
+  }
+
+  if (account.status === AccountStatus.PENDING) {
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[LOGIN] account ${account.email} is PENDING — running activation first`);
+    const activationResult = await runActivation(account.id, account.email, operatorUserId);
+    if (!activationResult.ok) {
+      return {
+        success: false,
+        accountId: account.id,
+        email: account.email,
+        reason: `ACTIVATION_FAILED:${activationResult.reason}`,
+      };
+    }
+    logEvent('info', EventType.BOOKING_SUCCESS,
+      `[LOGIN] activation succeeded for ${account.email} — proceeding to login`);
   }
 
   const correlationId = crypto.randomUUID();

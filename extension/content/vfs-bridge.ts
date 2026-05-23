@@ -12,12 +12,14 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-23-login-tab-trigger';
+const VFS_BRIDGE_VERSION = '2026-05-23-activation-flow';
 const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
 const registerWaiters = new Map<string, (value: string | null) => void>();
+type ActivationSignalValue = { ok: boolean; reason?: string };
+const activationWaiters = new Map<string, (value: ActivationSignalValue) => void>();
 
 chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse) => {
   void handleCommand(message).then(sendResponse).catch((error: Error) => {
@@ -56,6 +58,12 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
     case 'LOGIN_CAPTCHA_TOKEN':
       resolveRegisterWaiter('loginCaptchaToken', command.token);
       void applyRegisterCaptchaToken(command.token);
+      return { ok: true };
+    case 'ACTIVATE_VIA_SPA':
+      void handleActivationViaSpa(command.payload);
+      return { ok: true };
+    case 'ACTIVATION_LINK_VISITED':
+      resolveActivationWaiter('activationLinkVisited', { ok: command.ok, reason: command.reason });
       return { ok: true };
     case 'POLL_SLOT':
       return pollSlot(command.monitor);
@@ -211,6 +219,147 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     email: payload.email,
     url: window.location.href,
   });
+}
+
+async function handleActivationViaSpa(payload: { email: string; correlationId: string }): Promise<void> {
+  currentCorrelationId = payload.correlationId;
+  try {
+    await withTimeout(runActivationSteps(payload), 150_000, 'ACTIVATION_TIMEOUT');
+  } catch (error) {
+    await emitActivationEvent({
+      type: 'EXT_ACTIVATION_FAILED',
+      correlationId: payload.correlationId,
+      email: payload.email,
+      reason: (error as Error).message,
+    });
+  }
+}
+
+async function runActivationSteps(payload: { email: string; correlationId: string }): Promise<void> {
+  if (window.location.href.includes('/page-not-found')) throw new Error('WARM_TAB_NOT_VFS');
+
+  // 1. Get onto the activation page if we're not already there.
+  if (!window.location.href.includes('/email-activation')) {
+    const link = findActivateMyAccountLink();
+    if (!link) throw new Error('ACTIVATE_LINK_NOT_FOUND');
+    if (!(await trustedClick(link))) throw new Error('ACTIVATE_LINK_CLICK_FAILED');
+    await waitForElement('input[formcontrolname="emailid"], input[name="emailid"], input[type="email"]', 20_000)
+      .catch(() => { throw new Error('ACTIVATION_FORM_NEVER_APPEARED'); });
+  }
+
+  // 2. Fill the email field and Tab to wake Angular.
+  await typeIntoFirst([
+    'input[formcontrolname="emailid"]',
+    'input[name="emailid"]',
+    'input[type="email"]',
+    'input[formcontrolname="email"]',
+  ], payload.email);
+  await trustedKey('Tab');
+  await new Promise((r) => setTimeout(r, 300));
+
+  // 3. Solve Turnstile if present on the activation page.
+  const turnstile = document.querySelector<HTMLElement>('[data-sitekey], .cf-turnstile');
+  const siteKey = turnstile?.getAttribute('data-sitekey');
+  if (siteKey) {
+    await emitLoginEvent({
+      type: 'EXT_LOGIN_NEED_CAPTCHA',
+      correlationId: payload.correlationId,
+      siteKey,
+      pageUrl: window.location.href,
+    });
+    const token = await waitForRegisterSignal('loginCaptchaToken', 75_000);
+    if (!token) throw new Error('ACTIVATION_CAPTCHA_TOKEN_MISSING');
+    await applyRegisterCaptchaToken(token);
+  }
+
+  // 4. Submit the activation form (poll for enabled + retry, mirrors login).
+  const initialUrl = window.location.href;
+  await clickActivationSubmit(initialUrl);
+
+  // 5. Tell backend we submitted — it will poll Mailsac + visit the activation link.
+  await emitActivationEvent({
+    type: 'EXT_ACTIVATION_SUBMITTED',
+    correlationId: payload.correlationId,
+    email: payload.email,
+  });
+
+  // 6. Wait for backend confirmation that the activation link visit succeeded.
+  const result = await waitForActivationSignal('activationLinkVisited', 150_000);
+  if (!result.ok) throw new Error('ACTIVATION_LINK_VISIT_FAILED:' + (result.reason ?? 'unknown'));
+
+  // 7. SPA-return to login form. Try "Sign in" link / button by text.
+  const backToLogin = findButtonByText(['sign in', 'login', 'log in', 'back to login']);
+  if (backToLogin) {
+    await trustedClick(backToLogin);
+    await waitForElement('input[formcontrolname="emailid"]', 20_000).catch(() => undefined);
+  }
+
+  await emitActivationEvent({
+    type: 'EXT_ACTIVATION_SUCCESS',
+    correlationId: payload.correlationId,
+    email: payload.email,
+  });
+}
+
+async function clickActivationSubmit(initialUrl: string): Promise<void> {
+  const findBtn = () => findButtonByText(['activate', 'submit', 'send', 'continue']) ??
+    document.querySelector<HTMLElement>('button[type="submit"]');
+  const isEnabled = (btn: HTMLElement): boolean => {
+    const asBtn = btn as HTMLButtonElement;
+    if (asBtn.disabled) return false;
+    if (btn.getAttribute('aria-disabled') === 'true') return false;
+    if (btn.hasAttribute('disabled')) return false;
+    return true;
+  };
+  const hasTurnstileToken = (): boolean => {
+    const sitekeyEl = document.querySelector('[data-sitekey], .cf-turnstile');
+    if (!sitekeyEl) return true;
+    const t = document.querySelector<HTMLTextAreaElement | HTMLInputElement>('[name="cf-turnstile-response"]');
+    return Boolean(t?.value);
+  };
+  const isSubmitted = (): boolean => {
+    const text = document.body.innerText.toLowerCase();
+    return text.includes('verification email') ||
+      text.includes('activation email') ||
+      text.includes('check your inbox') ||
+      text.includes('email has been sent') ||
+      text.includes('activation link') ||
+      window.location.href !== initialUrl;
+  };
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const btn = findBtn();
+    const tokenOk = hasTurnstileToken();
+    const btnOk = btn ? isEnabled(btn) : false;
+    if (btn && tokenOk && btnOk) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        await trustedClick(btn);
+        await new Promise((r) => setTimeout(r, 2000));
+        if (isSubmitted()) return;
+        const reBtn = findBtn();
+        if (!reBtn) break;
+        if (!isEnabled(reBtn)) {
+          const reDeadline = Date.now() + 3000;
+          while (Date.now() < reDeadline && !isEnabled(reBtn)) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        }
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error('ACTIVATION_SUBMIT_BUTTON_NEVER_ENABLED');
+}
+
+function findActivateMyAccountLink(): HTMLElement | null {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>('a, button'));
+  return candidates.find((el) => isVisible(el) && /activate my account/i.test(el.textContent ?? '')) ?? null;
+}
+
+async function emitActivationEvent(event: ExtensionEvent): Promise<void> {
+  await chrome.runtime.sendMessage(event).catch(() => undefined);
 }
 
 async function handleRegisterFlow(payload: RegisterFormPayload): Promise<void> {
@@ -1309,6 +1458,24 @@ function waitForRegisterSignal(kind: string, timeoutMs: number): Promise<string 
 
 function resolveRegisterWaiter(kind: string, value: string | null): void {
   registerWaiters.get(kind)?.(value);
+}
+
+function waitForActivationSignal(kind: string, timeoutMs: number): Promise<ActivationSignalValue> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      activationWaiters.delete(kind);
+      reject(new Error(kind.toUpperCase() + '_TIMEOUT'));
+    }, timeoutMs);
+    activationWaiters.set(kind, (value) => {
+      window.clearTimeout(timer);
+      activationWaiters.delete(kind);
+      resolve(value);
+    });
+  });
+}
+
+function resolveActivationWaiter(kind: string, value: ActivationSignalValue): void {
+  activationWaiters.get(kind)?.(value);
 }
 
 // HTTP-only register-flow trace: POST goes via chrome.runtime to the SW which

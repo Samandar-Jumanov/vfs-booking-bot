@@ -30,6 +30,7 @@ void chrome.storage.local.get({ runtimeState: null }).then((stored) => {
 });
 const activeRegisterTabs = new Map<string, number>();
 const activeLoginTabs = new Map<string, number>();
+const activeActivationTabs = new Map<string, number>();
 
 // MV3 idle-kills service workers in ~30s. We arm two recurring alarms so
 // the SW is woken on a fixed cadence — keeps the WS reconnect logic alive
@@ -208,7 +209,10 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_REGISTER_FAILED' ||
     message.type === 'EXT_LOGIN_NEED_CAPTCHA' ||
     message.type === 'EXT_LOGIN_SUCCESS' ||
-    message.type === 'EXT_LOGIN_FAILED'
+    message.type === 'EXT_LOGIN_FAILED' ||
+    message.type === 'EXT_ACTIVATION_SUBMITTED' ||
+    message.type === 'EXT_ACTIVATION_SUCCESS' ||
+    message.type === 'EXT_ACTIVATION_FAILED'
   ) {
     sendEvent(message as ExtensionEvent);
     return { ok: true };
@@ -248,6 +252,19 @@ function handleBackendMessage(message: BackendMessage): void {
   }
   if (message.type === 'BG_LOGIN_CAPTCHA_TOKEN') {
     forwardToActiveLoginTab(message.correlationId, { type: 'LOGIN_CAPTCHA_TOKEN', token: message.token });
+    return;
+  }
+  if (message.type === 'BG_ACTIVATE_VFS_ACCOUNT') {
+    void runActivationFlow(message);
+    return;
+  }
+  if (message.type === 'BG_ACTIVATION_DONE') {
+    forwardToActiveActivationTab(message.correlationId, {
+      type: 'ACTIVATION_LINK_VISITED',
+      correlationId: message.correlationId,
+      ok: message.ok,
+      reason: message.reason,
+    });
     return;
   }
   if (message.type === 'BG_REGISTER_VFS_ACCOUNT') {
@@ -367,6 +384,30 @@ function forwardToActiveLoginTab(correlationId: string, payload: { type: string;
   const tabId = activeLoginTabs.get(correlationId);
   if (!tabId) return;
   chrome.tabs.sendMessage(tabId, payload).catch(() => undefined);
+}
+
+function forwardToActiveActivationTab(correlationId: string, payload: { type: string; [key: string]: unknown }): void {
+  const tabId = activeActivationTabs.get(correlationId);
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, payload).catch(() => undefined);
+}
+
+async function runActivationFlow(msg: Extract<BackendMessage, { type: 'BG_ACTIVATE_VFS_ACCOUNT' }>): Promise<void> {
+  try {
+    const tab = await findWarmVfsTab();
+    if (!tab?.id) {
+      sendEvent({ type: 'EXT_ACTIVATION_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'WARM_TAB_REQUIRED' });
+      return;
+    }
+    await chrome.tabs.update(tab.id, { active: true });
+    activeActivationTabs.set(msg.correlationId, tab.id);
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'ACTIVATE_VIA_SPA',
+      payload: { email: msg.email, correlationId: msg.correlationId },
+    });
+  } catch (err) {
+    sendEvent({ type: 'EXT_ACTIVATION_FAILED', correlationId: msg.correlationId, email: msg.email, reason: (err as Error).message });
+  }
 }
 
 async function handleBookForCustomer(message: Extract<BackendMessage, { type: 'BOOK_FOR_CUSTOMER' }>): Promise<void> {
@@ -537,6 +578,9 @@ function sendEvent(event: ExtensionEvent): void {
   }
   if (event.type === 'EXT_LOGIN_SUCCESS' || event.type === 'EXT_LOGIN_FAILED') {
     activeLoginTabs.delete(event.correlationId);
+  }
+  if (event.type === 'EXT_ACTIVATION_SUCCESS' || event.type === 'EXT_ACTIVATION_FAILED') {
+    activeActivationTabs.delete(event.correlationId);
   }
   wsClient?.send(event);
 }

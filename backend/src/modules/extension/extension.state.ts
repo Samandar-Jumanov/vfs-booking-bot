@@ -145,7 +145,9 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
     'EXT_SESSION_LOST', 'EXT_REGISTER_NEED_EMAIL_LINK', 'EXT_REGISTER_NEED_SMS_OTP',
     'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_SUBMITTED', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
     'EXT_LOGIN_NEED_CAPTCHA', 'EXT_LOGIN_SUCCESS', 'EXT_LOGIN_FAILED',
-    'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT'].includes(String(event.type))) {
+    'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT',
+    'EXT_ACTIVATION_NEED_LINK', 'EXT_ACTIVATION_SUBMITTED', 'EXT_ACTIVATION_SUCCESS', 'EXT_ACTIVATION_FAILED',
+  ].includes(String(event.type))) {
     const { logEvent } = await import('@modules/logs/logger');
     const { EventType } = await import('@prisma/client');
     logEvent('warn', EventType.MONITOR_STARTED, `[EXT_UNKNOWN] type=${event.type}`);
@@ -387,6 +389,37 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
       ok: false,
       reason: String(event.reason ?? 'EXT_REGISTER_FAILED'),
     });
+    return;
+  }
+
+  // ── Activation bridge events ─────────────────────────────────────────────
+  if (event.type === 'EXT_ACTIVATION_SUBMITTED' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[ACTIVATION] form submitted for correlation ${event.correlationId.slice(0, 8)}…`);
+    const { resolveActivationSubmitted } = await import('@modules/accounts/accountActivationService');
+    resolveActivationSubmitted(event.correlationId);
+    return;
+  }
+
+  if (event.type === 'EXT_ACTIVATION_SUCCESS' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('info', EventType.BOOKING_SUCCESS,
+      `[ACTIVATION] success signal from extension for correlation ${event.correlationId.slice(0, 8)}…`);
+    const { resolveActivationSuccess } = await import('@modules/accounts/accountActivationService');
+    resolveActivationSuccess(event.correlationId);
+    return;
+  }
+
+  if (event.type === 'EXT_ACTIVATION_FAILED' && typeof event.correlationId === 'string') {
+    const { logEvent } = await import('@modules/logs/logger');
+    const { EventType } = await import('@prisma/client');
+    logEvent('error', EventType.BOOKING_FAILED,
+      `[ACTIVATION] failed: ${String(event.reason ?? 'unknown')} for correlation ${event.correlationId.slice(0, 8)}…`);
+    const { resolveActivationFailed } = await import('@modules/accounts/accountActivationService');
+    resolveActivationFailed(event.correlationId, String(event.reason ?? 'EXT_ACTIVATION_FAILED'));
     return;
   }
 }
