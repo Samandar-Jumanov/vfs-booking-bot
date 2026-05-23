@@ -9,6 +9,7 @@ import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
 import { autoRegisterAccount, fetchEmailVerificationLink, visitActivationLink } from './accountAutoRegister.service';
 import { accountBatchService } from './accountBatch.service';
 import { loginAccount } from './accountLoginService';
+import { cancelLoginBatch, getLoginBatch, startLoginBatch } from './loginBatch.service';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
 import { AccountStatus, EventType, PollingRole } from '@prisma/client';
@@ -39,6 +40,11 @@ const autoCreateBatchSchema = z.object({
 
 const pollingRoleSchema = z.object({
   role: z.nativeEnum(PollingRole),
+});
+
+const loginBatchSchema = z.object({
+  accountIds: z.array(z.string().min(1)).min(1),
+  spacingMs: z.coerce.number().int().min(0).max(10 * 60 * 1000).optional(),
 });
 
 const PENDING_STATUS = 'PENDING' as AccountStatus;
@@ -299,6 +305,36 @@ accountsRouter.post('/:id/auto-login', async (req: Request, res: Response, next:
  * - cookieFresh: lastWarmedAt within 12h
  * - loginUrl: the URL operator should open in Chrome for this account
  */
+accountsRouter.post('/login-batch', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const body = loginBatchSchema.parse(req.body ?? {});
+    const jobId = await startLoginBatch(body.accountIds, body.spacingMs);
+    res.status(202).json({ jobId });
+  } catch (err) {
+    next(err);
+  }
+});
+
+accountsRouter.get('/login-batch/:jobId', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const job = getLoginBatch(req.params.jobId);
+    if (!job) throw new AppError(404, `Login batch "${req.params.jobId}" not found`, 'NOT_FOUND');
+    res.json(job);
+  } catch (err) {
+    next(err);
+  }
+});
+
+accountsRouter.post('/login-batch/:jobId/cancel', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const ok = cancelLoginBatch(req.params.jobId);
+    if (!ok) throw new AppError(404, `Login batch "${req.params.jobId}" not found`, 'NOT_FOUND');
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 accountsRouter.get('/warmup-status', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const STALE_MS = 12 * 60 * 60 * 1000;

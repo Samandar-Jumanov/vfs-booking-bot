@@ -58,3 +58,81 @@
   - `cd backend && npm run build` -> PASS
   - `cd backend && npx prisma migrate status` -> PASS
 - **Resumption point:** Stage 4 (loginBatch service + endpoints).
+
+## Stage 4 - Batch auto-login endpoints
+
+- **Status:** PASS
+- **Files changed:**
+  - backend/src/modules/accounts/loginBatch.service.ts (+137 / -0)
+  - backend/src/modules/accounts/accounts.router.ts (+37 / -0)
+  - backend/scripts/smoke-login-batch.ts (+66 / -0)
+- **Endpoints added/changed:**
+  - POST /api/accounts/login-batch - starts a sequential account auto-login batch.
+  - GET /api/accounts/login-batch/:jobId - returns current batch progress.
+  - POST /api/accounts/login-batch/:jobId/cancel - requests cancellation.
+- **Smoke script result:**
+  - backend/scripts/smoke-login-batch.ts -> exit 0
+  - Output: `states=success,failed,success`
+- **Verification:**
+  - `cd backend && npm run build` -> PASS
+- **Surprises / deviations:** This branch has `accountLoginService.ts` rather than `accountAutoLogin.service.ts`, so the batch service reuses `loginAccount`. The smoke script injects a runner stub through a smoke-only setter.
+- **Time spent:** ~25 minutes
+
+## Stage 5 - Login All Stale account-pool button
+
+- **Status:** PASS
+- **Files changed:**
+  - frontend/src/app/(protected)/account-pool/page.tsx (+154 / -0)
+- **Endpoints added/changed:**
+  - None; consumes Stage 4 `POST /api/accounts/login-batch`, `GET /api/accounts/login-batch/:jobId`, and cancel endpoint.
+- **Smoke script result:**
+  - Not applicable.
+- **Verification:**
+  - `cd frontend && npm run build` -> PASS
+  - `cd frontend && npm run lint` -> PASS
+- **Surprises / deviations:** Manual smoke skipped; no browser tool was requested/exposed for this stage. Lint exits 0 with existing warning-style output.
+- **Time spent:** ~25 minutes
+
+## Stage 6 - PollingRole chips
+
+- **Status:** PASS
+- **Files changed:**
+  - frontend/src/app/(protected)/account-pool/page.tsx (+38 / -1)
+- **Endpoints added/changed:**
+  - None; consumes Stage 3 `PATCH /api/accounts/:id/polling-role`.
+- **Smoke script result:**
+  - Not applicable.
+- **Verification:**
+  - `cd frontend && npm run build` -> PASS
+  - `cd frontend && npm run lint` -> PASS
+- **Surprises / deviations:** Existing lint warnings remain outside the changed role-chip code path; lint exits 0.
+- **Time spent:** ~15 minutes
+
+## Stage 7 - Final sweep
+
+- **Status:** PASS
+- **Files changed:**
+  - CODEX_MONITOR_REPORT.md
+  - backend/src/modules/accounts/accounts.router.ts
+  - backend/src/modules/accounts/loginBatch.service.ts
+  - backend/scripts/smoke-login-batch.ts
+  - frontend/src/app/(protected)/account-pool/page.tsx
+- **Endpoints added/changed:**
+  - POST /api/accounts/login-batch
+  - GET /api/accounts/login-batch/:jobId
+  - POST /api/accounts/login-batch/:jobId/cancel
+- **Smoke script result:**
+  - backend/scripts/smoke-login-batch.ts -> exit 0
+- **Verification:**
+  - `cd backend && npm run build` -> PASS
+  - `cd frontend && npm run build` -> PASS
+  - `cd extension && npm run build` -> PASS
+- **Diff stat:**
+```text
+ CODEX_MONITOR_REPORT.md                            |  49 ++++
+ backend/src/modules/accounts/accounts.router.ts    |  36 +++
+ frontend/src/app/(protected)/account-pool/page.tsx | 255 ++++++++++++++++++++-
+ 3 files changed, 338 insertions(+), 2 deletions(-)
+```
+- **Surprises / deviations:** `git diff --stat HEAD` does not include untracked files, so the new Stage 4 files `backend/src/modules/accounts/loginBatch.service.ts` and `backend/scripts/smoke-login-batch.ts` are not represented in the stat until the orchestrator stages them. Frontend build still prints existing lint warnings, but exits 0.
+- **Time spent:** ~10 minutes
