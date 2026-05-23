@@ -52,6 +52,10 @@ export interface MonitorState extends MonitorConfig {
   vfsLoginUser?: string;
   vfsAccountId?: string;
   lastHttpStatus?: number;
+  lastPollAt?: Date;
+  lastPollStatus?: number;
+  lastPollError?: string;
+  pollerAccountEmail?: string;
   isCoolingDown?: boolean;
   lastEnqueuedAt?: number;
   lastSlotSignature?: string;
@@ -59,6 +63,15 @@ export interface MonitorState extends MonitorConfig {
 
 const monitors = new Map<string, MonitorState>();
 const monitorTimeouts = new Map<string, NodeJS.Timeout>();
+
+type PollOutcome = {
+  at: Date;
+  status: number;
+  ok: boolean;
+  accountEmail: string;
+};
+
+const pollOutcomes = new Map<string, PollOutcome[]>();
 
 // Internal Proxy Cache to prevent DB bottlenecks
 const proxyCache = new Map<string, { config: any, expiresAt: number }>();
@@ -729,17 +742,86 @@ export function setMonitor(id: string, state: MonitorState): void {
   monitors.set(id, state);
 }
 
+function shortPollError(message?: string | null): string | null {
+  if (!message) return null;
+  return message.length > 180 ? `${message.slice(0, 177)}...` : message;
+}
+
+export function recordMonitorPollOutcome(args: {
+  monitorId: string;
+  status: number;
+  ok: boolean;
+  accountEmail?: string | null;
+  error?: string | null;
+  at?: Date;
+}): void {
+  const at = args.at ?? new Date();
+  const recent = pollOutcomes.get(args.monitorId) ?? [];
+  pollOutcomes.set(args.monitorId, [
+    {
+      at,
+      status: args.status,
+      ok: args.ok,
+      accountEmail: args.accountEmail ?? '',
+    },
+    ...recent,
+  ].slice(0, 5));
+
+  const current = getMonitor(args.monitorId);
+  if (!current) return;
+  setMonitor(args.monitorId, {
+    ...current,
+    lastCheckedAt: at,
+    lastHttpStatus: args.status,
+    lastPollAt: at,
+    lastPollStatus: args.status,
+    lastPollError: args.ok ? undefined : (shortPollError(args.error) ?? undefined),
+    pollerAccountEmail: args.accountEmail ?? undefined,
+  });
+}
+
+export function recordExtensionPollResult(destination: string, status: number, error?: string | null): void {
+  const destCode = getDestinationCode(destination);
+  const monitor = Array.from(monitors.values()).find((item) =>
+    item.isRunning && getDestinationCode(item.destination) === destCode);
+  if (!monitor) return;
+  recordMonitorPollOutcome({
+    monitorId: monitor.id,
+    status,
+    ok: status >= 200 && status < 400,
+    accountEmail: monitor.vfsLoginUser,
+    error,
+  });
+}
+
 export function getMonitorStatus() {
-  return Array.from(monitors.values()).map(m => ({
-    id: m.id,
-    sourceCountry: m.sourceCountry,
-    destination: m.destination,
-    visaType: m.visaType,
-    isRunning: m.isRunning,
-    isCoolingDown: m.isCoolingDown || false,
-    slotDetectedCount: m.slotDetectedCount,
-    lastCheckedAt: m.lastCheckedAt
-  }));
+  return Array.from(monitors.values()).map(m => {
+    const recentPolls = pollOutcomes.get(m.id) ?? [];
+    const lastPollAt = m.lastPollAt ?? m.lastCheckedAt ?? null;
+    const intervalMs = m.intervalMs || env.MONITOR_DEFAULT_INTERVAL_MS;
+    return {
+      id: m.id,
+      sourceCountry: m.sourceCountry,
+      destination: m.destination,
+      visaType: m.visaType,
+      intervalMs: m.intervalMs,
+      isRunning: m.isRunning,
+      isCoolingDown: m.isCoolingDown || false,
+      slotDetectedCount: m.slotDetectedCount,
+      lastCheckedAt: m.lastCheckedAt,
+      lastPollAt: lastPollAt ? lastPollAt.toISOString() : null,
+      lastPollStatus: m.lastPollStatus ?? m.lastHttpStatus ?? null,
+      lastPollError: m.lastPollError ?? null,
+      nextPollAt: m.isRunning && lastPollAt ? new Date(lastPollAt.getTime() + intervalMs).toISOString() : null,
+      pollerAccountEmail: m.pollerAccountEmail ?? m.vfsLoginUser ?? null,
+      recentPolls: recentPolls.map((poll) => ({
+        at: poll.at.toISOString(),
+        status: poll.status,
+        ok: poll.ok,
+        accountEmail: poll.accountEmail,
+      })),
+    };
+  });
 }
 
 export async function createOrStartMonitor(config: MonitorConfig): Promise<string> {
@@ -822,6 +904,7 @@ export async function startMonitor(id: string): Promise<void> {
   const poll = async () => {
     const config = getMonitor(id);
     if (!config || !config.isRunning) return;
+    let recordedPoll = false;
 
     try {
       await getRedis().set(`monitor:${id}:heartbeat`, Date.now().toString(), 'EX', 90);
@@ -899,6 +982,16 @@ export async function startMonitor(id: string): Promise<void> {
           proxyUrl: proxyConfig?.url,
         });
       }
+
+      const afterPollConfig = getMonitor(id) ?? latestConfig;
+      recordMonitorPollOutcome({
+        monitorId: id,
+        status: browserResult.status,
+        ok: browserResult.status < 400,
+        accountEmail: afterPollConfig.vfsLoginUser || creds?.email,
+        error: browserResult.status >= 400 ? browserResult.rawText || `HTTP ${browserResult.status}` : null,
+      });
+      recordedPoll = true;
 
       if (browserResult.status >= 400) {
         throw makeSlotFetchError(browserResult.status, browserResult.rawText || '');
@@ -985,7 +1078,7 @@ export async function startMonitor(id: string): Promise<void> {
           reason: err.message,
           timestamp: Date.now(),
         });
-        setMonitor(id, { ...config, isRunning: false, lastCheckedAt: new Date(), lastHttpStatus: 409 });
+        setMonitor(id, { ...(getMonitor(id) ?? config), isRunning: false, lastCheckedAt: new Date(), lastHttpStatus: 409 });
         await getRedis().del(`monitor:${id}:heartbeat`);
         return;
       }
@@ -993,11 +1086,20 @@ export async function startMonitor(id: string): Promise<void> {
       const isBotDetected = err.message.includes('VFS_BOT_DETECTED');
       const isTimeout = !isBotDetected && (err.message.includes('Timeout') || err.message.includes('timeout'));
       const status = isBotDetected ? 403 : (isTimeout ? 408 : (err.response?.status || (err.message.includes('403') ? 403 : 500)));
+      if (!recordedPoll) {
+        recordMonitorPollOutcome({
+          monitorId: id,
+          status,
+          ok: false,
+          accountEmail: (getMonitor(id) ?? config).vfsLoginUser,
+          error: err.message,
+        });
+      }
 
       // 402 = VFS rejected our session (not authenticated). Invalidate cookies and retry quickly.
       if (status === 402) {
         logEvent('warn', EventType.IP_BLOCKED, `[Monitor] 402 Auth Required for ${config.destination} — session invalidated, re-warming in 30s`);
-        setMonitor(id, { ...config, cookiesValid: false, cookies: undefined, vfsAccountId: undefined, lastCheckedAt: new Date(), lastHttpStatus: 402 });
+        setMonitor(id, { ...(getMonitor(id) ?? config), cookiesValid: false, cookies: undefined, vfsAccountId: undefined, lastCheckedAt: new Date(), lastHttpStatus: 402 });
         const retryPoll = setTimeout(poll, 30000);
         monitorTimeouts.set(id, retryPoll);
         return;
@@ -1008,14 +1110,14 @@ export async function startMonitor(id: string): Promise<void> {
         const cooldownMs = status === 403 ? 600000 : 300000; // 10m for 403, 5m for Timeout
 
         logEvent('warn', EventType.IP_BLOCKED, `${typeStr} for ${config.destination}. COOLDOWN: ${cooldownMs/1000}s`);
-        setMonitor(id, { ...config, isRunning: false, isCoolingDown: true, lastCheckedAt: new Date(), lastHttpStatus: status });
+        setMonitor(id, { ...(getMonitor(id) ?? config), isRunning: false, isCoolingDown: true, lastCheckedAt: new Date(), lastHttpStatus: status });
 
         setTimeout(() => { if (getMonitor(id)) startMonitor(id); }, cooldownMs);
         return;
       }
 
       logEvent('error', EventType.BOOKING_FAILED, `Monitor poll error: ${err.message}`);
-      setMonitor(id, { ...config, isRunning: false, lastCheckedAt: new Date(), lastHttpStatus: status });
+      setMonitor(id, { ...(getMonitor(id) ?? config), isRunning: false, lastCheckedAt: new Date(), lastHttpStatus: status });
       await getRedis().del(`monitor:${id}:heartbeat`);
     }
   };

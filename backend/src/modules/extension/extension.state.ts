@@ -127,6 +127,13 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   if (event.type === 'EXT_POLL_RESULT') {
     const { logEvent } = await import('@modules/logs/logger');
     const { EventType } = await import('@prisma/client');
+    const { recordExtensionPollResult } = await import('@modules/monitor/monitor.service');
+    const status = Number(event.status ?? 0);
+    recordExtensionPollResult(
+      String(event.destination ?? ''),
+      Number.isFinite(status) ? status : 0,
+      status >= 400 ? `Extension poll HTTP ${status}` : null,
+    );
     logEvent('info', EventType.MONITOR_STARTED,
       `[EXT_POLL_RESULT] dest=${event.destination} status=${event.status} hasData=${Boolean(event.data)}`);
     return;

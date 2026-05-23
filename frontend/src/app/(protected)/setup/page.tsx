@@ -1,381 +1,498 @@
 'use client';
-import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
-import { useMonitorStore } from '@/store/monitorStore';
-import { cn } from '@/lib/utils';
-import { CustomSelect } from '@/components/ui/CustomSelect';
+
+import Link from 'next/link';
+import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, Bell, Check, Clock, Loader2, Play, Radio, StopCircle } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
-import { 
-  Plus, 
-  Play, 
-  StopCircle, 
-  Settings2, 
-  Globe, 
-  Zap, 
-  ShieldCheck, 
-  AlertTriangle,
-  Clock,
-  LayoutGrid,
-  ChevronRight,
-  UserCheck
-} from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { api } from '@/lib/api';
+import { cn } from '@/lib/utils';
+import { useMonitorStore } from '@/store/monitorStore';
+
+type RouteOption = {
+  destination: 'lva' | 'tjk';
+  visaType: string;
+  flag: string;
+  title: string;
+  subtitle: string;
+  badge: string;
+};
+
+type AccountRow = {
+  id: string;
+  email: string;
+  status: 'PENDING' | 'ACTIVE' | 'BLOCKED' | 'COOLDOWN';
+  cookiesUpdatedAt?: string | null;
+  lastWarmedAt?: string | null;
+  pollingRole?: 'WATCHER' | 'BOOKER' | 'BOTH';
+};
+
+type MonitorRow = {
+  id: string;
+  isRunning: boolean;
+  sourceCountry?: string;
+  destination: string;
+  visaType: string;
+  intervalMs?: number;
+  lastCheckedAt?: string | null;
+  lastPollAt?: string | null;
+  lastPollStatus?: number | null;
+  lastPollError?: string | null;
+  nextPollAt?: string | null;
+  pollerAccountEmail?: string | null;
+  recentPolls?: Array<{ at: string; status: number; ok: boolean; accountEmail: string }>;
+};
+
+const ROUTES: RouteOption[] = [
+  {
+    destination: 'lva',
+    visaType: 'LTV',
+    flag: 'UZ -> LV',
+    title: 'UZ -> Latvia',
+    subtitle: 'D-visa (Work)',
+    badge: 'Production',
+  },
+  {
+    destination: 'tjk',
+    visaType: 'TST',
+    flag: 'UZ -> TJ',
+    title: 'UZ -> Tajikistan',
+    subtitle: 'Test route',
+    badge: 'Test only',
+  },
+];
+
+const FRESH_COOKIE_MS = 12 * 60 * 60 * 1000;
 
 export default function SetupPage() {
   const qc = useQueryClient();
   const { setMonitors } = useMonitorStore();
-
-  const [sourceCountry, setSourceCountry] = useState<'uzbekistan' | 'tajikistan' | 'latvia'>('uzbekistan');
-  const [destination, setDestination] = useState<'portugal' | 'brazil' | 'latvia' | 'tajikistan'>('latvia');
-  const [visaType, setVisaType] = useState('SCH');
-  const [intervalMs, setIntervalMs] = useState(10000);
+  const [step, setStep] = useState(1);
+  const [route, setRoute] = useState<RouteOption>(ROUTES[0]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
+  const [intervalSeconds, setIntervalSeconds] = useState(60);
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
-  const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>([]);
-  const [proxy, setProxy] = useState<{ 
-    host: string; 
-    port: number; 
-    username?: string; 
-    password?: string 
-  } | null>(null);
+  const [now, setNow] = useState(Date.now());
 
-  const { data: profilesData } = useQuery({
-    queryKey: ['profiles'],
-    queryFn: () => api.get('/profiles').then((r) => r.data),
+  const accountsQuery = useQuery<AccountRow[]>({
+    queryKey: ['accounts', 'active'],
+    queryFn: () => api.get('/accounts', { params: { status: 'ACTIVE' } }).then((r) => r.data),
   });
-  const profiles: { id: string; fullName: string; priority: string }[] = profilesData?.items ?? [];
 
-  const { data: monitorStatus, refetch: refetchStatus } = useQuery({
+  const monitorQuery = useQuery<MonitorRow[]>({
     queryKey: ['monitor-status'],
-    queryFn: () => api.get('/monitor/status').then((r) => { setMonitors(r.data); return r.data; }),
+    queryFn: () => api.get('/monitor/status').then((r) => {
+      setMonitors(r.data);
+      return r.data;
+    }),
     refetchInterval: 5000,
   });
 
-  const startMutation = useMutation({
-    mutationFn: () => api.post('/monitor/start', { 
-      sourceCountry,
-      destination, 
-      visaType, 
-      intervalMs, 
-      profileIds: selectedProfileIds, 
-      mode,
-      proxy: proxy?.host ? proxy : undefined
+  const healthQuery = useQuery({
+    queryKey: ['health-full'],
+    queryFn: () => api.get('/health/full').then((r) => r.data),
+    refetchInterval: 30000,
+  });
+
+  const logsQuery = useQuery({
+    queryKey: ['logs', 'slot-detected', 3],
+    queryFn: () => api.get('/logs', { params: { eventType: 'SLOT_DETECTED', limit: 3 } }).then((r) => r.data),
+    refetchInterval: 10000,
+  });
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const accounts = accountsQuery.data ?? [];
+  const freshAccounts = useMemo(
+    () => accounts.filter((account) => {
+      if (account.status !== 'ACTIVE') return false;
+      const stamp = account.cookiesUpdatedAt ?? account.lastWarmedAt;
+      return stamp ? Date.now() - new Date(stamp).getTime() < FRESH_COOKIE_MS : false;
     }),
-    onSuccess: () => { 
-      setSelectedProfileIds([]); 
-      setProxy(null);
-      refetchStatus(); 
-      qc.invalidateQueries({ queryKey: ['monitor-status'] }); 
+    [accounts],
+  );
+  const selectedAccounts = freshAccounts.filter((account) => selectedAccountIds.includes(account.id));
+  const bookerCount = selectedAccounts.filter((account) => ['BOOKER', 'BOTH', undefined].includes(account.pollingRole)).length;
+  const hasFreshAccounts = freshAccounts.length > 0;
+  const activeMonitors = (monitorQuery.data ?? []).filter((monitor) => monitor.isRunning);
+  const latestPoll = activeMonitors
+    .flatMap((monitor) => monitor.recentPolls?.map((poll) => ({ ...poll, monitor })) ?? [])
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())[0];
+  const lastPollAt = latestPoll?.at ?? activeMonitors.find((monitor) => monitor.lastPollAt || monitor.lastCheckedAt)?.lastPollAt ?? activeMonitors[0]?.lastCheckedAt ?? null;
+  const nextPollAt = activeMonitors
+    .map((monitor) => monitor.nextPollAt)
+    .filter(Boolean)
+    .sort()[0] ?? null;
+  const recentPolls = activeMonitors.flatMap((monitor) => monitor.recentPolls ?? []).slice(0, 5);
+  const slotLogs = logsQuery.data?.items ?? [];
+  const telegramConfigured = String(healthQuery.data?.checks?.['env-vendor-keys']?.note ?? '').includes('TELEGRAM_BOT');
+
+  const startMutation = useMutation({
+    mutationFn: () => api.post('/monitor/start', {
+      sourceCountry: 'uzbekistan',
+      destination: route.destination,
+      visaType: route.visaType,
+      intervalMs: intervalSeconds * 1000,
+      profileIds: [],
+      mode,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['monitor-status'] });
+      setStep(4);
     },
   });
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => api.post(`/monitor/stop/${id}`),
-    onSuccess: () => refetchStatus(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['monitor-status'] }),
   });
 
-  const activeMonitors = (monitorStatus ?? []).filter((m: { isRunning: boolean }) => m.isRunning);
+  const toggleAccount = (id: string) => {
+    setSelectedAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
 
   return (
-    <DashboardShell 
-      title="Monitoring Engine Control" 
-      description="Deploy and calibrate advanced visa appointment detection units with real-time acquisition logic."
+    <DashboardShell
+      title="Start monitor"
+      description="Pick the route, choose fresh VFS accounts, and start polling."
     >
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-        
-        {/* Left Column: Configuration Form (7 slots) */}
-        <div className="lg:col-span-7 space-y-6">
-          {/* Monitor Control */}
-          <div className="card p-8 bg-card/40 backdrop-blur-md border-primary/20 shadow-2xl shadow-primary/5 relative z-[20]">
-            <div className="absolute top-0 left-0 w-full h-1 bg-primary/30" />
-            <div className="flex items-center gap-4 mb-8">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
-                <Settings2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold tracking-tight">Engine Configuration</h3>
-                <p className="text-xs text-muted-foreground">Setup target parameters for slot acquisition.</p>
-              </div>
-            </div>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <main className="lg:col-span-7">
+          <div className="card bg-card/80 p-6">
+            <StepHeader step={step} setStep={setStep} />
 
-            <div className="space-y-10">
-              {/* Route Configuration */}
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
-                <CustomSelect
-                  label="Applying From"
-                  value={sourceCountry}
-                  onChange={(val: any) => setSourceCountry(val)}
-                  options={[
-                    { value: 'uzbekistan', label: 'Uzbekistan' },
-                    { value: 'tajikistan', label: 'Tajikistan' },
-                    { value: 'latvia', label: 'Latvia' },
-                  ]}
-                />
-                <CustomSelect
-                  label="Target Destination"
-                  value={destination}
-                  onChange={(val: any) => setDestination(val)}
-                  options={[
-                    { value: 'latvia', label: 'Latvia' },
-                    { value: 'tajikistan', label: 'Tajikistan' },
-                    { value: 'portugal', label: 'Portugal' },
-                    { value: 'brazil', label: 'Brazil' },
-                  ]}
-                />
-                <CustomSelect
-                  label="Visa Category"
-                  value={visaType}
-                  onChange={setVisaType}
-                  options={[
-                    { value: 'SCH', label: 'Schengen Short-Stay Visa' },
-                    { value: 'TRV', label: 'Tourist Visa' },
-                    { value: 'VIS', label: 'Visitor Visa' },
-                    { value: 'BUS', label: 'Business Visa' },
-                    { value: 'STU', label: 'Student Visa' },
-                    { value: 'WRK', label: 'Work Visa' },
-                    { value: 'SEA', label: 'Seasonal Work Visa' },
-                    { value: 'JOB', label: 'Job Seeker Visa' },
-                    { value: 'DNV', label: 'Digital Nomad Visa' },
-                    { value: 'D7',  label: 'D7 Passive Income Visa' },
-                    { value: 'GLD', label: 'Golden Visa (Investment)' },
-                    { value: 'FAM', label: 'Family Reunification' },
-                    { value: 'MED', label: 'Medical Treatment Visa' },
-                    { value: 'TRN', label: 'Airport Transit Visa' },
-                  ]}
-                />
-              </div>
-
-              {/* Execution Mode Toggle */}
-              <div className="space-y-4">
-                <label className="text-[10px] uppercase font-black tracking-widest text-muted-foreground pl-1">Execution Strategy</label>
-                <div className="grid grid-cols-2 gap-4">
-                  {(['auto', 'manual'] as const).map((m) => (
+            {step === 1 && (
+              <section className="mt-6 space-y-4">
+                <div>
+                  <h3 className="text-lg font-bold">Pick a route</h3>
+                  <p className="text-sm text-muted-foreground">Only tested monitor routes are shown.</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {ROUTES.map((option) => (
                     <button
-                      key={m}
-                      onClick={() => setMode(m)}
+                      key={option.destination}
+                      type="button"
+                      disabled={!hasFreshAccounts}
+                      onClick={() => {
+                        setRoute(option);
+                        setStep(2);
+                      }}
                       className={cn(
-                        "p-4 rounded-xl border flex flex-col items-center gap-2 transition-all duration-300",
-                        mode === m 
-                          ? "bg-primary/10 border-primary shadow-[0_0_15px_rgba(var(--primary),0.2)]" 
-                          : "bg-accent/20 border-transparent hover:border-muted text-muted-foreground"
+                        'rounded-lg border p-5 text-left transition hover:border-primary disabled:cursor-not-allowed disabled:opacity-45',
+                        route.destination === option.destination ? 'border-primary bg-primary/5' : 'bg-background',
                       )}
                     >
-                      {m === 'auto' ? <Zap className="w-5 h-5 text-primary" /> : <AlertTriangle className="w-5 h-5" />}
-                      <span className="text-sm font-bold uppercase tracking-wide">{m} Mode</span>
-                      <span className="text-[10px] opacity-70">
-                        {m === 'auto' ? 'Automated Booking' : 'Alert Only (Dry Run)'}
-                      </span>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-black text-muted-foreground">{option.flag}</p>
+                          <h4 className="mt-2 text-lg font-black">{option.title}</h4>
+                          <p className="text-sm text-muted-foreground">{option.subtitle}</p>
+                        </div>
+                        <span className="badge-blue">{option.badge}</span>
+                      </div>
+                      {!hasFreshAccounts && (
+                        <p className="mt-4 text-xs font-semibold text-amber-500">Needs a fresh-cookie account</p>
+                      )}
                     </button>
                   ))}
                 </div>
-              </div>
+                {!hasFreshAccounts && <FreshAccountCallout />}
+              </section>
+            )}
 
-              {/* Polling Velocity Slider */}
-              <div className="space-y-4 bg-accent/10 p-6 rounded-2xl border border-dashed">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] uppercase font-black tracking-widest text-muted-foreground pl-1 flex items-center gap-2">
-                    <Clock className="w-3 h-3" /> Polling Intensity
-                  </label>
-                  <span className="text-xs font-mono font-bold bg-primary/20 text-primary px-2 py-0.5 rounded leading-none">
-                    {intervalMs / 1000}s Interval
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={1000}
-                  max={60000}
-                  step={1000}
-                  value={intervalMs}
-                  onChange={(e) => setIntervalMs(Number(e.target.value))}
-                  className="w-full h-2 bg-accent rounded-full appearance-none cursor-pointer accent-primary"
-                />
-                <div className="flex justify-between text-[10px] font-black text-muted-foreground/50 uppercase tracking-widest">
-                  <span className="text-primary font-black">Turbo (1s)</span>
-                  <span>Conservative (60s)</span>
-                </div>
-              </div>
-
-              {/* Profile Target Matrix */}
-              <div className="space-y-4">
-                 <label className="text-[10px] uppercase font-black tracking-widest text-muted-foreground pl-1 flex items-center gap-2">
-                    <UserCheck className="w-3 h-3" /> Target Profiles
-                  </label>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                    {profiles.map((p) => (
-                      <button
-                        key={p.id}
-                        onClick={() => setSelectedProfileIds(prev => 
-                          prev.includes(p.id) ? prev.filter(id => id !== p.id) : [...prev, p.id]
-                        )}
-                        className={cn(
-                          "flex items-center justify-between p-3 rounded-xl border text-left transition-all",
-                          selectedProfileIds.includes(p.id)
-                            ? "bg-primary/5 border-primary shadow-sm"
-                            : "bg-accent/20 border-transparent hover:border-muted text-muted-foreground opacity-60 hover:opacity-100"
-                        )}
-                      >
-                        <span className="text-xs font-bold truncate pr-2">{p.fullName}</span>
-                        <span className={cn(
-                          "text-[9px] px-1.5 py-0.5 rounded font-black",
-                          p.priority === 'HIGH' ? "bg-amber-500/20 text-amber-500" : "bg-zinc-500/20 text-zinc-500"
-                        )}>
-                          {p.priority}
-                        </span>
-                      </button>
-                    ))}
-                    {!profiles.length && <p className="col-span-full text-xs text-muted-foreground italic py-4">No active profiles — go to Applicants first.</p>}
+            {step === 2 && (
+              <section className="mt-6 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold">Pick polling accounts</h3>
+                    <p className="text-sm text-muted-foreground">Only accounts with cookies refreshed in the last 12 hours are useful for polling.</p>
                   </div>
-              </div>
-
-              {/* Trigger Button */}
-              <button
-                disabled={startMutation.isPending || (mode === 'auto' && selectedProfileIds.length === 0)}
-                onClick={() => startMutation.mutate()}
-                className="w-full btn-primary h-14 rounded-2xl gap-3 text-lg font-bold shadow-xl shadow-primary/20 disabled:grayscale hover:scale-[1.01] active:scale-[0.98] transition-all"
-              >
-                {startMutation.isPending ? (
-                  <div className="w-6 h-6 border-2 border-primary-foreground border-t-transparent animate-spin rounded-full" />
+                  <button type="button" className="btn-secondary h-9" onClick={() => setStep(1)}>Back</button>
+                </div>
+                {freshAccounts.length === 0 ? (
+                  <FreshAccountCallout />
                 ) : (
-                  <>
-                    <Play className="w-5 h-5 fill-current" />
-                    Engage Monitoring
-                  </>
+                  <div className="overflow-hidden rounded-lg border">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/50 text-muted-foreground">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Email</th>
+                          <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Last login age</th>
+                          <th className="px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest">Polling role</th>
+                          <th className="px-4 py-3 text-right text-[10px] font-black uppercase tracking-widest">Select</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {freshAccounts.map((account) => {
+                          const selected = selectedAccountIds.includes(account.id);
+                          const stamp = account.cookiesUpdatedAt ?? account.lastWarmedAt;
+                          return (
+                            <tr key={account.id} className="border-t">
+                              <td className="px-4 py-3 font-semibold">{account.email}</td>
+                              <td className="px-4 py-3 text-muted-foreground">{relativeTime(stamp, now)}</td>
+                              <td className="px-4 py-3"><RolePill role={account.pollingRole ?? 'BOTH'} /></td>
+                              <td className="px-4 py-3 text-right">
+                                <button
+                                  type="button"
+                                  aria-label={`Select ${account.email}`}
+                                  onClick={() => toggleAccount(account.id)}
+                                  className={cn('inline-flex h-8 w-8 items-center justify-center rounded-md border', selected && 'border-primary bg-primary text-primary-foreground')}
+                                >
+                                  {selected && <Check className="h-4 w-4" />}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
-              </button>
-            </div>
-          </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    className="btn-primary h-10"
+                    disabled={selectedAccountIds.length === 0}
+                    onClick={() => setStep(3)}
+                  >
+                    Continue
+                  </button>
+                </div>
+              </section>
+            )}
 
-          {/* Proxy Configuration (New) */}
-          <div className="card p-8 bg-card/40 backdrop-blur-md border-primary/10 shadow-xl mt-6">
-            <div className="flex items-center gap-4 mb-6">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
-                <ShieldCheck className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold tracking-tight">Secure Tunneling (Proxy)</h3>
-                <p className="text-xs text-muted-foreground">Bypass IP blocks with residential proxies.</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase font-black text-muted-foreground pl-1">Proxy Host</label>
-                <input 
-                  type="text" 
-                  placeholder="e.g. proxy.myservice.com"
-                  className="w-full bg-accent/20 border-transparent focus:border-primary/50 rounded-xl p-3 text-sm transition-all"
-                  value={proxy?.host || ''}
-                  onChange={(e) => setProxy(prev => ({ ...prev!, host: e.target.value, port: prev?.port || 8080 }))}
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase font-black text-muted-foreground pl-1">Port</label>
-                <input 
-                  type="number" 
-                  placeholder="8080"
-                  className="w-full bg-accent/20 border-transparent focus:border-primary/50 rounded-xl p-3 text-sm transition-all"
-                  value={proxy?.port || ''}
-                  onChange={(e) => setProxy(prev => ({ ...prev!, port: Number(e.target.value) }))}
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase font-black text-muted-foreground pl-1">Username (Opt)</label>
-                <input 
-                  type="text" 
-                  className="w-full bg-accent/20 border-transparent focus:border-primary/50 rounded-xl p-3 text-sm transition-all"
-                  value={proxy?.username || ''}
-                  onChange={(e) => setProxy(prev => ({ ...prev!, username: e.target.value }))}
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase font-black text-muted-foreground pl-1">Password (Opt)</label>
-                <input 
-                  type="password" 
-                  className="w-full bg-accent/20 border-transparent focus:border-primary/50 rounded-xl p-3 text-sm transition-all"
-                  value={proxy?.password || ''}
-                  onChange={(e) => setProxy(prev => ({ ...prev!, password: e.target.value }))}
-                />
-              </div>
-            </div>
-            <p className="mt-4 text-[10px] text-muted-foreground italic">Note: HTTP/HTTPS proxies ONLY. SOCKS proxies require additional setup.</p>
-          </div>
-        </div>
-
-        {/* Right Column: Active Streams (5 slots) */}
-        <div className="lg:col-span-5 space-y-6">
-          <div className="flex items-center justify-between px-2">
-             <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Active Streams</h3>
-             <span className="text-[10px] font-mono text-muted-foreground bg-accent px-2 py-0.5 rounded">{activeMonitors.length} Units</span>
-          </div>
-
-          <div className="space-y-4">
-            <AnimatePresence mode="popLayout">
-              {activeMonitors.map((m: any) => (
-                <motion.div
-                  layout
-                  key={m.id}
-                  initial={{ opacity: 0, x: 20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  className="card p-5 bg-card/60 border-l-4 border-l-green-500 group"
-                >
-                  <div className="flex items-start justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-green-500/10 flex items-center justify-center text-green-500 relative">
-                        <Zap className="w-5 h-5 fill-current" />
-                        <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-green-500 animate-ping opacity-50" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold uppercase tracking-tight">
-                          {m.sourceCountry ? m.sourceCountry.toUpperCase() : 'N/A'} → {m.destination.toUpperCase()}
-                        </h4>
-                        <p className="text-[10px] text-muted-foreground">{m.visaType}</p>
-                      </div>
-                    </div>
+            {step === 3 && (
+              <section className="mt-6 space-y-6">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold">Settings</h3>
+                    <p className="text-sm text-muted-foreground">Defaults match the current rate-limit cooldown.</p>
+                  </div>
+                  <button type="button" className="btn-secondary h-9" onClick={() => setStep(2)}>Back</button>
+                </div>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-black uppercase tracking-widest text-muted-foreground">Polling interval</label>
+                    <span className="rounded-md bg-primary/10 px-2 py-1 text-sm font-bold text-primary">{intervalSeconds}s</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={30}
+                    max={300}
+                    step={15}
+                    value={intervalSeconds}
+                    onChange={(event) => setIntervalSeconds(Number(event.target.value))}
+                    className="w-full accent-primary"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>30s</span>
+                    <span>300s</span>
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {[
+                    { value: 'auto', label: 'Auto-book' },
+                    { value: 'manual', label: 'Alert only' },
+                  ].map((item) => (
                     <button
-                      onClick={() => stopMutation.mutate(m.id)}
-                      className="p-2 rounded-lg bg-destructive/5 text-destructive/40 hover:bg-destructive hover:text-white transition-all shadow-sm"
+                      key={item.value}
+                      type="button"
+                      onClick={() => setMode(item.value as 'auto' | 'manual')}
+                      className={cn('rounded-lg border p-4 text-left font-bold', mode === item.value ? 'border-primary bg-primary/5' : 'bg-background')}
                     >
-                      <StopCircle className="w-5 h-5" />
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="rounded-lg border bg-background p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Bell className="h-4 w-4 text-muted-foreground" />
+                      <span className="font-semibold">Telegram alerts</span>
+                    </div>
+                    <span className={telegramConfigured ? 'badge-green' : 'badge-yellow'}>
+                      {telegramConfigured ? 'Configured' : 'Not configured'}
+                    </span>
+                  </div>
+                  {!telegramConfigured && (
+                    <p className="mt-3 text-sm text-muted-foreground">Configure Telegram in Settings to receive slot alerts.</p>
+                  )}
+                </div>
+                <div className="flex justify-end">
+                  <button type="button" className="btn-primary h-10" onClick={() => setStep(4)}>Review</button>
+                </div>
+              </section>
+            )}
+
+            {step === 4 && (
+              <section className="mt-6 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold">Confirm and start</h3>
+                    <p className="text-sm text-muted-foreground">Review the monitor before dispatching it.</p>
+                  </div>
+                  <button type="button" className="btn-secondary h-9" onClick={() => setStep(3)}>Back</button>
+                </div>
+                <div className="rounded-lg border bg-background p-5">
+                  <p className="font-bold">You're about to:</p>
+                  <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
+                    <li>{`Poll UZ -> ${route.destination === 'lva' ? 'Latvia' : 'Tajikistan'} every ${intervalSeconds}s`}</li>
+                    <li>Use {selectedAccounts.length} watcher account(s) ({selectedAccounts.map((a) => a.email).join(', ') || 'none selected'})</li>
+                    <li>{mode === 'auto' ? `Auto-book when slot found, dispatching to ${bookerCount} booker account(s)` : 'Send alerts only when a slot is found'}</li>
+                    <li>{telegramConfigured ? 'Send Telegram alert on detection' : 'Telegram alert disabled until configured'}</li>
+                  </ul>
+                </div>
+                {startMutation.error && (
+                  <p className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500">
+                    {(startMutation.error as any)?.response?.data?.message ?? (startMutation.error as Error).message}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  className="btn-primary h-12 w-full gap-2"
+                  disabled={selectedAccountIds.length === 0 || startMutation.isPending}
+                  onClick={() => startMutation.mutate()}
+                >
+                  {startMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  Start Monitor
+                </button>
+              </section>
+            )}
+          </div>
+        </main>
+
+        <aside className="lg:col-span-5">
+          <div className="card sticky top-6 bg-card/80 p-5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold">Live status</h3>
+              <span className="badge-blue">Active monitors: {activeMonitors.length}</span>
+            </div>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <StatusTile label="Last poll" value={relativeTime(lastPollAt, now)} icon={<Radio className="h-4 w-4" />} />
+              <StatusTile label="Next poll in" value={countdown(nextPollAt, now)} icon={<Clock className="h-4 w-4" />} />
+            </div>
+            <div className="mt-5">
+              <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Last 5 poll outcomes</p>
+              <div className="space-y-2">
+                {recentPolls.length ? recentPolls.map((poll, index) => (
+                  <div key={`${poll.at}-${index}`} className="flex items-center justify-between rounded-md border bg-background px-3 py-2 text-sm">
+                    <span className="text-muted-foreground">{relativeTime(poll.at, now)} · {poll.accountEmail || 'unknown'}</span>
+                    <span className={cn('rounded px-2 py-0.5 text-xs font-bold', poll.ok ? 'bg-green-500/15 text-green-500' : poll.status >= 400 ? 'bg-red-500/15 text-red-500' : 'bg-yellow-500/15 text-yellow-500')}>
+                      {poll.status || 'empty'}
+                    </span>
+                  </div>
+                )) : (
+                  <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No poll outcomes yet.</p>
+                )}
+              </div>
+            </div>
+            <div className="mt-5">
+              <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Recent slot detections</p>
+              <div className="space-y-2">
+                {slotLogs.length ? slotLogs.map((log: any) => (
+                  <div key={log.id} className="rounded-md border bg-background px-3 py-2 text-sm">
+                    <p className="font-semibold">{log.destination ?? 'slot'} · {relativeTime(log.timestamp, now)}</p>
+                    <p className="text-muted-foreground">{log.message}</p>
+                  </div>
+                )) : (
+                  <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No detections yet.</p>
+                )}
+              </div>
+            </div>
+            {activeMonitors.length > 0 && (
+              <div className="mt-5 space-y-2">
+                {activeMonitors.map((monitor) => (
+                  <div key={monitor.id} className="flex items-center justify-between rounded-md border bg-background px-3 py-2">
+                    <span className="text-sm font-semibold">{`${monitor.sourceCountry ?? 'UZ'} -> ${monitor.destination}`}</span>
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 w-8 p-0 text-destructive"
+                      aria-label={`Stop ${monitor.destination}`}
+                      onClick={() => stopMutation.mutate(monitor.id)}
+                    >
+                      <StopCircle className="h-4 w-4" />
                     </button>
                   </div>
-
-                  <div className="grid grid-cols-2 gap-4 pt-4 border-t border-dashed">
-                     <div className="space-y-1">
-                        <p className="text-[9px] uppercase font-black text-muted-foreground tracking-widest">Slots Captured</p>
-                        <p className="text-sm font-black text-green-500">{m.slotDetectedCount}</p>
-                     </div>
-                     <div className="space-y-1">
-                        <p className="text-[9px] uppercase font-black text-muted-foreground tracking-widest">Current Latency</p>
-                        <p className="text-sm font-mono font-bold">{(m.interval || 0).toFixed(1)}s</p>
-                     </div>
-                  </div>
-
-                  <div className="mt-4 flex items-center gap-2">
-                    <div className="flex-1 h-1 bg-accent rounded-full overflow-hidden">
-                       <motion.div 
-                        initial={{ width: "0%" }}
-                        animate={{ width: "100%" }}
-                        transition={{ duration: m.interval || 5, repeat: Infinity, ease: "linear" }}
-                        className="h-full bg-green-500/50"
-                       />
-                    </div>
-                    <span className="text-[9px] text-muted-foreground uppercase font-bold tracking-tighter">Syncing...</span>
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-
-            {activeMonitors.length === 0 && (
-              <div className="py-20 flex flex-col items-center justify-center text-center opacity-30 grayscale border-2 border-dashed rounded-3xl">
-                <ShieldCheck className="w-12 h-12 mb-4" />
-                <h3 className="text-sm font-bold uppercase tracking-widest">No Active Engine</h3>
-                <p className="text-xs">Configure and start a monitor unit to see activity here.</p>
+                ))}
               </div>
             )}
           </div>
-        </div>
+        </aside>
       </div>
     </DashboardShell>
   );
+}
+
+function StepHeader({ step, setStep }: { step: number; setStep: (step: number) => void }) {
+  const labels = ['Route', 'Accounts', 'Settings', 'Start'];
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      {labels.map((label, index) => {
+        const value = index + 1;
+        return (
+          <button
+            key={label}
+            type="button"
+            onClick={() => setStep(value)}
+            className={cn('rounded-md border px-2 py-2 text-xs font-black uppercase tracking-widest', step === value ? 'border-primary bg-primary text-primary-foreground' : 'bg-background text-muted-foreground')}
+          >
+            {value}. {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FreshAccountCallout() {
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+      <div className="flex gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-500" />
+        <div>
+          <p className="font-bold text-amber-500">No fresh-cookie accounts.</p>
+          <p className="mt-1 text-muted-foreground">{'Go to Account Pool -> "Login all stale" first.'}</p>
+          <Link href="/account-pool" className="mt-3 inline-flex text-sm font-bold text-primary">Open Account Pool</Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RolePill({ role }: { role: 'WATCHER' | 'BOOKER' | 'BOTH' }) {
+  const className = role === 'WATCHER' ? 'badge-blue' : role === 'BOOKER' ? 'badge-yellow' : 'badge-green';
+  return <span className={className}>{role}</span>;
+}
+
+function StatusTile({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border bg-background p-3">
+      <div className="flex items-center justify-between text-muted-foreground">
+        <span className="text-[10px] font-black uppercase tracking-widest">{label}</span>
+        {icon}
+      </div>
+      <p className="mt-2 text-lg font-black">{value}</p>
+    </div>
+  );
+}
+
+function relativeTime(value: string | null | undefined, now: number) {
+  if (!value) return 'never';
+  const diffSeconds = Math.max(0, Math.floor((now - new Date(value).getTime()) / 1000));
+  if (diffSeconds < 60) return `${diffSeconds}s ago`;
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${Math.floor(diffHours / 24)}d ago`;
+}
+
+function countdown(value: string | null | undefined, now: number) {
+  if (!value) return 'unknown';
+  const diffSeconds = Math.max(0, Math.ceil((new Date(value).getTime() - now) / 1000));
+  if (diffSeconds < 60) return `${diffSeconds}s`;
+  return `${Math.floor(diffSeconds / 60)}m ${diffSeconds % 60}s`;
 }
