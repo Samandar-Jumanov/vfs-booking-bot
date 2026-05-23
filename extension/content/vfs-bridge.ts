@@ -12,13 +12,16 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-23-login-trusted-typing';
+const VFS_BRIDGE_VERSION = '2026-05-23-autofill-guard';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
 // id="email", formcontrolname="username", type="text" (NOT "emailid", which is
 // the REGISTER page's field). The SPA "am I on the login page?" check must use
 // this or it wrongly decides it's off-page and hunts for a Logout button.
 const LOGIN_EMAIL_SELECTOR = '#email, input[formcontrolname="username"], input[formcontrolname="emailid"]';
+// Activation page email field — cover login-style (#email/username) and
+// register-style (emailid) variants since the activation form may use either.
+const ACTIVATION_EMAIL_SELECTOR = '#email, input[formcontrolname="username"], input[formcontrolname="emailid"], input[name="emailid"], input[type="email"]';
 const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this VFS tab and retry Auto-create. (Open DevTools on a different tab - e.g. the dashboard - instead.)';
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
@@ -254,17 +257,14 @@ async function runActivationSteps(payload: { email: string; correlationId: strin
     const link = findActivateMyAccountLink();
     if (!link) throw new Error('ACTIVATE_LINK_NOT_FOUND');
     if (!(await trustedClick(link))) throw new Error('ACTIVATE_LINK_CLICK_FAILED');
-    await waitForElement('input[formcontrolname="emailid"], input[name="emailid"], input[type="email"]', 20_000)
+    await waitForElement(ACTIVATION_EMAIL_SELECTOR, 20_000)
       .catch(() => { throw new Error('ACTIVATION_FORM_NEVER_APPEARED'); });
   }
 
-  // 2. Fill the email field and Tab to wake Angular.
-  await typeIntoFirst([
-    'input[formcontrolname="emailid"]',
-    'input[name="emailid"]',
-    'input[type="email"]',
-    'input[formcontrolname="email"]',
-  ], payload.email);
+  // 2. Fill the email field with GENUINE keystrokes (programmatic fill leaves
+  // the Activate button disabled, exactly like the login form).
+  const actEmailEl = document.querySelector<HTMLInputElement>(ACTIVATION_EMAIL_SELECTOR);
+  if (actEmailEl) await trustedFill(actEmailEl, payload.email);
   await trustedKey('Tab');
   await new Promise((r) => setTimeout(r, 300));
 
@@ -1556,17 +1556,35 @@ async function trustedType(text: string): Promise<boolean> {
 // events (programmatic .value-setting is ignored). Also clears any Chrome
 // autofill first so we don't submit a stale/wrong email.
 async function trustedFill(el: HTMLInputElement, value: string): Promise<void> {
-  el.value = ''; // clear autofill without firing blur (keeps focus path clean)
+  const clearField = () => {
+    // Clear any Chrome autofill. setInputValue notifies Angular the field is
+    // empty; the direct assignment guards against a stale DOM value.
+    el.value = '';
+    setInputValue(el, '');
+  };
+
   const clicked = await trustedClick(el); // genuine focus + form-interaction gesture
-  if (!clicked) {
-    // Fall back to programmatic fill so we at least populate the field.
-    setInputValue(el, value);
-    return;
+
+  // Type with real keystrokes, then VERIFY — Chrome's password manager can
+  // re-autofill a saved (wrong) email after we clear, so we re-type until the
+  // field actually holds the value we want (max 3 tries).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    clearField();
+    await new Promise((r) => setTimeout(r, 100));
+    if (clicked) {
+      await trustedType(value);
+    } else {
+      setInputValue(el, value);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    if (el.value === value) return; // correct value stuck — done
+    void postRegisterTrace('trustedFill mismatch — retrying', {
+      attempt, expected: maskForLog(value), actual: maskForLog(el.value),
+    });
   }
-  await new Promise((r) => setTimeout(r, 120));
-  const typed = await trustedType(value);
-  if (!typed) setInputValue(el, value);
-  await new Promise((r) => setTimeout(r, 120));
+  // Last resort: force the correct value programmatically so we never submit
+  // a wrong (autofilled) email even if typing kept getting overwritten.
+  setInputValue(el, value);
 }
 
 async function emitRegisterEvent(event: ExtensionEvent): Promise<void> {
