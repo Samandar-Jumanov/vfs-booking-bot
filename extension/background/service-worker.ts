@@ -2,7 +2,7 @@ import { ExtensionWsClient } from '../shared/ws-client';
 import { debuggerClickAt, debuggerAttach, debuggerKeyPress, debuggerTypeText } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
-const SW_VERSION = '2026-05-24-lift-auth-sniffer';
+const SW_VERSION = '2026-05-24-sniffer-document-start';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
 const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
 log(`boot at ${new Date().toISOString()} version=${SW_VERSION}`);

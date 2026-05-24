@@ -15,6 +15,12 @@
   "content_scripts": [
     {
       "matches": ["https://*.vfsglobal.com/*"],
+      "js": ["content/lift-auth-sniffer.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.vfsglobal.com/*"],
       "js": ["content/vfs-bridge.js"],
       "run_at": "document_idle"
     },

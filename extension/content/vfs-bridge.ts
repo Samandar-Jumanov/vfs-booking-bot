@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-24-lift-auth-sniffer';
+const VFS_BRIDGE_VERSION = '2026-05-24-sniffer-document-start';
 const LIFT_AUTH_HEADERS_KEY = 'liftAuthHeaders';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
