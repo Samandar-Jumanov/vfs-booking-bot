@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-24-sniffer-document-start';
+const VFS_BRIDGE_VERSION = '2026-05-24-booking-matselect';
 const LIFT_AUTH_HEADERS_KEY = 'liftAuthHeaders';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
@@ -774,20 +774,65 @@ async function pollSlot(monitor: MonitorConfig): Promise<PollSlotResult> {
   return { loggedIn, status: response.status, data, earliestDate: earliestDate || undefined };
 }
 
+// Generic Angular Material <mat-select> picker: open the dropdown identified by
+// formcontrolname, then trusted-click the option whose text matches. Reuses the
+// dial-code trusted-click pattern. Returns true if an option was clicked.
+// Used for booking step-1 dropdowns (centerCode / visaCategoryCode /
+// selectedSubvisaCategory) and the Your Details nationality dropdown.
+async function selectMatOption(formControlName: string, match: RegExp): Promise<boolean> {
+  const trigger =
+    document.querySelector<HTMLElement>(`mat-select[formcontrolname="${formControlName}"]`) ??
+    document.querySelector<HTMLElement>(`[formcontrolname="${formControlName}"]`);
+  if (!trigger) {
+    void postRegisterTrace('selectMatOption: no trigger', { formControlName });
+    return false;
+  }
+  const inner = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
+  if (!(await trustedClick(inner))) {
+    void postRegisterTrace('selectMatOption: trigger click failed', { formControlName });
+    return false;
+  }
+  // Wait up to 4s for the options panel to render.
+  const deadline = Date.now() + 4000;
+  let option: HTMLElement | undefined;
+  while (Date.now() < deadline && !option) {
+    option = Array.from(
+      document.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'),
+    ).find((o) => match.test((o.textContent ?? '').trim()));
+    if (!option) await new Promise((r) => setTimeout(r, 120));
+  }
+  if (!option) {
+    void postRegisterTrace('selectMatOption: option not found', { formControlName, match: String(match) });
+    return false;
+  }
+  const ok = await trustedClick(option);
+  await new Promise((r) => setTimeout(r, 400));
+  void postRegisterTrace('selectMatOption: selected', { formControlName, ok, text: (option.textContent ?? '').trim().slice(0, 40) });
+  return ok;
+}
+
 async function fillForm(command: BookingCommand | CustomerBookingPayload): Promise<{ ok: true }> {
   const profile: Record<string, string> = 'profile' in command ? command.profile : { ...command };
+  // Text fields — fill with GENUINE keystrokes (trustedFill) so VFS's Angular
+  // form enables its buttons. Selector lists are broad pending the live
+  // "Your Details" DOM; formcontrolname variants included.
   const selectors: Record<string, string[]> = {
-    firstName: ['input[name="firstName"]', '#mat-input-0'],
-    lastName: ['input[name="lastName"]', '#mat-input-1'],
-    passportNumber: ['input[name="passportNumber"]', 'input[formcontrolname="passportNumber"]'],
-    email: ['input[type="email"]', 'input[formcontrolname="email"]'],
-    phone: ['input[type="tel"]', 'input[formcontrolname="phone"]'],
+    firstName: ['input[formcontrolname="firstName"]', 'input[name="firstName"]', 'input[id*="first" i]'],
+    lastName: ['input[formcontrolname="lastName"]', 'input[name="lastName"]', 'input[id*="last" i]'],
+    passportNumber: ['input[formcontrolname="passportNumber"]', 'input[name="passportNumber"]', 'input[id*="passport" i]'],
+    email: ['input[formcontrolname="emailid"]', 'input[formcontrolname="email"]', 'input[type="email"]'],
+    phone: ['input[formcontrolname="contact"]', 'input[type="tel"]', 'input[formcontrolname="phone"]'],
   };
 
   for (const [field, candidates] of Object.entries(selectors)) {
     const value = profile[field];
     if (!value) continue;
-    await typeIntoFirst(candidates, value);
+    await trustedFillFirst(candidates, value);
+  }
+
+  // Nationality is a mat-select dropdown, not a text input.
+  if (profile.nationality) {
+    await selectMatOption('nationality', new RegExp(profile.nationality, 'i')).catch(() => false);
   }
   return { ok: true };
 }
