@@ -156,6 +156,21 @@ function initExtensionWebSocket(server: HttpServer): void {
     };
     extensionConnections.set(customerId, extensionSocket);
 
+    // Push BrightData proxy creds from .env so the extension can auto-answer
+    // the proxy auth challenge (fresh UZ IP per launch) — .env stays the
+    // single source of truth; the operator never types proxy creds.
+    if (env.PROXY_USERNAME && env.PROXY_PASSWORD) {
+      try {
+        extensionSocket.write({
+          type: 'BG_PROXY_CREDS',
+          usernameBase: env.PROXY_USERNAME,
+          password: env.PROXY_PASSWORD,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+
     // Flush any commands queued while this extension was disconnected.
     const queued = pendingExtensionMessages.get(customerId);
     if (queued && queued.length) {

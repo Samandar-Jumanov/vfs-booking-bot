@@ -69,6 +69,7 @@ export type BackendMessage =
   | { type: 'BG_LOGIN_CAPTCHA_TOKEN'; correlationId: string; token: string | null }
   | { type: 'BG_ACTIVATE_VFS_ACCOUNT'; email: string; loginUrl: string; correlationId: string }
   | { type: 'BG_ACTIVATION_DONE'; correlationId: string; ok: boolean; reason?: string }
+  | { type: 'BG_PROXY_CREDS'; usernameBase: string; password: string }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
