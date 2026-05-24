@@ -29,6 +29,11 @@ const envSchema = z.object({
   VAKSMS_API_KEY: z.string().optional(),
   VAKSMS_COUNTRY: z.string().default('uz'),
 
+  // Orchestrator auto-pilot — OFF by default. When false it only logs the plan
+  // each tick (never touches VFS); set true ONLY after live flows are verified
+  // and you're on distributed UZ IPs, or it will trigger VFS rate bans.
+  ORCHESTRATOR_ENABLED: z.coerce.boolean().default(false),
+
   PROXY_DEFAULT_PROVIDER: z.string().default('brightdata'),
   PROXY_HOST: z.string().optional(),
   PROXY_PORT: z.coerce.number().optional(),

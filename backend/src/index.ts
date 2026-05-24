@@ -21,6 +21,7 @@ import { initTelegramBot } from '@modules/notifications/telegram.bot';
 import { startNotificationQueues, stopNotificationQueues } from '@modules/notifications/queues';
 import { startCaptchaPoolSweeper } from '@modules/captcha/token.pool';
 import { startAccountLoginCron } from '@modules/accounts/accountLoginService';
+import { startOrchestrator } from '@modules/orchestrator/orchestrator.service';
 
 
 async function bootstrap() {
@@ -50,6 +51,9 @@ async function bootstrap() {
 
   startAccountLoginCron();
   console.info('Account auto-login cron scheduled');
+
+  startOrchestrator();
+  console.info(`Orchestrator scheduled (execution ${env.ORCHESTRATOR_ENABLED ? 'ENABLED' : 'plan-only'})`);
 
   // Interactive Telegram Bot
   initTelegramBot();
