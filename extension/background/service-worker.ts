@@ -2,7 +2,7 @@ import { ExtensionWsClient } from '../shared/ws-client';
 import { debuggerClickAt, debuggerAttach, debuggerKeyPress, debuggerTypeText } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
-const SW_VERSION = '2026-05-24-sniffer-document-start';
+const SW_VERSION = '2026-05-24-proxy-autoauth';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
 const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
 log(`boot at ${new Date().toISOString()} version=${SW_VERSION}`);
@@ -31,6 +31,39 @@ void chrome.storage.local.get({ runtimeState: null }).then((stored) => {
 const activeRegisterTabs = new Map<string, number>();
 const activeLoginTabs = new Map<string, number>();
 const activeActivationTabs = new Map<string, number>();
+
+// --- BrightData proxy auto-auth -------------------------------------------
+// Answer the proxy's auth challenge automatically (no Chrome popup) and append
+// a FRESH -session-<random> generated once per service-worker boot, so every
+// launch exits from a fresh UZ residential IP. This sidesteps VFS per-IP rate
+// limits (the 429s) and lets the bot run headless on a VPS with no human to
+// type proxy creds. Credentials live only in chrome.storage.local (entered in
+// the options page) — never hardcoded, never committed.
+const PROXY_SESSION = `sw${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+let proxyCreds: { usernameBase?: string; password?: string } = {};
+
+function refreshProxyCreds(s: { proxyUsernameBase?: string; proxyPassword?: string }): void {
+  proxyCreds = {
+    usernameBase: s.proxyUsernameBase?.trim() || undefined,
+    password: s.proxyPassword || undefined,
+  };
+  log('proxy auto-auth', proxyCreds.usernameBase ? `enabled (session=${PROXY_SESSION})` : 'disabled (no creds)');
+}
+
+void chrome.storage.local
+  .get({ proxyUsernameBase: '', proxyPassword: '' })
+  .then((s) => refreshProxyCreds(s as { proxyUsernameBase?: string; proxyPassword?: string }));
+
+chrome.webRequest.onAuthRequired.addListener(
+  (details) => {
+    if (!details.isProxy || !proxyCreds.usernameBase || !proxyCreds.password) return {};
+    // Strip any existing -session-xxx so we control the IP via PROXY_SESSION.
+    const base = proxyCreds.usernameBase.replace(/-session-[^-]*$/i, '');
+    return { authCredentials: { username: `${base}-session-${PROXY_SESSION}`, password: proxyCreds.password } };
+  },
+  { urls: ['<all_urls>'] },
+  ['blocking'],
+);
 
 // MV3 idle-kills service workers in ~30s. We arm two recurring alarms so
 // the SW is woken on a fixed cadence — keeps the WS reconnect logic alive
@@ -101,6 +134,7 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     const incoming = message.settings as Partial<ExtensionSettings>;
     log('SAVE_SETTINGS received — backendUrl=', incoming.backendUrl, 'hasToken=', Boolean(incoming.extensionToken), 'email=', incoming.customerEmail);
     await saveSettings(incoming);
+    refreshProxyCreds({ proxyUsernameBase: incoming.proxyUsernameBase, proxyPassword: incoming.proxyPassword });
     await connectFromStoredSettings();
     // Sync cookies immediately on pairing so the operator sees the account
     // appear in the pool right away instead of waiting for the 30s alarm.

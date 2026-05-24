@@ -24,6 +24,8 @@ async function hydrate(): Promise<void> {
   setChecked('autoBook', settings.autoBook);
   setChecked('soundAlerts', settings.soundAlerts);
   setInput('pollingIntervalSeconds', String(settings.pollingIntervalSeconds));
+  setInput('proxyUsernameBase', settings.proxyUsernameBase ?? '');
+  setInput('proxyPassword', settings.proxyPassword ?? '');
 }
 
 async function save(): Promise<void> {
@@ -37,6 +39,8 @@ async function save(): Promise<void> {
     autoBook: getChecked('autoBook'),
     soundAlerts: getChecked('soundAlerts'),
     pollingIntervalSeconds: Number(getInput('pollingIntervalSeconds') || 30),
+    proxyUsernameBase: getInput('proxyUsernameBase').trim(),
+    proxyPassword: getInput('proxyPassword'),
   };
 
   if (setupCode) {

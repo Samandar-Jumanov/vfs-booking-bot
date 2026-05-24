@@ -34,7 +34,7 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["storage", "cookies", "webNavigation", "scripting", "notifications", "alarms", "debugger", "tabs"],
+  "permissions": ["storage", "cookies", "webNavigation", "scripting", "notifications", "alarms", "debugger", "tabs", "webRequest", "webRequestAuthProvider"],
   "host_permissions": [
     "https://*.vfsglobal.com/*",
     "https://localhost/*",

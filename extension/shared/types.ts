@@ -8,6 +8,15 @@ export interface ExtensionSettings {
   autoBook: boolean;
   soundAlerts: boolean;
   pollingIntervalSeconds: number;
+  // BrightData proxy auto-auth. When set, the service worker answers the
+  // proxy's auth challenge automatically (no manual Chrome popup) and appends
+  // a fresh -session-<random> each launch so every run gets a fresh UZ IP —
+  // which sidesteps VFS per-IP rate limits and works headless on a VPS.
+  // Stored only in chrome.storage.local on the operator's machine; never
+  // committed. proxyUsernameBase example:
+  //   brd-customer-hl_xxxx-zone-residential_proxy2-country-uz
+  proxyUsernameBase?: string;
+  proxyPassword?: string;
 }
 
 export interface RuntimeState {
