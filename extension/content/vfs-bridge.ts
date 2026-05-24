@@ -12,7 +12,8 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-23-register-trustedfill';
+const VFS_BRIDGE_VERSION = '2026-05-24-lift-auth-sniffer';
+const LIFT_AUTH_HEADERS_KEY = 'liftAuthHeaders';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
 // id="email", formcontrolname="username", type="text" (NOT "emailid", which is
@@ -26,6 +27,7 @@ const TRUSTED_CLICK_BLOCKED_BANNER = 'Bot click blocked. Close DevTools on this 
 console.log(`[VFS-REG] vfs-bridge.ts loaded version=${VFS_BRIDGE_VERSION}`);
 
 let currentCorrelationId: string | undefined;
+let liftHeaders: Record<string, string> = {};
 const registerWaiters = new Map<string, (value: string | null) => void>();
 type ActivationSignalValue = { ok: boolean; reason?: string };
 const activationWaiters = new Map<string, (value: ActivationSignalValue) => void>();
@@ -38,8 +40,49 @@ chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResp
 });
 
 window.postMessage({ source: 'vfs-booking-extension', type: 'EXTENSION_PRESENT' }, window.location.origin);
+void hydrateLiftHeaders();
+window.addEventListener('message', handleLiftAuthMessage);
 void syncSessionToBackend();
 window.setInterval(() => void syncSessionToBackend(), 60_000);
+
+// The MAIN-world sniffer only captures after VFS itself calls lift-api, usually
+// after navigating to the booking/appointment section. Operator must open that
+// booking page once to seed headers before polling.
+async function hydrateLiftHeaders(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(LIFT_AUTH_HEADERS_KEY);
+    const headers = stored[LIFT_AUTH_HEADERS_KEY];
+    if (isStringRecord(headers)) liftHeaders = headers;
+  } catch (error) {
+    console.warn('[VFS-REG] lift auth header hydrate failed', String((error as Error).message ?? error));
+  }
+}
+
+function handleLiftAuthMessage(event: MessageEvent): void {
+  try {
+    if (event.source !== window || event.origin !== window.location.origin) return;
+    const data = event.data as { source?: unknown; headers?: unknown; url?: unknown; at?: unknown };
+    if (data?.source !== 'vfs-lift-auth' || !isStringRecord(data.headers)) return;
+    liftHeaders = data.headers;
+    void chrome.storage.local.set({ [LIFT_AUTH_HEADERS_KEY]: liftHeaders });
+    const authHeader = Object.entries(liftHeaders).find(([key]) => key.toLowerCase() === 'authorization')?.[1];
+    console.log('[VFS-REG] captured lift-api auth headers', {
+      headerCount: Object.keys(liftHeaders).length,
+      hasAuthorization: Boolean(authHeader),
+      authorization: authHeader ? `${authHeader.slice(0, 8)}...` : undefined,
+      url: typeof data.url === 'string' ? data.url : undefined,
+      at: typeof data.at === 'number' ? data.at : Date.now(),
+    });
+  } catch (error) {
+    console.warn('[VFS-REG] lift auth message ignored', String((error as Error).message ?? error));
+  }
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return typeof value === 'object'
+    && value !== null
+    && Object.entries(value).every(([key, item]) => typeof key === 'string' && typeof item === 'string');
+}
 
 async function handleCommand(command: ContentCommand): Promise<unknown> {
   switch (command.type) {
@@ -700,6 +743,11 @@ async function pollSlot(monitor: MonitorConfig): Promise<PollSlotResult> {
     payCode: '',
   };
 
+  if (Object.keys(liftHeaders).length === 0) {
+    console.warn('[VFS-REG] POLL_NO_AUTH_CAPTURED');
+    return { loggedIn, status: 0, data: { code: 'POLL_NO_AUTH_CAPTURED' } };
+  }
+
   const response = await fetch(SLOT_API, {
     method: 'POST',
     credentials: 'include',
@@ -707,6 +755,7 @@ async function pollSlot(monitor: MonitorConfig): Promise<PollSlotResult> {
     headers: {
       Accept: 'application/json, text/plain, */*',
       'Content-Type': 'application/json;charset=UTF-8',
+      ...liftHeaders,
     },
     body: JSON.stringify(body),
   });

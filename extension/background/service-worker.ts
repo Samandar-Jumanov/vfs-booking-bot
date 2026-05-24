@@ -2,7 +2,7 @@ import { ExtensionWsClient } from '../shared/ws-client';
 import { debuggerClickAt, debuggerAttach, debuggerKeyPress, debuggerTypeText } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
-const SW_VERSION = '2026-05-23-inject-content-script-v8';
+const SW_VERSION = '2026-05-24-lift-auth-sniffer';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
 const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
 log(`boot at ${new Date().toISOString()} version=${SW_VERSION}`);
@@ -354,6 +354,7 @@ async function sendToTabEnsuringContentScript(tabId: number, message: unknown): 
   try {
     await chrome.tabs.sendMessage(tabId, message);
   } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content/lift-auth-sniffer.js'], world: 'MAIN' });
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content/vfs-bridge.js'] });
     await new Promise((r) => setTimeout(r, 600));
     await chrome.tabs.sendMessage(tabId, message);
@@ -561,6 +562,8 @@ async function sendToVfsTab(command: ContentCommand): Promise<unknown> {
     if (msg.includes('Receiving end does not exist') || msg.includes('Could not establish connection')) {
       log('sendToVfsTab: injecting content script into tab', tab.id, '(missing)');
       try {
+        await (chrome as unknown as { scripting: { executeScript: (opts: { target: { tabId: number }; files: string[]; world?: 'MAIN' | 'ISOLATED' }) => Promise<unknown> } })
+          .scripting.executeScript({ target: { tabId: tab.id }, files: ['content/lift-auth-sniffer.js'], world: 'MAIN' });
         await (chrome as unknown as { scripting: { executeScript: (opts: { target: { tabId: number }; files: string[] }) => Promise<unknown> } })
           .scripting.executeScript({ target: { tabId: tab.id }, files: ['content/vfs-bridge.js'] });
         // Tiny delay so the listener registers.

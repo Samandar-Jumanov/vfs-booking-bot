@@ -49,7 +49,7 @@ Rule: a rung is GREEN only with its concrete success evidence. No evidence = UNV
 | 6 | One REGISTER hands-off | ⏸ PENDING OPERATOR | new account row, no manual clicks |
 | 7 | Activation last-mile | ⏸ PENDING OPERATOR | PENDING → ACTIVE in list-accounts |
 | 8 | Auto-logout works | ⏸ PENDING OPERATOR | bot returns to login form unaided (Agent 2 patch ready to apply after DOM dump) |
-| 9 | Slot polling real data | ⏸ PENDING OPERATOR | `trigger-poll.ts` → HTTP 200 + real slot JSON |
+| 9 | Slot polling real data | ⏸ PENDING OPERATOR (auth-interceptor wired, build-verified) | `trigger-poll.ts` → HTTP 200 + real slot JSON |
 | 10 | One BOOKING end-to-end | ⏸ PENDING OPERATOR | confirmation number + DB row + Telegram |
 
 ---
@@ -57,3 +57,17 @@ Rule: a rung is GREEN only with its concrete success evidence. No evidence = UNV
 ## Notes
 - Rungs 0, 2, 3 green autonomously. Rung 1 blocked on local-DB infra (not code). Rungs 4–10 require operator-driven bot Chrome + a non-403 VFS state.
 - Stage-A code committed (not pushed — awaiting operator OK).
+
+## Auth interceptor (AUTH_INTERCEPTOR_TASK.md) — fixes the polling 401
+Root cause: VFS holds the lift-api bearer in-app (NOT in localStorage), so cookie-only `pollSlot` → 401. Fix (Option A): a MAIN-world sniffer wraps fetch/XHR, captures the real header set VFS sends to `lift-api.vfsglobal.com`, relays via `window.postMessage('vfs-lift-auth')` → content script caches in `liftHeaders` (+ chrome.storage) → `pollSlot` replays them.
+
+Implemented + build-verified (autonomous):
+- `extension/content/lift-auth-sniffer.ts` (new, MAIN-world, crash-safe, masks Authorization in logs).
+- `webpack.config.js`: entry `content/lift-auth-sniffer` → **emits `dist/content/lift-auth-sniffer.js` (4934 B)**.
+- `service-worker.ts`: injects the sniffer MAIN-world at both content-script injection sites; `SW_VERSION=2026-05-24-lift-auth-sniffer`.
+- `vfs-bridge.ts`: `liftHeaders` cache + hydrate/persist + `vfs-lift-auth` listener; `pollSlot` merges captured headers, returns `POLL_NO_AUTH_CAPTURED` (status 0) if none seen yet; `VFS_BRIDGE_VERSION=2026-05-24-lift-auth-sniffer`.
+- Evidence: `cd extension && npm run build` exit 0; `dist/content/lift-auth-sniffer.js` present.
+
+⚠ **Seeding required (operator):** the sniffer only captures once VFS itself calls lift-api — which happens when the booking/appointment section is opened. So on a logged-in tab, **open "Book/Schedule Appointment" once** to fire a real authenticated lift-api call → sniffer captures headers → subsequent polls reuse them. Until then `pollSlot` returns `POLL_NO_AUTH_CAPTURED`.
+
+Live verification (operator, Rung 9): logged-in VFS tab + F12 closed → open booking once → run `trigger-poll.ts` → expect backend `EXT_POLL_RESULT status=200` with real slot JSON, NOT 401.
