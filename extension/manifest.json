@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "VFS Booking Bot",
   "description": "Customer-side VFS booking assistant for authenticated Chrome sessions.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "VFS Booking Bot"

@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-25-autonomous-booking';
+const VFS_BRIDGE_VERSION = '0.2.0-inactive-resend+session-clear';
 const LIFT_AUTH_HEADERS_KEY = 'liftAuthHeaders';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
@@ -149,6 +149,7 @@ async function handleLoginFlow(payload: LoginFormPayload): Promise<void> {
 
 async function handleLoginViaSpa(payload: LoginFormPayload): Promise<void> {
   currentCorrelationId = payload.correlationId;
+  void postRegisterTrace('handleLoginViaSpa START', { version: VFS_BRIDGE_VERSION, href: location.href });
   try {
     // The background clears the VFS session and navigates here, so the login
     // form should render shortly. Wait for it instead of attempting the
@@ -311,7 +312,23 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
 
   const initialUrl = window.location.href;
   await clickLoginSubmit(initialUrl);
-  await waitUntil(() => isLoginSuccess(initialUrl) || isLoginFailureVisible(), 45_000);
+  await waitUntil(
+    () => isLoginSuccess(initialUrl) || isAccountInactive() || isLoginFailureVisible(),
+    45_000,
+  );
+
+  // Inactive account: VFS shows "This account is currently inactive. Please
+  // click here to resend the activation email." Clicking "click here" triggers
+  // the activation email; the backend then fetches + visits the link. The
+  // operator re-runs login once active. (The blank /email-activation page does
+  // NOT work — this banner-resend is the real activation path.)
+  if (isAccountInactive()) {
+    const resend = findResendActivationLink();
+    if (resend) await trustedClick(resend);
+    await emitActivationEvent({ type: 'EXT_ACTIVATION_SUBMITTED', correlationId: payload.correlationId, email: payload.email });
+    throw new Error('ACCOUNT_INACTIVE_ACTIVATION_RESENT');
+  }
+
   if (isLoginFailureVisible()) throw new Error(readLoginFailureReason());
 
   await syncSessionToBackend();
@@ -1711,6 +1728,30 @@ function isLoginSuccess(initialUrl: string): boolean {
     text.includes('sign out') ||
     text.includes('book an appointment') ||
     text.includes('schedule appointment');
+}
+
+// VFS shows this banner when you try to log in with an unactivated account.
+function isAccountInactive(): boolean {
+  return /currently inactive|account is inactive|resend the activation/i.test(document.body.innerText);
+}
+
+// The "click here" link inside the inactive-account banner that resends the
+// activation email.
+function findResendActivationLink(): HTMLElement | null {
+  // Prefer an anchor/button whose own text is "click here".
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>('a, button, [role="button"], u, span'))) {
+    if (/click here/i.test((el.textContent ?? '').trim()) && el.textContent!.trim().length < 40) {
+      const clickable = closestClickable(el);
+      if (isEnabledVisible(clickable)) return clickable;
+    }
+  }
+  // Fallback: any clickable inside an element mentioning the inactive message.
+  const banner = Array.from(document.querySelectorAll<HTMLElement>('*')).find(
+    (e) => /currently inactive|resend the activation/i.test(e.textContent ?? '') &&
+      e.querySelector('a,button,u,[role="button"]'),
+  );
+  const link = banner?.querySelector<HTMLElement>('a,button,u,[role="button"]') ?? null;
+  return link && isEnabledVisible(closestClickable(link)) ? closestClickable(link) : link;
 }
 
 function isLoginFailureVisible(): boolean {
