@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.3-turnstile-wait';
+const VFS_BRIDGE_VERSION = '0.2.4-diag';
 // VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
 // fallback when the widget's data-sitekey isn't on a matchable element.
 const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
@@ -330,10 +330,17 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
   const emailNow = document.querySelector<HTMLInputElement>(LOGIN_EMAIL_SELECTOR);
   const pwdNow = document.querySelector<HTMLInputElement>('#password, input[formcontrolname="password"], input[type="password"]');
   const signBtn = findLoginButton();
+  const iframes = Array.from(document.querySelectorAll('iframe')).map((f) => (f.getAttribute('src') ?? '').slice(0, 50));
+  const cfEls = Array.from(document.querySelectorAll('[class*="turnstile" i],[id*="turnstile" i],[class*="captcha" i],[id*="cf-" i]'))
+    .map((e) => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (e.className ? '.' + String(e.className).slice(0, 24) : '')).slice(0, 6);
   void postRegisterTrace('login pre-submit', {
     emailVal: maskForLog(emailNow?.value ?? ''),
     pwdLen: (pwdNow?.value ?? '').length,
     signBtnDisabled: signBtn ? (signBtn as HTMLButtonElement).disabled : 'no-btn',
+    signBtnHtml: (signBtn?.outerHTML ?? '').replace(/\s+/g, ' ').slice(0, 120),
+    iframes,
+    cfEls,
+    hasRespField: Boolean(document.querySelector('[name="cf-turnstile-response"]')),
     href: location.href,
   });
 
