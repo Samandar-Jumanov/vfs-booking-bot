@@ -55,6 +55,37 @@ export function resolveExtensionBooking(correlationId: string, result: Extension
 }
 
 /**
+ * Dispatch the NEW autonomous 5-step booking (BG_BOOK_VFS → runBookingSteps in
+ * the extension) and await the EXT_BOOKING result. Used for testing the
+ * hands-off booking end to end.
+ */
+export interface AutonomousBookingInput {
+  firstName: string;
+  lastName: string;
+  nationality: string;
+  passportNumber: string;
+  contact: string;
+  email: string;
+  subCategory: string;
+}
+
+export async function triggerAutonomousBooking(input: AutonomousBookingInput): Promise<ExtensionBookingResult> {
+  const operatorId = await resolveOperatorUserId();
+  if (!operatorId) return { success: false, reason: 'NO_OPERATOR_CONNECTED' };
+  const { sendToExtension } = await import('@modules/websocket/ws.server');
+  const correlationId = randomUUID();
+  const accepted = sendToExtension(operatorId, { type: 'BG_BOOK_VFS', payload: { ...input, correlationId } });
+  if (!accepted) return { success: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };
+  return new Promise<ExtensionBookingResult>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(correlationId);
+      resolve({ success: false, reason: 'BOOKING_TIMEOUT' });
+    }, 250_000);
+    pending.set(correlationId, { resolve, reject, timer });
+  });
+}
+
+/**
  * Picks the next available pool account and dispatches the booking to the
  * extension. Returns the final outcome when the extension responds (or
  * timeout / no extension connected).

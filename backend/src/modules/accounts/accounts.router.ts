@@ -297,6 +297,27 @@ accountsRouter.post('/:id/auto-login', async (req: Request, res: Response, next:
   }
 });
 
+// Test the autonomous 5-step booking flow (BG_BOOK_VFS → runBookingSteps).
+accountsRouter.post('/book-test', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const { triggerAutonomousBooking } = await import('@modules/booking/extension-dispatch.service');
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const result = await triggerAutonomousBooking({
+      firstName: String(b.firstName ?? ''),
+      lastName: String(b.lastName ?? ''),
+      nationality: String(b.nationality ?? 'Uzbekistan'),
+      passportNumber: String(b.passportNumber ?? ''),
+      contact: String(b.contact ?? ''),
+      email: String(b.email ?? ''),
+      subCategory: String(b.subCategory ?? 'Uzbek'),
+    });
+    res.status(result.success ? 200 : 409).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── GET /api/accounts/warmup-status ──────────────────────────────────────────
 /**
  * Operator-facing pool warmup view. Returns each account with cookie freshness
