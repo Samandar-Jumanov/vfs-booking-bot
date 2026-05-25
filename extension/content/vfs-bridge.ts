@@ -190,7 +190,21 @@ function findLogoutSpaElement(includeProfileTrigger = true): HTMLElement | null 
     'button[aria-label*="logout" i]',
     'a[href*="logout" i]',
     '[data-test-id*="logout" i]',
-    ...(includeProfileTrigger ? ['button:has(svg[data-icon*="user"])'] : []),
+    'button[aria-label*="sign out" i]',
+    '[mat-menu-item][aria-label*="logout" i]',
+    ...(includeProfileTrigger
+      ? [
+          // Open the account/profile menu first — VFS hides Logout behind it.
+          'button:has(svg[data-icon*="user"])',
+          '[mat-menu-trigger-for]',
+          'button[aria-label*="account" i]',
+          'button[aria-label*="profile" i]',
+          'button[class*="account" i]',
+          'button[class*="profile" i]',
+          'header button:has(img)',
+          'header [class*="avatar" i]',
+        ]
+      : []),
   ];
   for (const selector of selectors) {
     const match = safeQueryVisible(selector);
@@ -825,22 +839,47 @@ async function waitForMatOptionsToLoad(formControlName: string, timeoutMs = 12_0
   }
 }
 
-// Options inside the CURRENTLY-OPEN mat-select panel only. Material renders the
-// open panel into a cdk overlay with role="listbox"; scoping to it avoids
-// reading stale options left over from a previously-opened dropdown (which was
-// polluting the search and making category/sub-category never match).
-function openPanelOptions(): HTMLElement[] {
-  const panel =
-    document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel') ??
-    Array.from(document.querySelectorAll<HTMLElement>('.cdk-overlay-pane'))
-      .reverse()
-      .find((p) => isVisible(p) && p.querySelector('mat-option, .mat-mdc-option, [role="option"]'));
+// Options inside the panel owned by THIS specific mat-select. Material links the
+// open trigger to its panel via aria-owns / aria-controls; scoping to that exact
+// panel avoids reading a stale panel left over from a previously-opened dropdown
+// (e.g. the centre's options leaking into the category read). Falls back to the
+// single currently-open select panel.
+function openPanelOptions(trigger?: HTMLElement): HTMLElement[] {
+  let panel: HTMLElement | null = null;
+  const panelId =
+    trigger?.getAttribute('aria-owns') ||
+    trigger?.getAttribute('aria-controls') ||
+    trigger?.querySelector('[aria-owns],[aria-controls]')?.getAttribute('aria-owns') ||
+    trigger?.querySelector('[aria-owns],[aria-controls]')?.getAttribute('aria-controls') ||
+    null;
+  if (panelId) {
+    // aria-owns may list multiple ids; take the first that resolves to a panel.
+    for (const id of panelId.split(/\s+/)) {
+      const el = document.getElementById(id);
+      if (el && el.querySelector('mat-option, .mat-mdc-option, [role="option"]')) { panel = el; break; }
+      if (el) panel = el; // panel exists but may still be loading options
+    }
+  }
+  panel ??= document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel');
   if (!panel) return [];
   return Array.from(panel.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'));
 }
 
 function closeAnyOpenPanel(): void {
   document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+}
+
+// Select by POSITION among the page's mat-selects (0-based). Robust when we
+// don't know the exact formcontrolname — VFS Appointment Details renders the
+// dropdowns in fixed order: 0=centre, 1=visa category, 2=sub-category.
+async function selectMatOptionByIndex(index: number, match: RegExp, label = `idx${index}`): Promise<boolean> {
+  const triggers = Array.from(document.querySelectorAll<HTMLElement>('mat-select'));
+  const trigger = triggers[index];
+  if (!trigger) {
+    void postRegisterTrace('selectMatOption: no trigger', { label, matSelectCount: triggers.length });
+    return false;
+  }
+  return pickFromMatSelect(trigger, match, label);
 }
 
 async function selectMatOption(formControlName: string, match: RegExp): Promise<boolean> {
@@ -851,11 +890,15 @@ async function selectMatOption(formControlName: string, match: RegExp): Promise<
     void postRegisterTrace('selectMatOption: no trigger', { formControlName });
     return false;
   }
+  return pickFromMatSelect(trigger, match, formControlName);
+}
+
+async function pickFromMatSelect(trigger: HTMLElement, match: RegExp, label: string): Promise<boolean> {
   closeAnyOpenPanel(); // make sure no stale panel is open before we open ours
   await new Promise((r) => setTimeout(r, 200));
   const inner = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
   if (!(await trustedClick(inner))) {
-    void postRegisterTrace('selectMatOption: trigger click failed', { formControlName });
+    void postRegisterTrace('selectMatOption: trigger click failed', { label });
     return false;
   }
   // Poll up to 15s for THIS panel's options to load (VFS fetches dependent
@@ -865,14 +908,14 @@ async function selectMatOption(formControlName: string, match: RegExp): Promise<
   let option: HTMLElement | undefined;
   let lastSeen: string[] = [];
   while (Date.now() < deadline && !option) {
-    const opts = openPanelOptions();
+    const opts = openPanelOptions(trigger);
     if (opts.length) lastSeen = opts.map((o) => (o.textContent ?? '').trim()).filter(Boolean);
     option = opts.find((o) => match.test((o.textContent ?? '').trim()));
     if (!option) await new Promise((r) => setTimeout(r, 200));
   }
   if (!option) {
     void postRegisterTrace('selectMatOption: option not found', {
-      formControlName,
+      label,
       match: String(match),
       available: lastSeen.slice(0, 20),
     });
@@ -881,7 +924,7 @@ async function selectMatOption(formControlName: string, match: RegExp): Promise<
   }
   const ok = await trustedClick(option);
   await new Promise((r) => setTimeout(r, 500));
-  void postRegisterTrace('selectMatOption: selected', { formControlName, ok, text: (option.textContent ?? '').trim().slice(0, 40) });
+  void postRegisterTrace('selectMatOption: selected', { label, ok, text: (option.textContent ?? '').trim().slice(0, 40) });
   return ok;
 }
 
@@ -995,12 +1038,15 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
   // STEP 1 — Appointment Details (center / category / sub-category dropdowns).
   // Each dropdown loads the next one's options via an API call, so wait for the
   // dependent select to actually have options before trying to pick from it.
-  if (document.querySelector('mat-select[formcontrolname="centerCode"]')) {
-    await selectMatOption('centerCode', /.+/);
-    await waitForMatOptionsToLoad('visaCategoryCode', 12_000);
-    await selectMatOption('visaCategoryCode', /long stay|visa d|national/i);
-    await waitForMatOptionsToLoad('selectedSubvisaCategory', 12_000);
-    await selectMatOption('selectedSubvisaCategory', new RegExp(p.subCategory, 'i'));
+  if (document.querySelector('mat-select')) {
+    // Select by POSITION (0=centre, 1=visa category, 2=sub-category) — robust to
+    // unknown formcontrolnames. Each dropdown's options load via API after the
+    // previous pick, so give a beat between them.
+    await selectMatOptionByIndex(0, /.+/, 'centre');
+    await new Promise((r) => setTimeout(r, 1500));
+    await selectMatOptionByIndex(1, /long stay|visa d|national|work/i, 'visaCategory');
+    await new Promise((r) => setTimeout(r, 1500));
+    await selectMatOptionByIndex(2, new RegExp(p.subCategory, 'i'), 'subCategory');
     await clickButtonByTextEnabled(['continue']);
   }
 

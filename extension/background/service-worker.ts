@@ -370,9 +370,17 @@ function handleBackendMessage(message: BackendMessage): void {
 
 async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_ACCOUNT' }>): Promise<void> {
   try {
-    const tab = await findWarmVfsTab();
+    // Hands-off: reuse a warm VFS tab if present, otherwise OPEN one at the
+    // login URL ourselves (operator opening the login page works — Datadome
+    // only blocks server-side page.goto, not a real Chrome tab navigation).
+    let tab = await findWarmVfsTab();
     if (!tab?.id) {
-      sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'WARM_TAB_REQUIRED' });
+      const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
+      tab = await chrome.tabs.create({ url: loginUrl, active: true });
+      await waitForTabComplete(tab.id!, 30_000);
+    }
+    if (!tab?.id) {
+      sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_OPEN_FAILED' });
       return;
     }
     await chrome.tabs.update(tab.id, { active: true });
@@ -403,6 +411,24 @@ async function sendToTabEnsuringContentScript(tabId: number, message: unknown): 
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content/vfs-bridge.js'] });
     await new Promise((r) => setTimeout(r, 600));
     await chrome.tabs.sendMessage(tabId, message);
+  }
+}
+
+// Resolve once the tab finishes loading (status 'complete') or the timeout
+// elapses — VFS is a heavy SPA, so we give it a generous window.
+async function waitForTabComplete(tabId: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (t.status === 'complete') {
+        await new Promise((r) => setTimeout(r, 2500)); // let the Angular app boot + render
+        return;
+      }
+    } catch {
+      return; // tab gone
+    }
+    await new Promise((r) => setTimeout(r, 400));
   }
 }
 
@@ -485,9 +511,14 @@ async function runBookingFlow(msg: Extract<BackendMessage, { type: 'BG_BOOK_VFS'
 
 async function runActivationFlow(msg: Extract<BackendMessage, { type: 'BG_ACTIVATE_VFS_ACCOUNT' }>): Promise<void> {
   try {
-    const tab = await findWarmVfsTab();
+    let tab = await findWarmVfsTab();
     if (!tab?.id) {
-      sendEvent({ type: 'EXT_ACTIVATION_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'WARM_TAB_REQUIRED' });
+      const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
+      tab = await chrome.tabs.create({ url: loginUrl, active: true });
+      await waitForTabComplete(tab.id!, 30_000);
+    }
+    if (!tab?.id) {
+      sendEvent({ type: 'EXT_ACTIVATION_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_OPEN_FAILED' });
       return;
     }
     await chrome.tabs.update(tab.id, { active: true });
