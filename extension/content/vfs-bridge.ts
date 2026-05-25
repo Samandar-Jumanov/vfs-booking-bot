@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.4-diag';
+const VFS_BRIDGE_VERSION = '0.2.5-dialcode-scroll';
 // VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
 // fallback when the widget's data-sitekey isn't on a matchable element.
 const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
@@ -1525,6 +1525,14 @@ async function selectDialCode998(): Promise<void> {
 }
 
 async function selectDialCodeOption(trigger: HTMLElement, option: HTMLElement, method: string): Promise<void> {
+  // The dial-code list is long; the Uzbekistan(998) option is often scrolled
+  // OFF-SCREEN (negative rect y), so a trusted click at its coords misses (lands
+  // on Tajikistan / wrong row). Scroll it into the panel's view first so the
+  // trusted click lands on the right option.
+  try {
+    option.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await new Promise((r) => setTimeout(r, 400));
+  } catch { /* ignore */ }
   void postRegisterTrace('dial-code option found, trusted-clicking', {
     method,
     text: (option.textContent ?? '').trim().slice(0, 80),
