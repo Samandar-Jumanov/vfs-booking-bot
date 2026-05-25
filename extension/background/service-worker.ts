@@ -369,29 +369,24 @@ function handleBackendMessage(message: BackendMessage): void {
 }
 
 async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_ACCOUNT' }>): Promise<void> {
+  // Mirror the proven register flow: clear any stale session, open a FRESH tab
+  // straight at the login URL, give the SPA time to render, then drive it. No
+  // logout, no double-navigate (that hung before reaching the content script).
+  const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
   try {
-    // Hands-off: reuse a warm VFS tab if present, otherwise OPEN one at the
-    // login URL ourselves (operator opening the login page works — Datadome
-    // only blocks server-side page.goto, not a real Chrome tab navigation).
-    const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
-    let tab = await findWarmVfsTab();
-    if (!tab?.id) {
-      tab = await chrome.tabs.create({ url: loginUrl, active: true });
-      await waitForTabComplete(tab.id!, 30_000);
-    }
-    if (!tab?.id) {
+    // Best-effort session wipe via an existing VFS tab so /login renders the
+    // form (not a logged-in dashboard). Non-blocking if no VFS tab exists.
+    const existing = await findWarmVfsTab();
+    if (existing?.id) await clearVfsSession(existing.id).catch(() => undefined);
+
+    const tab = await chrome.tabs.create({ url: loginUrl, active: true });
+    if (!tab.id) {
       sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_OPEN_FAILED' });
       return;
     }
-    await chrome.tabs.update(tab.id, { active: true });
     activeLoginTabs.set(msg.correlationId, tab.id);
-    // Clear any existing VFS session (cookies + storage) and navigate straight
-    // to the login form. This avoids the broken logout path (the tab may be
-    // logged in as another account) — a logged-out session always renders the
-    // login form at loginUrl.
-    await clearVfsSession(tab.id);
-    await chrome.tabs.update(tab.id, { url: loginUrl });
-    await waitForTabComplete(tab.id, 30_000);
+    await waitForTabComplete(tab.id, 25_000);
+    await new Promise((r) => setTimeout(r, 1500));
     await sendToTabEnsuringContentScript(tab.id, {
       type: 'LOGIN_VIA_SPA',
       payload: {

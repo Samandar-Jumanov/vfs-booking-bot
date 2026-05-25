@@ -1064,10 +1064,15 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
     // unknown formcontrolnames. Each dropdown's options load via API after the
     // previous pick, so give a beat between them.
     await selectMatOptionByIndex(0, /.+/, 'centre');
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 2500));
     await selectMatOptionByIndex(1, /long stay|visa d|national|work/i, 'visaCategory');
-    await new Promise((r) => setTimeout(r, 1500));
-    await selectMatOptionByIndex(2, new RegExp(p.subCategory, 'i'), 'subCategory');
+    // Sub-category options load a few seconds AFTER the category is chosen, so
+    // retry — re-opening the dropdown each time until its real options appear.
+    let subOk = false;
+    for (let i = 0; i < 4 && !subOk; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      subOk = await selectMatOptionByIndex(2, new RegExp(p.subCategory, 'i'), 'subCategory');
+    }
     await clickButtonByTextEnabled(['continue']);
   }
 

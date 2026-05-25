@@ -106,16 +106,27 @@ Write-Host "  Username: brd-customer-hl_XXXXX-zone-residential_proxy2-country-uz
 Write-Host "  Password: <your BrightData password>" -ForegroundColor Yellow
 Write-Host "  Tick 'Remember my credentials'" -ForegroundColor Yellow
 
+# Set $UseProxy = $true only if this machine is NOT in Uzbekistan. If you're
+# already on a UZ residential IP (check ipinfo.io), leave it $false — VFS loads
+# directly on your clean IP and you avoid all BrightData proxy issues
+# (allowlist, KYC, auth hangs). Override with env VFS_USE_PROXY=true.
+$UseProxy = ($env:VFS_USE_PROXY -eq 'true')
+
 $chromeArgs = @(
     "--load-extension=$extPath",
     "--user-data-dir=$profile",
     "--no-first-run",
     "--no-default-browser-check",
-    "--proxy-server=http=${brightDataHost}:${brightDataPort}",
-    "--proxy-bypass-list=$proxyBypass",
     "--disable-features=AutofillServerCommunication,PasswordManagerOnboarding,AutofillEnableAccountWalletStorage",
     "--disable-save-password-bubble"
 )
+if ($UseProxy) {
+    Write-Host "Proxy ENABLED: routing VFS through BrightData UZ." -ForegroundColor Cyan
+    $chromeArgs += "--proxy-server=http=${brightDataHost}:${brightDataPort}"
+    $chromeArgs += "--proxy-bypass-list=$proxyBypass"
+} else {
+    Write-Host "Proxy DISABLED: using this machine's direct IP (assumed UZ)." -ForegroundColor Cyan
+}
 
 if (Test-BrightDataCertificateInstalled) {
     Write-Host ""
