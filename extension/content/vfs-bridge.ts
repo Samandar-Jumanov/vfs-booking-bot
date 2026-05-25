@@ -150,8 +150,12 @@ async function handleLoginFlow(payload: LoginFormPayload): Promise<void> {
 async function handleLoginViaSpa(payload: LoginFormPayload): Promise<void> {
   currentCorrelationId = payload.correlationId;
   try {
+    // The background clears the VFS session and navigates here, so the login
+    // form should render shortly. Wait for it instead of attempting the
+    // (unreliable) in-page logout. If it truly never appears, fail clearly.
     if (!document.querySelector(LOGIN_EMAIL_SELECTOR)) {
-      await ensureOnLoginPage();
+      const appeared = await waitForElement(LOGIN_EMAIL_SELECTOR, 15_000).then(() => true).catch(() => false);
+      if (!appeared) throw new Error('LOGIN_FORM_NOT_FOUND');
     }
     await withTimeout(runLoginSteps(payload), 90_000, 'LOGIN_TIMEOUT');
   } catch (error) {
