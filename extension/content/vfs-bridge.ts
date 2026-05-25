@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.2-turnstile-mainworld-callback';
+const VFS_BRIDGE_VERSION = '0.2.3-turnstile-wait';
 // VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
 // fallback when the widget's data-sitekey isn't on a matchable element.
 const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
@@ -288,13 +288,15 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
 
   // VFS login is gated by a Cloudflare Turnstile — Sign In stays DISABLED until
   // it's solved. It doesn't reliably auto-pass for the automated browser, so we
-  // detect the widget broadly and solve via 2Captcha. The data-sitekey isn't
-  // always on a matchable element, so fall back to VFS's known static sitekey.
-  const turnstileEl = document.querySelector<HTMLElement>(
-    '[data-sitekey], .cf-turnstile, div[id^="cf-"], iframe[src*="challenges.cloudflare.com"]',
-  );
-  const hasTurnstile =
-    Boolean(turnstileEl) || Boolean(document.querySelector('input[name="cf-turnstile-response"]'));
+  // detect the widget broadly and solve via 2Captcha. The widget loads a few
+  // seconds AFTER the page, so POLL for it (don't check once and skip).
+  const TS_SELECTOR = '[data-sitekey], .cf-turnstile, div[id^="cf-"], iframe[src*="challenges.cloudflare.com"], input[name="cf-turnstile-response"]';
+  let hasTurnstile = false;
+  const tsDeadline = Date.now() + 15_000;
+  while (Date.now() < tsDeadline) {
+    if (document.querySelector(TS_SELECTOR)) { hasTurnstile = true; break; }
+    await new Promise((r) => setTimeout(r, 500));
+  }
   const siteKey =
     document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || VFS_LOGIN_TURNSTILE_SITEKEY;
   void postRegisterTrace('login turnstile', { hasTurnstile, siteKey });
