@@ -373,9 +373,9 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
     // Hands-off: reuse a warm VFS tab if present, otherwise OPEN one at the
     // login URL ourselves (operator opening the login page works — Datadome
     // only blocks server-side page.goto, not a real Chrome tab navigation).
+    const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
     let tab = await findWarmVfsTab();
     if (!tab?.id) {
-      const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
       tab = await chrome.tabs.create({ url: loginUrl, active: true });
       await waitForTabComplete(tab.id!, 30_000);
     }
@@ -385,6 +385,13 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
     }
     await chrome.tabs.update(tab.id, { active: true });
     activeLoginTabs.set(msg.correlationId, tab.id);
+    // Clear any existing VFS session (cookies + storage) and navigate straight
+    // to the login form. This avoids the broken logout path (the tab may be
+    // logged in as another account) — a logged-out session always renders the
+    // login form at loginUrl.
+    await clearVfsSession(tab.id);
+    await chrome.tabs.update(tab.id, { url: loginUrl });
+    await waitForTabComplete(tab.id, 30_000);
     await sendToTabEnsuringContentScript(tab.id, {
       type: 'LOGIN_VIA_SPA',
       payload: {
@@ -429,6 +436,32 @@ async function waitForTabComplete(tabId: number, timeoutMs: number): Promise<voi
       return; // tab gone
     }
     await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+// Wipe the VFS session so loginUrl renders the login form (not a logged-in
+// dashboard). Clears vfsglobal cookies + the tab's localStorage/sessionStorage.
+async function clearVfsSession(tabId: number): Promise<void> {
+  try {
+    const cookies = await chrome.cookies.getAll({ domain: 'vfsglobal.com' });
+    await Promise.all(
+      cookies.map((c) => {
+        const url = `${c.secure ? 'https' : 'http'}://${c.domain.replace(/^\./, '')}${c.path}`;
+        return chrome.cookies.remove({ url, name: c.name }).catch(() => undefined);
+      }),
+    );
+  } catch {
+    /* cookies perm/edge — ignore */
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        try { localStorage.clear(); sessionStorage.clear(); } catch { /* cross-origin */ }
+      },
+    });
+  } catch {
+    /* tab not on a scriptable origin — ignore */
   }
 }
 
