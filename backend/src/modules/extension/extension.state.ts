@@ -145,6 +145,7 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
     'EXT_SESSION_LOST', 'EXT_REGISTER_NEED_EMAIL_LINK', 'EXT_REGISTER_NEED_SMS_OTP',
     'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_SUBMITTED', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
     'EXT_LOGIN_NEED_CAPTCHA', 'EXT_LOGIN_SUCCESS', 'EXT_LOGIN_FAILED',
+    'EXT_LOGOUT_SUCCESS', 'EXT_LOGOUT_FAILED',
     'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT',
     'EXT_ACTIVATION_NEED_LINK', 'EXT_ACTIVATION_SUBMITTED', 'EXT_ACTIVATION_SUCCESS', 'EXT_ACTIVATION_FAILED',
   ].includes(String(event.type))) {
@@ -299,6 +300,18 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   if (event.type === 'EXT_LOGIN_FAILED' && typeof event.correlationId === 'string') {
     const { resolveLoginFailed } = await import('@modules/accounts/accountLoginService');
     resolveLoginFailed(event.correlationId, String(event.reason ?? 'EXT_LOGIN_FAILED'));
+    return;
+  }
+
+  if (event.type === 'EXT_LOGOUT_SUCCESS' && typeof event.correlationId === 'string') {
+    const { resolveExtensionLogout } = await import('@modules/booking/extension-dispatch.service');
+    resolveExtensionLogout(event.correlationId, { success: true });
+    return;
+  }
+
+  if (event.type === 'EXT_LOGOUT_FAILED' && typeof event.correlationId === 'string') {
+    const { resolveExtensionLogout } = await import('@modules/booking/extension-dispatch.service');
+    resolveExtensionLogout(event.correlationId, { success: false, reason: String(event.reason ?? 'EXT_LOGOUT_FAILED') });
     return;
   }
 

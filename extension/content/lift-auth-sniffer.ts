@@ -179,6 +179,17 @@
               ta.dispatchEvent(new Event('change', { bubbles: true }));
             }
           } catch {}
+          // Implicit-rendering path: VFS may register its success callback as a
+          // named global via data-callback attribute rather than passing it to
+          // turnstile.render(). The isolated content script cannot reach MAIN-world
+          // globals, so look it up here and fire it directly.
+          try {
+            const widget = document.querySelector<HTMLElement>('[data-callback]');
+            const cbName = widget?.getAttribute('data-callback');
+            if (cbName && typeof (window as any)[cbName] === 'function') {
+              (window as any)[cbName](d.token);
+            }
+          } catch {}
         } catch {}
       });
     } catch {

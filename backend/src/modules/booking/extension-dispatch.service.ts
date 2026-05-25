@@ -67,6 +67,55 @@ export interface AutonomousBookingInput {
   contact: string;
   email: string;
   subCategory: string;
+  confirmPauseMs?: number;
+}
+
+// ── Logout dispatch (BG_LOGOUT_VFS → LOGOUT_VIA_SPA in the extension) ────────
+export interface ExtensionLogoutResult {
+  success: boolean;
+  reason?: string;
+}
+
+interface PendingLogout {
+  resolve: (result: ExtensionLogoutResult) => void;
+  timer: NodeJS.Timeout;
+}
+
+const pendingLogout = new Map<string, PendingLogout>();
+
+/** Called by the extension event handler when EXT_LOGOUT_SUCCESS/FAILED arrives. */
+export function resolveExtensionLogout(correlationId: string, result: ExtensionLogoutResult): void {
+  const slot = pendingLogout.get(correlationId);
+  if (!slot) return;
+  pendingLogout.delete(correlationId);
+  clearTimeout(slot.timer);
+  slot.resolve(result);
+}
+
+/**
+ * Dispatch a logout (BG_LOGOUT_VFS → LOGOUT_VIA_SPA, SPA avatar-menu click in
+ * the extension) and await the EXT_LOGOUT result. Used to test hands-off logout.
+ */
+export async function triggerLogout(): Promise<ExtensionLogoutResult> {
+  const operatorId = await resolveOperatorUserId();
+  if (!operatorId) return { success: false, reason: 'NO_OPERATOR_CONNECTED' };
+  const { sendToExtension, isExtensionLive, listExtensionConnections } = await import('@modules/websocket/ws.server');
+  if (!isExtensionLive(operatorId)) {
+    return {
+      success: false,
+      reason: `OPERATOR_EXTENSION_OFFLINE (operatorId=${operatorId}; live keys=[${listExtensionConnections().join(', ')}])`,
+    };
+  }
+  const correlationId = randomUUID();
+  const accepted = sendToExtension(operatorId, { type: 'BG_LOGOUT_VFS', correlationId });
+  if (!accepted) return { success: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };
+  return new Promise<ExtensionLogoutResult>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingLogout.delete(correlationId);
+      resolve({ success: false, reason: 'LOGOUT_TIMEOUT' });
+    }, 60_000);
+    pendingLogout.set(correlationId, { resolve, timer });
+  });
 }
 
 export async function triggerAutonomousBooking(input: AutonomousBookingInput): Promise<ExtensionBookingResult> {

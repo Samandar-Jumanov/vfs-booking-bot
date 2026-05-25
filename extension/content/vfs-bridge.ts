@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.6-register-turnstile';
+const VFS_BRIDGE_VERSION = '0.2.7-turnstile-data-callback-logout';
 // VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
 // fallback when the widget's data-sitekey isn't on a matchable element.
 const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
@@ -130,6 +130,9 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
       return extractConfirmation();
     case 'BOOK_VIA_SPA':
       void handleBookingViaSpa(command.payload);
+      return { ok: true };
+    case 'LOGOUT_VIA_SPA':
+      void handleLogoutViaSpa(command.correlationId);
       return { ok: true };
     default:
       throw new Error('Unsupported content command');
@@ -1099,6 +1102,7 @@ interface BookingFlowPayload {
   email: string;
   subCategory: string;     // e.g. "Uzbek" or "Tajik" (matches selectedSubvisaCategory option)
   correlationId: string;
+  confirmPauseMs?: number; // ms to wait before the irreversible Step-5 Confirm (0 = no pause)
 }
 
 async function emitBookingEvent(event: ExtensionEvent): Promise<void> {
@@ -1112,6 +1116,24 @@ async function handleBookingViaSpa(payload: BookingFlowPayload): Promise<void> {
     await emitBookingEvent({ type: 'EXT_BOOKING_COMPLETED', confirmationNumber, correlationId: payload.correlationId });
   } catch (error) {
     await emitBookingEvent({ type: 'EXT_BOOKING_FAILED', reason: (error as Error).message, correlationId: payload.correlationId });
+  }
+}
+
+// SPA logout: navigate to the login page via avatar-menu → Sign Out trusted-click.
+// Uses the same findLogoutSpaElement / ensureOnLoginPage machinery already present.
+async function handleLogoutViaSpa(correlationId: string): Promise<void> {
+  try {
+    await clearVfsSessionStorage();
+    await ensureOnLoginPage();
+    void postRegisterTrace('handleLogoutViaSpa SUCCESS', { href: location.href });
+    await chrome.runtime.sendMessage({ type: 'EXT_LOGOUT_SUCCESS', correlationId }).catch(() => undefined);
+  } catch (error) {
+    void postRegisterTrace('handleLogoutViaSpa ERROR', { reason: (error as Error).message });
+    await chrome.runtime.sendMessage({
+      type: 'EXT_LOGOUT_FAILED',
+      correlationId,
+      reason: (error as Error).message,
+    }).catch(() => undefined);
   }
 }
 
@@ -1217,6 +1239,13 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
   for (const id of ['mat-mdc-checkbox-0-input', 'mat-mdc-checkbox-1-input']) {
     const cb = document.querySelector<HTMLInputElement>(`#${id}`);
     if (cb && !cb.checked) await trustedClick(closestClickable(cb));
+  }
+  // Operator gate: pause before the final irreversible Confirm click so a human
+  // can abort if needed. Default 0 (no pause) unless caller sets confirmPauseMs.
+  const pauseMs = p.confirmPauseMs ?? 0;
+  if (pauseMs > 0) {
+    void postRegisterTrace('booking: CONFIRM PAUSE — operator gate', { pauseMs, note: 'cancel the tab to abort' });
+    await new Promise((r) => setTimeout(r, pauseMs));
   }
   await clickButtonByTextEnabled(['confirm']);
 

@@ -311,7 +311,20 @@ accountsRouter.post('/book-test', async (req: Request, res: Response, next: Next
       contact: String(b.contact ?? ''),
       email: String(b.email ?? ''),
       subCategory: String(b.subCategory ?? 'Uzbek'),
+      confirmPauseMs: b.confirmPauseMs !== undefined ? Number(b.confirmPauseMs) : 30_000,
     });
+    res.status(result.success ? 200 : 409).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Test the SPA logout flow (BG_LOGOUT_VFS → LOGOUT_VIA_SPA avatar-menu click).
+accountsRouter.post('/logout-test', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const { triggerLogout } = await import('@modules/booking/extension-dispatch.service');
+    const result = await triggerLogout();
     res.status(result.success ? 200 : 409).json(result);
   } catch (err) {
     next(err);

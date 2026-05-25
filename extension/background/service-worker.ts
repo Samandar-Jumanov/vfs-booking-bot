@@ -259,7 +259,9 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_LOGIN_FAILED' ||
     message.type === 'EXT_ACTIVATION_SUBMITTED' ||
     message.type === 'EXT_ACTIVATION_SUCCESS' ||
-    message.type === 'EXT_ACTIVATION_FAILED'
+    message.type === 'EXT_ACTIVATION_FAILED' ||
+    message.type === 'EXT_LOGOUT_SUCCESS' ||
+    message.type === 'EXT_LOGOUT_FAILED'
   ) {
     sendEvent(message as ExtensionEvent);
     return { ok: true };
@@ -314,6 +316,10 @@ function handleBackendMessage(message: BackendMessage): void {
   }
   if (message.type === 'BG_BOOK_VFS') {
     void runBookingFlow(message);
+    return;
+  }
+  if (message.type === 'BG_LOGOUT_VFS') {
+    void runLogoutFlow(message);
     return;
   }
   if (message.type === 'BG_ACTIVATION_DONE') {
@@ -539,6 +545,23 @@ async function runBookingFlow(msg: Extract<BackendMessage, { type: 'BG_BOOK_VFS'
     await sendToTabEnsuringContentScript(tab.id, { type: 'BOOK_VIA_SPA', payload: msg.payload });
   } catch (err) {
     sendEvent({ type: 'EXT_BOOKING_FAILED', reason: (err as Error).message, correlationId: msg.payload.correlationId });
+  }
+}
+
+async function runLogoutFlow(msg: Extract<BackendMessage, { type: 'BG_LOGOUT_VFS' }>): Promise<void> {
+  try {
+    const tab = await findWarmVfsTab();
+    if (!tab?.id) {
+      sendEvent({ type: 'EXT_LOGOUT_FAILED', correlationId: msg.correlationId, reason: 'NO_WARM_TAB' });
+      return;
+    }
+    await chrome.tabs.update(tab.id, { active: true });
+    await sendToTabEnsuringContentScript(tab.id, {
+      type: 'LOGOUT_VIA_SPA',
+      correlationId: msg.correlationId,
+    });
+  } catch (err) {
+    sendEvent({ type: 'EXT_LOGOUT_FAILED', correlationId: msg.correlationId, reason: (err as Error).message });
   }
 }
 

@@ -22,6 +22,8 @@ async function main(): Promise<void> {
     contact: process.env.CONTACT || '901234567',
     email: process.env.EMAIL || 'jumanovsamandar84@gmail.com',
     subCategory: process.env.SUBCATEGORY || 'Uzbek',
+    // Default 30s pause before Step 5 Confirm — operator gate. Set CONFIRM_PAUSE_MS=0 to skip.
+    confirmPauseMs: process.env.CONFIRM_PAUSE_MS !== undefined ? Number(process.env.CONFIRM_PAUSE_MS) : 30_000,
   };
   console.log('POST /api/accounts/book-test', JSON.stringify(body));
   const t0 = Date.now();

@@ -76,8 +76,10 @@ export type BackendMessage =
         firstName: string; lastName: string; nationality: string;
         passportNumber: string; contact: string; email: string;
         subCategory: string; correlationId: string;
+        confirmPauseMs?: number;
       };
     }
+  | { type: 'BG_LOGOUT_VFS'; correlationId: string }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -123,6 +125,8 @@ export type ExtensionEvent =
   | { type: 'EXT_ACTIVATION_SUCCESS'; correlationId: string; email: string }
   | { type: 'EXT_ACTIVATION_FAILED'; correlationId: string; email: string; reason: string }
   | { type: 'EXT_LOGGED_IN'; email?: string }
+  | { type: 'EXT_LOGOUT_SUCCESS'; correlationId: string; email?: string }
+  | { type: 'EXT_LOGOUT_FAILED'; correlationId: string; reason: string }
   | { type: 'EXT_POLL_RESULT'; destination: string; status: number; data?: unknown }
   | {
       type: 'EXT_SESSION_SYNC';
@@ -162,8 +166,10 @@ export type ContentCommand =
         firstName: string; lastName: string; nationality: string;
         passportNumber: string; contact: string; email: string;
         subCategory: string; correlationId: string;
+        confirmPauseMs?: number;
       };
-    };
+    }
+  | { type: 'LOGOUT_VIA_SPA'; correlationId: string };
 
 export interface RegisterFormPayload {
   email: string;
