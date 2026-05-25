@@ -1075,7 +1075,20 @@ async function trustedFillFirst(selectors: string[], value: string): Promise<voi
   const element = selectors.map((selector) => document.querySelector<HTMLInputElement>(selector)).find(Boolean);
   if (!element) {
     console.warn('[VFS-REG] trustedFillFirst no element matched any of:', selectors);
-    void postRegisterTrace('trustedFillFirst NO MATCH', { selectors });
+    // Dump the real fields on the page so we learn the actual VFS field names
+    // (formcontrolname/name/id) without making the operator transcribe DOM.
+    const fields = Array.from(document.querySelectorAll<HTMLElement>('input, textarea, select, mat-select'))
+      .filter((e) => isVisible(e))
+      .map((e) => ({
+        tag: e.tagName.toLowerCase(),
+        fcn: e.getAttribute('formcontrolname'),
+        name: e.getAttribute('name'),
+        id: e.id || undefined,
+        type: e.getAttribute('type'),
+        ph: e.getAttribute('placeholder'),
+      }))
+      .slice(0, 25);
+    void postRegisterTrace('trustedFillFirst NO MATCH', { selectors, fields });
     return;
   }
   await trustedFill(element, value);

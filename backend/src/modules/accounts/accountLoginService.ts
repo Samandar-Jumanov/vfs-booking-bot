@@ -146,6 +146,14 @@ export function resolveLoginFailed(correlationId: string, reason: string): void 
 
 export function startAccountLoginCron(): void {
   if (cronStarted) return;
+  // The 6-hourly mass-login refresh hammers VFS with a login for every stale
+  // account at once, which is a prime trigger for VFS's 429001 per-user/IP
+  // "Access Restricted" block. Default OFF; enable explicitly once per-account
+  // throttling / fresh-IP rotation is in place.
+  if (process.env.LOGIN_CRON_ENABLED !== 'true') {
+    console.info('[LOGIN-CRON] disabled (set LOGIN_CRON_ENABLED=true to enable)');
+    return;
+  }
   cronStarted = true;
   cron.schedule('0 */6 * * *', () => {
     void refreshStaleActiveAccounts().catch((err) => {
