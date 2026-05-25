@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import cron from 'node-cron';
 import { AccountStatus, EventType, Role } from '@prisma/client';
 import { prisma } from '@config/database';
+import { env } from '@config/env';
 import { AppError } from '@middleware/errorHandler';
 import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { logEvent } from '@modules/logs/logger';
@@ -150,7 +151,7 @@ export function startAccountLoginCron(): void {
   // account at once, which is a prime trigger for VFS's 429001 per-user/IP
   // "Access Restricted" block. Default OFF; enable explicitly once per-account
   // throttling / fresh-IP rotation is in place.
-  if (process.env.LOGIN_CRON_ENABLED !== 'true') {
+  if (!env.LOGIN_CRON_ENABLED) {
     console.info('[LOGIN-CRON] disabled (set LOGIN_CRON_ENABLED=true to enable)');
     return;
   }

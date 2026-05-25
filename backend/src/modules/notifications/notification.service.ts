@@ -199,7 +199,7 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
   // failed/aborted test fire would otherwise spam the operator (and any client)
   // Telegram channel. Success (BOOKING_SUCCESS) and slot alerts always go out.
   // Set NOTIFY_BOOKING_FAILURES=true in production to re-enable failure alerts.
-  if (payload.event === 'BOOKING_FAILED' && process.env.NOTIFY_BOOKING_FAILURES !== 'true') {
+  if (payload.event === 'BOOKING_FAILED' && !env.NOTIFY_BOOKING_FAILURES) {
     logEvent('warn', EventType.BOOKING_FAILED, `[notify] failure alert suppressed (NOTIFY_BOOKING_FAILURES off): ${payload.reason ?? ''}`, {
       channel: 'telegram',
       destination: payload.destination,

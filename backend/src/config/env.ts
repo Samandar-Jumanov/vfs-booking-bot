@@ -34,6 +34,16 @@ const envSchema = z.object({
   // and you're on distributed UZ IPs, or it will trigger VFS rate bans.
   ORCHESTRATOR_ENABLED: z.coerce.boolean().default(false),
 
+  // 6-hourly mass-login refresh cron — OFF by default. It logs in every stale
+  // account at once, a prime trigger for VFS 429001 "Access Restricted". Enable
+  // only with per-account throttling / fresh-IP rotation in place.
+  LOGIN_CRON_ENABLED: z.coerce.boolean().default(false),
+
+  // Telegram/email BOOKING_FAILED alerts — OFF by default so dev test fires and
+  // EXT_SESSION_LOST events don't spam the operator/client channel. Failures are
+  // still logged. Set true in production once the booking flow is validated.
+  NOTIFY_BOOKING_FAILURES: z.coerce.boolean().default(false),
+
   PROXY_DEFAULT_PROVIDER: z.string().default('brightdata'),
   PROXY_HOST: z.string().optional(),
   PROXY_PORT: z.coerce.number().optional(),
