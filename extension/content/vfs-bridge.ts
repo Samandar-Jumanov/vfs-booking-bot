@@ -801,6 +801,24 @@ async function waitForMatOptionsToLoad(formControlName: string, timeoutMs = 12_0
   }
 }
 
+// Options inside the CURRENTLY-OPEN mat-select panel only. Material renders the
+// open panel into a cdk overlay with role="listbox"; scoping to it avoids
+// reading stale options left over from a previously-opened dropdown (which was
+// polluting the search and making category/sub-category never match).
+function openPanelOptions(): HTMLElement[] {
+  const panel =
+    document.querySelector<HTMLElement>('.mat-mdc-select-panel, .mat-select-panel') ??
+    Array.from(document.querySelectorAll<HTMLElement>('.cdk-overlay-pane'))
+      .reverse()
+      .find((p) => isVisible(p) && p.querySelector('mat-option, .mat-mdc-option, [role="option"]'));
+  if (!panel) return [];
+  return Array.from(panel.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'));
+}
+
+function closeAnyOpenPanel(): void {
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+}
+
 async function selectMatOption(formControlName: string, match: RegExp): Promise<boolean> {
   const trigger =
     document.querySelector<HTMLElement>(`mat-select[formcontrolname="${formControlName}"]`) ??
@@ -809,36 +827,36 @@ async function selectMatOption(formControlName: string, match: RegExp): Promise<
     void postRegisterTrace('selectMatOption: no trigger', { formControlName });
     return false;
   }
+  closeAnyOpenPanel(); // make sure no stale panel is open before we open ours
+  await new Promise((r) => setTimeout(r, 200));
   const inner = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
   if (!(await trustedClick(inner))) {
     void postRegisterTrace('selectMatOption: trigger click failed', { formControlName });
     return false;
   }
-  // Wait up to 10s for the options panel to render — VFS loads dependent
-  // dropdowns (category after centre, sub-category after category) via an API
-  // call, so options can appear several seconds after the panel opens.
-  const deadline = Date.now() + 10_000;
+  // Poll up to 15s for THIS panel's options to load (VFS fetches dependent
+  // dropdown options via an API call after the parent is selected) and a match
+  // to appear. Scope strictly to the open panel.
+  const deadline = Date.now() + 15_000;
   let option: HTMLElement | undefined;
+  let lastSeen: string[] = [];
   while (Date.now() < deadline && !option) {
-    option = Array.from(
-      document.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'),
-    ).find((o) => match.test((o.textContent ?? '').trim()));
-    if (!option) await new Promise((r) => setTimeout(r, 120));
+    const opts = openPanelOptions();
+    if (opts.length) lastSeen = opts.map((o) => (o.textContent ?? '').trim()).filter(Boolean);
+    option = opts.find((o) => match.test((o.textContent ?? '').trim()));
+    if (!option) await new Promise((r) => setTimeout(r, 200));
   }
   if (!option) {
-    // Dump the real option labels so we can fix the match pattern without
-    // making the operator transcribe them by hand.
-    const available = Array.from(
-      document.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'),
-    )
-      .map((o) => (o.textContent ?? '').trim())
-      .filter(Boolean)
-      .slice(0, 20);
-    void postRegisterTrace('selectMatOption: option not found', { formControlName, match: String(match), available });
+    void postRegisterTrace('selectMatOption: option not found', {
+      formControlName,
+      match: String(match),
+      available: lastSeen.slice(0, 20),
+    });
+    closeAnyOpenPanel();
     return false;
   }
   const ok = await trustedClick(option);
-  await new Promise((r) => setTimeout(r, 400));
+  await new Promise((r) => setTimeout(r, 500));
   void postRegisterTrace('selectMatOption: selected', { formControlName, ok, text: (option.textContent ?? '').trim().slice(0, 40) });
   return ok;
 }
