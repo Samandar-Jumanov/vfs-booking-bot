@@ -310,12 +310,33 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     await new Promise((r) => setTimeout(r, 250));
   }
 
+  // Trace what's actually in the fields + the Sign In button state right before submit.
+  const emailNow = document.querySelector<HTMLInputElement>(LOGIN_EMAIL_SELECTOR);
+  const pwdNow = document.querySelector<HTMLInputElement>('#password, input[formcontrolname="password"], input[type="password"]');
+  const signBtn = findLoginButton();
+  void postRegisterTrace('login pre-submit', {
+    emailVal: maskForLog(emailNow?.value ?? ''),
+    pwdLen: (pwdNow?.value ?? '').length,
+    signBtnDisabled: signBtn ? (signBtn as HTMLButtonElement).disabled : 'no-btn',
+    href: location.href,
+  });
+
   const initialUrl = window.location.href;
   await clickLoginSubmit(initialUrl);
+  void postRegisterTrace('login submit clicked', { href: location.href });
   await waitUntil(
     () => isLoginSuccess(initialUrl) || isAccountInactive() || isLoginFailureVisible(),
     45_000,
-  );
+  ).catch(() => {
+    void postRegisterTrace('login WAIT_TIMEOUT state', {
+      href: location.href,
+      success: isLoginSuccess(initialUrl),
+      inactive: isAccountInactive(),
+      failure: isLoginFailureVisible(),
+      bodySample: document.body.innerText.replace(/\s+/g, ' ').slice(0, 200),
+    });
+    throw new Error('WAIT_TIMEOUT');
+  });
 
   // Inactive account: VFS shows "This account is currently inactive. Please
   // click here to resend the activation email." Clicking "click here" triggers
