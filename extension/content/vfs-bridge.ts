@@ -12,7 +12,10 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.0-inactive-resend+session-clear';
+const VFS_BRIDGE_VERSION = '0.2.1-login-turnstile-solve';
+// VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
+// fallback when the widget's data-sitekey isn't on a matchable element.
+const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
 const LIFT_AUTH_HEADERS_KEY = 'liftAuthHeaders';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
@@ -283,18 +286,29 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
   await trustedKey('Tab');
   await new Promise((r) => setTimeout(r, 300));
 
-  const turnstile = document.querySelector<HTMLElement>('[data-sitekey], .cf-turnstile');
-  const siteKey = turnstile?.getAttribute('data-sitekey');
-  if (siteKey) {
+  // VFS login is gated by a Cloudflare Turnstile — Sign In stays DISABLED until
+  // it's solved. It doesn't reliably auto-pass for the automated browser, so we
+  // detect the widget broadly and solve via 2Captcha. The data-sitekey isn't
+  // always on a matchable element, so fall back to VFS's known static sitekey.
+  const turnstileEl = document.querySelector<HTMLElement>(
+    '[data-sitekey], .cf-turnstile, div[id^="cf-"], iframe[src*="challenges.cloudflare.com"]',
+  );
+  const hasTurnstile =
+    Boolean(turnstileEl) || Boolean(document.querySelector('input[name="cf-turnstile-response"]'));
+  const siteKey =
+    document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || VFS_LOGIN_TURNSTILE_SITEKEY;
+  void postRegisterTrace('login turnstile', { hasTurnstile, siteKey });
+  if (hasTurnstile) {
     await emitLoginEvent({
       type: 'EXT_LOGIN_NEED_CAPTCHA',
       correlationId: payload.correlationId,
       siteKey,
       pageUrl: window.location.href,
     });
-    const token = await waitForRegisterSignal('loginCaptchaToken', 75_000);
+    const token = await waitForRegisterSignal('loginCaptchaToken', 90_000);
     if (!token) throw new Error('LOGIN_CAPTCHA_TOKEN_MISSING');
     await applyRegisterCaptchaToken(token);
+    await new Promise((r) => setTimeout(r, 1500)); // let VFS validate + enable Sign In
   }
 
   // Replicate the human gesture the operator must do for VFS to accept the
