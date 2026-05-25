@@ -2,7 +2,7 @@ import { ExtensionWsClient } from '../shared/ws-client';
 import { debuggerClickAt, debuggerAttach, debuggerKeyPress, debuggerTypeText } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
 
-const SW_VERSION = '2026-05-24-proxy-creds-from-env';
+const SW_VERSION = '2026-05-25-autonomous-booking';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
 const warn = (...args: unknown[]) => console.warn('[VFS-SW]', ...args);
 log(`boot at ${new Date().toISOString()} version=${SW_VERSION}`);
@@ -312,6 +312,10 @@ function handleBackendMessage(message: BackendMessage): void {
     void runActivationFlow(message);
     return;
   }
+  if (message.type === 'BG_BOOK_VFS') {
+    void runBookingFlow(message);
+    return;
+  }
   if (message.type === 'BG_ACTIVATION_DONE') {
     forwardToActiveActivationTab(message.correlationId, {
       type: 'ACTIVATION_LINK_VISITED',
@@ -463,6 +467,20 @@ function forwardToActiveActivationTab(correlationId: string, payload: { type: st
   const tabId = activeActivationTabs.get(correlationId);
   if (!tabId) return;
   chrome.tabs.sendMessage(tabId, payload).catch(() => undefined);
+}
+
+async function runBookingFlow(msg: Extract<BackendMessage, { type: 'BG_BOOK_VFS' }>): Promise<void> {
+  try {
+    const tab = await findWarmVfsTab();
+    if (!tab?.id) {
+      sendEvent({ type: 'EXT_BOOKING_FAILED', reason: 'WARM_TAB_REQUIRED', correlationId: msg.payload.correlationId });
+      return;
+    }
+    await chrome.tabs.update(tab.id, { active: true });
+    await sendToTabEnsuringContentScript(tab.id, { type: 'BOOK_VIA_SPA', payload: msg.payload });
+  } catch (err) {
+    sendEvent({ type: 'EXT_BOOKING_FAILED', reason: (err as Error).message, correlationId: msg.payload.correlationId });
+  }
 }
 
 async function runActivationFlow(msg: Extract<BackendMessage, { type: 'BG_ACTIVATE_VFS_ACCOUNT' }>): Promise<void> {

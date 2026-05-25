@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '2026-05-24-booking-matselect';
+const VFS_BRIDGE_VERSION = '2026-05-25-autonomous-booking';
 const LIFT_AUTH_HEADERS_KEY = 'liftAuthHeaders';
 
 // VFS UZ login page email field — verified from live DOM 2026-05-23:
@@ -125,6 +125,9 @@ async function handleCommand(command: ContentCommand): Promise<unknown> {
       return clickFirst(['button[type="submit"]', 'button:has-text("Submit")', '.mat-button:has-text("Submit")']);
     case 'EXTRACT_CONFIRMATION':
       return extractConfirmation();
+    case 'BOOK_VIA_SPA':
+      void handleBookingViaSpa(command.payload);
+      return { ok: true };
     default:
       throw new Error('Unsupported content command');
   }
@@ -209,7 +212,7 @@ function safeQueryVisible(selector: string): HTMLElement | null {
   }
 }
 
-function closestClickable(element: HTMLElement): HTMLElement | null {
+function closestClickable(element: HTMLElement): HTMLElement {
   return element.closest<HTMLElement>('button,a,[role="button"]') ?? element;
 }
 
@@ -835,6 +838,139 @@ async function fillForm(command: BookingCommand | CustomerBookingPayload): Promi
     await selectMatOption('nationality', new RegExp(profile.nationality, 'i')).catch(() => false);
   }
   return { ok: true };
+}
+
+// ── Autonomous booking — drives all 5 VFS steps end to end ────────────────
+// Step DOM verified from a real completed booking 2026-05-25 (see memory
+// project_vfs_booking_proven). Reuses selectMatOption / trustedFill /
+// trustedClick / the Turnstile solve flow.
+interface BookingFlowPayload {
+  firstName: string;
+  lastName: string;
+  nationality: string;     // e.g. "Uzbekistan"
+  passportNumber: string;
+  contact: string;         // local number, no 998 prefix
+  email: string;
+  subCategory: string;     // e.g. "Uzbek" or "Tajik" (matches selectedSubvisaCategory option)
+  correlationId: string;
+}
+
+async function emitBookingEvent(event: ExtensionEvent): Promise<void> {
+  await chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+async function handleBookingViaSpa(payload: BookingFlowPayload): Promise<void> {
+  currentCorrelationId = payload.correlationId;
+  try {
+    const confirmationNumber = await withTimeout(runBookingSteps(payload), 240_000, 'BOOKING_TIMEOUT');
+    await emitBookingEvent({ type: 'EXT_BOOKING_COMPLETED', confirmationNumber, correlationId: payload.correlationId });
+  } catch (error) {
+    await emitBookingEvent({ type: 'EXT_BOOKING_FAILED', reason: (error as Error).message, correlationId: payload.correlationId });
+  }
+}
+
+// Click a button matching any of `words` once it's enabled+visible (trusted).
+async function clickButtonByTextEnabled(words: string[], timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const btn = findButtonByText(words);
+    if (btn && isEnabledVisible(btn)) {
+      await trustedClick(btn);
+      await new Promise((r) => setTimeout(r, 1500));
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  void postRegisterTrace('booking: button never enabled', { words });
+  return false;
+}
+
+async function solveTurnstileIfPresent(correlationId: string): Promise<void> {
+  const ts = document.querySelector<HTMLElement>('[data-sitekey], .cf-turnstile');
+  const siteKey = ts?.getAttribute('data-sitekey');
+  if (!siteKey) return;
+  const existing = document.querySelector<HTMLInputElement>('[name="cf-turnstile-response"]');
+  if (existing?.value) return; // already solved (auto-pass)
+  await emitLoginEvent({ type: 'EXT_LOGIN_NEED_CAPTCHA', correlationId, siteKey, pageUrl: window.location.href });
+  const token = await waitForRegisterSignal('loginCaptchaToken', 90_000).catch(() => null);
+  if (token) await applyRegisterCaptchaToken(token);
+}
+
+async function pickAvailableDate(): Promise<boolean> {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const cell = Array.from(document.querySelectorAll<HTMLElement>('.mat-calendar-body-cell'))
+      .find((c) =>
+        c.getAttribute('aria-disabled') !== 'true' &&
+        !c.classList.contains('mat-calendar-body-disabled') &&
+        (c.querySelector('.mat-calendar-body-cell-content') ?? c).getAttribute('aria-hidden') !== 'true');
+    if (cell) { await trustedClick(cell); await new Promise((r) => setTimeout(r, 1200)); return true; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
+async function pickFirstSlot(): Promise<boolean> {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const slot = document.querySelector<HTMLElement>('input[name="SlotRadio"], mat-radio-button input[type="radio"]');
+    if (slot && isVisible(slot)) { await trustedClick(closestClickable(slot)); await new Promise((r) => setTimeout(r, 800)); return true; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
+async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
+  // STEP 1 — Appointment Details (center / category / sub-category dropdowns)
+  if (document.querySelector('mat-select[formcontrolname="centerCode"]')) {
+    await selectMatOption('centerCode', /.+/);
+    await selectMatOption('visaCategoryCode', /long stay|visa d/i);
+    await selectMatOption('selectedSubvisaCategory', new RegExp(p.subCategory, 'i'));
+    await clickButtonByTextEnabled(['continue']);
+  }
+
+  // STEP 2 — Your Details
+  await waitForElement(
+    'input[formcontrolname="firstName"], input[id*="first" i], input[formcontrolname="emailid"], input#email',
+    20_000,
+  ).catch(() => undefined);
+  await fillForm({
+    firstName: p.firstName, lastName: p.lastName, passportNumber: p.passportNumber,
+    email: p.email, phone: p.contact, nationality: p.nationality,
+  } as unknown as CustomerBookingPayload);
+  await trustedKey('Tab');
+  // VFS forces a ~23s wait before Save enables — clickButtonByTextEnabled polls.
+  await clickButtonByTextEnabled(['save', 'continue'], 45_000);
+
+  // STEP 3 — Book Appointment (type → captcha → date → time slot → continue)
+  await waitForElement('#mat-radio-0-input, input[name="SlotRadio"], .mat-calendar-body-cell', 30_000).catch(() => undefined);
+  const apptType = document.querySelector<HTMLElement>('#mat-radio-0-input, mat-radio-button input[type="radio"]');
+  if (apptType) await trustedClick(closestClickable(apptType));
+  await new Promise((r) => setTimeout(r, 800));
+  await solveTurnstileIfPresent(p.correlationId);
+  await pickAvailableDate();
+  await pickFirstSlot();
+  await clickButtonByTextEnabled(['continue']);
+
+  // STEP 4 — Services (best-effort: advance)
+  await new Promise((r) => setTimeout(r, 1500));
+  await clickButtonByTextEnabled(['continue', 'next'], 15_000).catch(() => false);
+
+  // STEP 5 — Review: tick consent checkboxes, then Confirm
+  await waitForElement('#mat-mdc-checkbox-0-input', 15_000).catch(() => undefined);
+  for (const id of ['mat-mdc-checkbox-0-input', 'mat-mdc-checkbox-1-input']) {
+    const cb = document.querySelector<HTMLInputElement>(`#${id}`);
+    if (cb && !cb.checked) await trustedClick(closestClickable(cb));
+  }
+  await clickButtonByTextEnabled(['confirm']);
+
+  // Wait for the confirmation page.
+  await waitUntil(
+    () => /confirmation/i.test(window.location.href) || /thank you for booking/i.test(document.body.innerText),
+    60_000,
+  );
+  const result = await extractConfirmation();
+  return result.confirmationNumber || 'BOOKED';
 }
 
 async function syncSessionToBackend(): Promise<void> {

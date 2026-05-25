@@ -70,6 +70,14 @@ export type BackendMessage =
   | { type: 'BG_ACTIVATE_VFS_ACCOUNT'; email: string; loginUrl: string; correlationId: string }
   | { type: 'BG_ACTIVATION_DONE'; correlationId: string; ok: boolean; reason?: string }
   | { type: 'BG_PROXY_CREDS'; usernameBase: string; password: string }
+  | {
+      type: 'BG_BOOK_VFS';
+      payload: {
+        firstName: string; lastName: string; nationality: string;
+        passportNumber: string; contact: string; email: string;
+        subCategory: string; correlationId: string;
+      };
+    }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -147,7 +155,15 @@ export type ContentCommand =
   | { type: 'LOGIN_VIA_SPA'; payload: LoginFormPayload }
   | { type: 'LOGIN_CAPTCHA_TOKEN'; token: string | null }
   | { type: 'ACTIVATE_VIA_SPA'; payload: { email: string; correlationId: string } }
-  | { type: 'ACTIVATION_LINK_VISITED'; correlationId: string; ok: boolean; reason?: string };
+  | { type: 'ACTIVATION_LINK_VISITED'; correlationId: string; ok: boolean; reason?: string }
+  | {
+      type: 'BOOK_VIA_SPA';
+      payload: {
+        firstName: string; lastName: string; nationality: string;
+        passportNumber: string; contact: string; email: string;
+        subCategory: string; correlationId: string;
+      };
+    };
 
 export interface RegisterFormPayload {
   email: string;
