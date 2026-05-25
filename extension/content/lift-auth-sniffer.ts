@@ -123,6 +123,67 @@
     } catch {
       // Never let the interceptor affect the VFS page.
     }
+
+    // ── Turnstile callback capture (MAIN world) ──────────────────────────────
+    // VFS enables Sign In via the Turnstile render callback, which lives here in
+    // the page's MAIN world — the isolated content script can't call it. We wrap
+    // turnstile.render to capture every callback, then fire them with an
+    // externally-solved (2Captcha) token when the content script posts it.
+    try {
+      const tsCallbacks: Array<(token: string) => void> = [];
+      const wrap = (ts: any): any => {
+        try {
+          if (!ts || ts.__vfsWrapped) return ts;
+          const origRender = ts.render;
+          if (typeof origRender === 'function') {
+            ts.render = function (container: unknown, params: any) {
+              try {
+                if (params && typeof params.callback === 'function') tsCallbacks.push(params.callback);
+              } catch {}
+              return origRender.apply(this, arguments as unknown as [unknown, unknown]);
+            };
+          }
+          ts.__vfsWrapped = true;
+        } catch {}
+        return ts;
+      };
+
+      let _ts = (window as any).turnstile;
+      if (_ts) wrap(_ts);
+      try {
+        Object.defineProperty(window, 'turnstile', {
+          configurable: true,
+          get() { return _ts; },
+          set(v) { _ts = wrap(v); },
+        });
+      } catch {
+        // turnstile already non-configurable — wrap whatever is there.
+        wrap((window as any).turnstile);
+      }
+
+      window.addEventListener('message', (e: MessageEvent) => {
+        try {
+          if (e.source !== window) return;
+          const d = e.data;
+          if (!d || d.source !== 'vfs-apply-turnstile' || typeof d.token !== 'string') return;
+          // Fire every captured Turnstile callback with the solved token.
+          for (const cb of tsCallbacks) { try { cb(d.token); } catch {} }
+          // Also populate the response field with native setter + events.
+          try {
+            const ta = document.querySelector<HTMLTextAreaElement | HTMLInputElement>('[name="cf-turnstile-response"]');
+            if (ta) {
+              const proto = ta instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+              if (setter) setter.call(ta, d.token); else (ta as any).value = d.token;
+              ta.dispatchEvent(new Event('input', { bubbles: true }));
+              ta.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          } catch {}
+        } catch {}
+      });
+    } catch {
+      // Never let the interceptor affect the VFS page.
+    }
   } catch {
     // Never let the interceptor affect the VFS page.
   }

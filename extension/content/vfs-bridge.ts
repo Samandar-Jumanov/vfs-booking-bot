@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.1-login-turnstile-solve';
+const VFS_BRIDGE_VERSION = '0.2.2-turnstile-mainworld-callback';
 // VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
 // fallback when the widget's data-sitekey isn't on a matchable element.
 const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
@@ -817,6 +817,15 @@ async function applyRegisterCaptchaToken(token: string | null): Promise<void> {
   const callbackName = widget?.getAttribute('data-callback');
   const callback = callbackName ? getWindowCallback(callbackName) : undefined;
   if (callback) callback(token);
+  // Fire the Turnstile callback in the page MAIN world (the isolated content
+  // script can't call it). The lift-auth-sniffer captured render() callbacks
+  // and will invoke them with this token → VFS enables Sign In.
+  try {
+    window.postMessage({ source: 'vfs-apply-turnstile', token }, window.location.origin);
+  } catch {
+    /* ignore */
+  }
+  await new Promise((r) => setTimeout(r, 800));
 }
 
 function isLoggedIn(): boolean {
