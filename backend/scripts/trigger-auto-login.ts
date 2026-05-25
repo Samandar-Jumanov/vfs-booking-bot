@@ -23,7 +23,10 @@ async function main(): Promise<void> {
     list.data?.items ?? list.data ?? [];
   console.log('total accounts:', items.length);
   const wantStatus = process.env.TARGET_STATUS || 'ACTIVE';
-  const active = items.find((a) => a.status === wantStatus) ?? items[0];
+  const wantId = process.env.TARGET_ID;
+  const active = wantId
+    ? items.find((a) => a.id === wantId)
+    : (items.find((a) => a.status === wantStatus) ?? items[0]);
   if (!active) {
     console.log('NO accounts returned — body:', JSON.stringify(list.data).slice(0, 300));
     return;

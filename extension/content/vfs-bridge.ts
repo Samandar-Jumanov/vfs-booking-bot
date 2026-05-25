@@ -220,7 +220,31 @@ function isEnabledVisible(element: HTMLElement): boolean {
   return isVisible(element) && !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true';
 }
 
+// VFS keeps its session/token in localStorage + sessionStorage, not just
+// cookies. A stale/invalid token there makes every navigation show
+// "Session Expired or Invalid" even after cookies are cleared. Wipe it before a
+// fresh login so we never inherit a poisoned session. If the page is currently
+// the session-expired/error shell (no login form), reload to the login URL so
+// the form renders clean.
+async function clearVfsSessionStorage(): Promise<void> {
+  try {
+    localStorage.clear();
+    sessionStorage.clear();
+    void postRegisterTrace('cleared VFS local/session storage before login', { href: location.href });
+  } catch {
+    /* storage may be inaccessible on some error shells — ignore */
+  }
+}
+
 async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
+  await clearVfsSessionStorage();
+  // If we're stuck on the session-expired / error shell (no login form),
+  // reload the login route once so the clean form renders.
+  const hasForm = document.querySelector(LOGIN_EMAIL_SELECTOR);
+  if (!hasForm && /session|error|expired/i.test(document.body.innerText)) {
+    location.replace('/uzb/en/lva/login');
+    return; // background re-sends LOGIN_VIA_SPA after the reload settles
+  }
   await waitForElement(
     'input[type="email"], input[formcontrolname="emailid"], input[name="emailid"], input[formcontrolname="username"]',
     30_000,
