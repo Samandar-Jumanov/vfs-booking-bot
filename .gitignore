@@ -9,6 +9,9 @@ backend/.env
 sessions/
 backend/.browser-profiles/
 
+# Sensitive applicant data — never commit passport scans
+passports/
+
 # Logs (runtime artifact dirs only — NOT the src/modules/logs source module)
 *.log
 /logs/
