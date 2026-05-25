@@ -12,7 +12,7 @@ import type {
 const SLOT_API = 'https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable';
 const REGISTER_STEP_TIMEOUT_MS = 180_000;
 // Version marker so we can confirm in console which build is loaded.
-const VFS_BRIDGE_VERSION = '0.2.5-dialcode-scroll';
+const VFS_BRIDGE_VERSION = '0.2.6-register-turnstile';
 // VFS's static Cloudflare Turnstile sitekey (extracted 2026-05-08). Used as a
 // fallback when the widget's data-sitekey isn't on a matchable element.
 const VFS_LOGIN_TURNSTILE_SITEKEY = '0x4AAAAAABhlz7Ei4byodYjs';
@@ -616,9 +616,20 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
     });
   }
 
-  const turnstile = document.querySelector<HTMLElement>('[data-sitekey]');
-  const siteKey = turnstile?.getAttribute('data-sitekey');
-  if (siteKey) {
+  // Turnstile gates the Register button. The widget loads a few seconds after
+  // the form and doesn't always expose [data-sitekey] on a matchable element,
+  // so POLL for any Turnstile marker and fall back to VFS's known sitekey.
+  const REG_TS_SELECTOR = '[data-sitekey], .cf-turnstile, div[id^="cf-"], iframe[src*="challenges.cloudflare.com"], input[name="cf-turnstile-response"]';
+  let regHasTurnstile = false;
+  const regTsDeadline = Date.now() + 15_000;
+  while (Date.now() < regTsDeadline) {
+    if (document.querySelector(REG_TS_SELECTOR)) { regHasTurnstile = true; break; }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const siteKey =
+    document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || VFS_LOGIN_TURNSTILE_SITEKEY;
+  void postRegisterTrace('register turnstile', { regHasTurnstile, siteKey });
+  if (regHasTurnstile) {
     await emitRegisterEvent({
       type: 'EXT_REGISTER_NEED_CAPTCHA',
       correlationId: payload.correlationId,
@@ -628,6 +639,7 @@ async function runRegisterSteps(payload: RegisterFormPayload): Promise<void> {
     const token = await waitForRegisterSignal('captchaToken', 90_000);
     if (!token) throw new Error('CAPTCHA_TOKEN_MISSING');
     await applyRegisterCaptchaToken(token);
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   const initialUrl = window.location.href;
