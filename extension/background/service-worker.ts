@@ -373,20 +373,23 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
   // straight at the login URL, give the SPA time to render, then drive it. No
   // logout, no double-navigate (that hung before reaching the content script).
   const loginUrl = msg.loginUrl || 'https://visa.vfsglobal.com/uzb/en/lva/login';
+  await swTrace('runLoginFlow start', { email: msg.email, loginUrl });
   try {
-    // Best-effort session wipe via an existing VFS tab so /login renders the
-    // form (not a logged-in dashboard). Non-blocking if no VFS tab exists.
     const existing = await findWarmVfsTab();
     if (existing?.id) await clearVfsSession(existing.id).catch(() => undefined);
+    await swTrace('creating login tab');
 
     const tab = await chrome.tabs.create({ url: loginUrl, active: true });
     if (!tab.id) {
+      await swTrace('TAB_OPEN_FAILED');
       sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_OPEN_FAILED' });
       return;
     }
     activeLoginTabs.set(msg.correlationId, tab.id);
+    await swTrace('tab created, waiting for load', { tabId: tab.id });
     await waitForTabComplete(tab.id, 25_000);
     await new Promise((r) => setTimeout(r, 1500));
+    await swTrace('sending LOGIN_VIA_SPA');
     await sendToTabEnsuringContentScript(tab.id, {
       type: 'LOGIN_VIA_SPA',
       payload: {
@@ -395,7 +398,9 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
         correlationId: msg.correlationId,
       },
     });
+    await swTrace('LOGIN_VIA_SPA sent ok');
   } catch (err) {
+    await swTrace('runLoginFlow ERROR', { reason: (err as Error).message });
     sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: (err as Error).message });
   }
 }
@@ -735,6 +740,23 @@ function sendEvent(event: ExtensionEvent): void {
     activeActivationTabs.delete(event.correlationId);
   }
   wsClient?.send(event);
+}
+
+// Service-worker-side trace → backend logs (same endpoint the content script
+// uses). Lets us see what runLoginFlow does even when the content script never
+// runs. Best-effort, never throws.
+async function swTrace(step: string, meta?: unknown): Promise<void> {
+  try {
+    const settings = await getSettings();
+    if (!settings.extensionToken) return;
+    await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/extension/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + settings.extensionToken },
+      body: JSON.stringify({ step: '[SW] ' + step, meta: meta ?? {} }),
+    });
+  } catch {
+    /* ignore */
+  }
 }
 
 async function getSettings(): Promise<ExtensionSettings> {
