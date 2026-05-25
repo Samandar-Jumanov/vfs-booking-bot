@@ -782,6 +782,25 @@ async function pollSlot(monitor: MonitorConfig): Promise<PollSlotResult> {
 // dial-code trusted-click pattern. Returns true if an option was clicked.
 // Used for booking step-1 dropdowns (centerCode / visaCategoryCode /
 // selectedSubvisaCategory) and the Your Details nationality dropdown.
+// Poll until a dependent mat-select exists and is no longer disabled (VFS
+// disables category until a centre is picked, sub-category until a category is
+// picked, and the options arrive via an async API call).
+async function waitForMatOptionsToLoad(formControlName: string, timeoutMs = 12_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const sel = document.querySelector<HTMLElement>(`mat-select[formcontrolname="${formControlName}"], [formcontrolname="${formControlName}"]`);
+    const disabled =
+      sel?.getAttribute('aria-disabled') === 'true' ||
+      sel?.classList.contains('mat-mdc-select-disabled') ||
+      sel?.classList.contains('mat-select-disabled');
+    if (sel && !disabled) {
+      await new Promise((r) => setTimeout(r, 600)); // settle after enable
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
 async function selectMatOption(formControlName: string, match: RegExp): Promise<boolean> {
   const trigger =
     document.querySelector<HTMLElement>(`mat-select[formcontrolname="${formControlName}"]`) ??
@@ -795,8 +814,10 @@ async function selectMatOption(formControlName: string, match: RegExp): Promise<
     void postRegisterTrace('selectMatOption: trigger click failed', { formControlName });
     return false;
   }
-  // Wait up to 4s for the options panel to render.
-  const deadline = Date.now() + 4000;
+  // Wait up to 10s for the options panel to render — VFS loads dependent
+  // dropdowns (category after centre, sub-category after category) via an API
+  // call, so options can appear several seconds after the panel opens.
+  const deadline = Date.now() + 10_000;
   let option: HTMLElement | undefined;
   while (Date.now() < deadline && !option) {
     option = Array.from(
@@ -805,7 +826,15 @@ async function selectMatOption(formControlName: string, match: RegExp): Promise<
     if (!option) await new Promise((r) => setTimeout(r, 120));
   }
   if (!option) {
-    void postRegisterTrace('selectMatOption: option not found', { formControlName, match: String(match) });
+    // Dump the real option labels so we can fix the match pattern without
+    // making the operator transcribe them by hand.
+    const available = Array.from(
+      document.querySelectorAll<HTMLElement>('mat-option, .mat-mdc-option, [role="option"]'),
+    )
+      .map((o) => (o.textContent ?? '').trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    void postRegisterTrace('selectMatOption: option not found', { formControlName, match: String(match), available });
     return false;
   }
   const ok = await trustedClick(option);
@@ -921,10 +950,14 @@ async function pickFirstSlot(): Promise<boolean> {
 }
 
 async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
-  // STEP 1 — Appointment Details (center / category / sub-category dropdowns)
+  // STEP 1 — Appointment Details (center / category / sub-category dropdowns).
+  // Each dropdown loads the next one's options via an API call, so wait for the
+  // dependent select to actually have options before trying to pick from it.
   if (document.querySelector('mat-select[formcontrolname="centerCode"]')) {
     await selectMatOption('centerCode', /.+/);
-    await selectMatOption('visaCategoryCode', /long stay|visa d/i);
+    await waitForMatOptionsToLoad('visaCategoryCode', 12_000);
+    await selectMatOption('visaCategoryCode', /long stay|visa d|national/i);
+    await waitForMatOptionsToLoad('selectedSubvisaCategory', 12_000);
     await selectMatOption('selectedSubvisaCategory', new RegExp(p.subCategory, 'i'));
     await clickButtonByTextEnabled(['continue']);
   }
