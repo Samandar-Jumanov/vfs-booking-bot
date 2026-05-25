@@ -226,7 +226,35 @@ PUT    /api/settings/captcha
 
 ---
 
-## Demo Preparation — Client Demo Sunday 2026-05-10
+## Current State & Known Issues (updated 2026-05-25)
+
+Scope is now **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer pool accounts. Architecture: Node/TS backend on Railway + Next.js frontend on Railway + **Chrome MV3 extension** (runs on operator machine/VPS, drives VFS via `chrome.debugger` trusted clicks). Package manager is **npm** (not pnpm).
+
+**Working (proven):**
+- Auto-register + auto-activate — extension fills/​submits the VFS register form; backend polls **Mailsac** API for the activation email and visits the link. Automated only for **Mailsac** pool emails (no API access to customers' personal inboxes).
+- Slot monitoring + authenticated polling (lift-api auth captured via MAIN-world `lift-auth-sniffer`).
+- Booking **Step 1** (Appointment Details): bot auto-selects centre → visa category → sub-category. Dropdowns are selected by **position** (`selectMatOptionByIndex`), reading each select's own `aria-owns` panel; sub-category options load async so it retries / auto-picks the first with slots.
+
+**Active blocker — auto-login / auto-register gated by Cloudflare Turnstile:**
+- The VFS Sign-In / Register button stays **disabled until Turnstile passes**. The bot's `chrome.debugger` attachment ("started debugging this browser") is a detectable automation signal, and a profile **flagged by heavy testing** (poisoned `cf_clearance` cookies) will not pass — even manually.
+- **Key finding (2026-05-25):** a **fresh Chrome profile** on the same machine **passes Turnstile** (manually). So the wall is the **flagged profile**, not the IP or human-vs-bot. Mitigation = **profile rotation** + operator-assisted login (a human passes Turnstile once, bot does the rest). Fully hands-off login at scale likely needs a **stealth automation stack** (nodriver/patchright/camoufox) to replace `chrome.debugger` — deferred.
+- Booking Steps 2–5 are coded but **unvalidated** (gated on having slots + a logged-in session).
+
+**Gotcha that cost a full day:** the operator's **VPN** poisons the BrightData proxy source IP → BrightData returns `ip_blacklisted` → surfaces as VFS "Session Expired". **Check VPN + BrightData IP-allowlist BEFORE blaming Datadome/VFS.**
+
+**Proxy is now OPTIONAL** — the operator is in UZ on a clean residential IP (`84.54.x`, Tashkent), so VFS loads directly. Launcher (`launch-bot-chrome.ps1`) env flags:
+- `VFS_USE_PROXY=true` → route VFS through BrightData (only if NOT in UZ). Default **off**.
+- `VFS_FRESH_PROFILE=true` → launch a brand-new Chrome profile (clean Cloudflare cookies; defeats a flagged profile).
+
+**Backend env flags (default OFF — see `backend/.env.example`):**
+- `LOGIN_CRON_ENABLED` — the 6-hourly mass-login refresh; OFF because it logs in every stale account at once and triggers VFS **429001** "Access Restricted".
+- `NOTIFY_BOOKING_FAILURES` — Telegram/email failure alerts; OFF so dev test fires don't spam the operator/client.
+
+**Diagnostic/trigger scripts** (`backend/scripts/`, run via `railway run --service backend npx tsx scripts/<x>.ts`): `trigger-auto-login` (TARGET_ID), `trigger-register`, `trigger-recover` (activate PENDING via Mailsac), `trigger-booking`, `verify-proxy-exit.js`, `verify-vfs-reachable.js`.
+
+---
+
+## Demo Preparation — Client Demo Sunday 2026-05-10 (superseded — see Current State above)
 
 ### Target routes
 - **UZB → Tajikistan** (`uzb/tjk`)
