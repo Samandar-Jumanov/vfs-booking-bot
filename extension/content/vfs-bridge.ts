@@ -1805,12 +1805,16 @@ function findResendActivationLink(): HTMLElement | null {
 
 function isLoginFailureVisible(): boolean {
   const text = document.body.innerText.toLowerCase();
-  return text.includes('invalid') ||
-    text.includes('incorrect') ||
+  // NOTE: do NOT match "mandatory field" — the login page always shows
+  // "* denotes mandatory fields", which made this a permanent false-positive
+  // that failed every login instantly with reason "*".
+  return text.includes('invalid email or password') ||
+    text.includes('incorrect email or password') ||
+    text.includes('invalid credentials') ||
     text.includes('login failed') ||
     text.includes('sign in failed') ||
-    text.includes('mandatory field') ||
-    text.includes('try again later');
+    text.includes('account is locked') ||
+    text.includes('too many attempts');
 }
 
 function readLoginFailureReason(): string {
@@ -1818,7 +1822,8 @@ function readLoginFailureReason(): string {
     '.error, .mat-error, .invalid-feedback, [class*="error" i], [role="alert"]',
   ))
     .map((element) => element.innerText.trim())
-    .filter((text) => text.length > 0 && text.length < 200);
+    // Ignore bare asterisks / the "mandatory fields" hint — they aren't failures.
+    .filter((text) => text.length > 1 && text.length < 200 && !/^\*+$/.test(text) && !/denotes mandatory/i.test(text));
   return errors[0] || 'LOGIN_FAILED';
 }
 
