@@ -61,6 +61,40 @@ if (-not (Test-Path $profile)) {
     Write-Host "Created dedicated profile at $profile" -ForegroundColor Green
 }
 
+# Disable Chrome's password manager + autofill so it doesn't inject the
+# operator's saved credentials into the VFS login form (which fights the bot's
+# trusted-fill and causes wrong-account / "*" validation failures). Patch the
+# profile Preferences before launch.
+$prefPath = Join-Path $profile "Default\Preferences"
+try {
+    if (Test-Path $prefPath) {
+        $prefs = Get-Content $prefPath -Raw | ConvertFrom-Json
+    } else {
+        New-Item -ItemType Directory -Path (Split-Path $prefPath) -Force | Out-Null
+        $prefs = [pscustomobject]@{}
+    }
+    function Set-Prop($obj, $name, $value) {
+        if ($obj.PSObject.Properties[$name]) { $obj.$name = $value }
+        else { $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+    }
+    if (-not $prefs.PSObject.Properties['credentials_enable_service']) {
+        $prefs | Add-Member -NotePropertyName 'credentials_enable_service' -NotePropertyValue $false
+    } else { $prefs.credentials_enable_service = $false }
+    if (-not $prefs.PSObject.Properties['profile']) {
+        $prefs | Add-Member -NotePropertyName 'profile' -NotePropertyValue ([pscustomobject]@{})
+    }
+    Set-Prop $prefs.profile 'password_manager_enabled' $false
+    if (-not $prefs.PSObject.Properties['autofill']) {
+        $prefs | Add-Member -NotePropertyName 'autofill' -NotePropertyValue ([pscustomobject]@{})
+    }
+    Set-Prop $prefs.autofill 'profile_enabled' $false
+    Set-Prop $prefs.autofill 'credit_card_enabled' $false
+    ($prefs | ConvertTo-Json -Depth 100) | Set-Content $prefPath -Encoding utf8
+    Write-Host "Disabled Chrome password manager + autofill in profile prefs." -ForegroundColor Green
+} catch {
+    Write-Host "WARN: could not patch prefs to disable password manager: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 Write-Host "Launching Chrome with VFS Booking Bot extension..." -ForegroundColor Cyan
 Write-Host "  Extension: $extPath" -ForegroundColor Gray
 Write-Host "  Profile:   $profile" -ForegroundColor Gray
@@ -78,7 +112,9 @@ $chromeArgs = @(
     "--no-first-run",
     "--no-default-browser-check",
     "--proxy-server=http=${brightDataHost}:${brightDataPort}",
-    "--proxy-bypass-list=$proxyBypass"
+    "--proxy-bypass-list=$proxyBypass",
+    "--disable-features=AutofillServerCommunication,PasswordManagerOnboarding,AutofillEnableAccountWalletStorage",
+    "--disable-save-password-bubble"
 )
 
 if (Test-BrightDataCertificateInstalled) {
