@@ -195,6 +195,18 @@ function formatEmailHtml(p: NotificationPayload & { profileName?: string }): { s
 }
 
 export async function dispatchNotification(payload: NotificationPayload): Promise<void> {
+  // Mute booking-failure alerts while we're still validating the flow — every
+  // failed/aborted test fire would otherwise spam the operator (and any client)
+  // Telegram channel. Success (BOOKING_SUCCESS) and slot alerts always go out.
+  // Set NOTIFY_BOOKING_FAILURES=true in production to re-enable failure alerts.
+  if (payload.event === 'BOOKING_FAILED' && process.env.NOTIFY_BOOKING_FAILURES !== 'true') {
+    logEvent('warn', EventType.BOOKING_FAILED, `[notify] failure alert suppressed (NOTIFY_BOOKING_FAILURES off): ${payload.reason ?? ''}`, {
+      channel: 'telegram',
+      destination: payload.destination,
+    });
+    return;
+  }
+
   let profileName = payload.profileName;
   let customerChatId: string | null = null;
   if (payload.profileId) {
