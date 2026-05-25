@@ -72,7 +72,16 @@ export interface AutonomousBookingInput {
 export async function triggerAutonomousBooking(input: AutonomousBookingInput): Promise<ExtensionBookingResult> {
   const operatorId = await resolveOperatorUserId();
   if (!operatorId) return { success: false, reason: 'NO_OPERATOR_CONNECTED' };
-  const { sendToExtension } = await import('@modules/websocket/ws.server');
+  const { sendToExtension, isExtensionLive, listExtensionConnections } = await import('@modules/websocket/ws.server');
+  // Booking is time-sensitive — don't queue it for a phantom socket and wait
+  // 250s. If the operator's extension isn't live under this exact key, fail
+  // fast with the keys we DO have so the mismatch is obvious.
+  if (!isExtensionLive(operatorId)) {
+    return {
+      success: false,
+      reason: `OPERATOR_EXTENSION_OFFLINE (operatorId=${operatorId}; live keys=[${listExtensionConnections().join(', ')}])`,
+    };
+  }
   const correlationId = randomUUID();
   const accepted = sendToExtension(operatorId, { type: 'BG_BOOK_VFS', payload: { ...input, correlationId } });
   if (!accepted) return { success: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };

@@ -83,11 +83,24 @@ export function emitToUser(userId: string, event: string, data: unknown): void {
   getIo().to(`user:${userId}`).emit(event, data);
 }
 
+/** True only if there's a live, writable extension socket for this customerId. */
+export function isExtensionLive(customerId: string): boolean {
+  const connection = extensionConnections.get(customerId);
+  return Boolean(connection && connection.isWritable());
+}
+
+/** Customer ids with a currently-registered extension socket (for diagnostics). */
+export function listExtensionConnections(): string[] {
+  return Array.from(extensionConnections.keys());
+}
+
 export function sendToExtension(customerId: string, payload: unknown): boolean {
+  const type = (payload as { type?: string } | null)?.type ?? 'unknown';
   const connection = extensionConnections.get(customerId);
   if (connection && connection.isWritable()) {
     try {
       connection.write(payload);
+      console.log(`[sendToExtension] LIVE write type=${type} → ${customerId}`);
       return true;
     } catch {
       // Socket died mid-write — drop it and fall through to queueing.
@@ -97,6 +110,10 @@ export function sendToExtension(customerId: string, payload: unknown): boolean {
   // No live socket right now. Queue the command and deliver it the moment the
   // extension reconnects (within the ~30s SW wake cadence). Returning true =
   // "accepted for delivery" so the caller proceeds and awaits the result.
+  console.warn(
+    `[sendToExtension] NO LIVE SOCKET for ${customerId} (type=${type}); queued. ` +
+      `connected keys=[${Array.from(extensionConnections.keys()).join(', ')}]`,
+  );
   const queue = pendingExtensionMessages.get(customerId) ?? [];
   queue.push(payload);
   while (queue.length > MAX_PENDING_PER_USER) queue.shift();
@@ -147,6 +164,7 @@ function initExtensionWebSocket(server: HttpServer): void {
     ].join('\r\n'));
 
     const customerId = payload.sub;
+    console.log(`[extension WS] CONNECTED customerId=${customerId} email=${payload.email ?? '?'}`);
     markExtensionConnected(customerId, payload.email);
     const extensionSocket: ExtensionSocket = {
       customerId,
