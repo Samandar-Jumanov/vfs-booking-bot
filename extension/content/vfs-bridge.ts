@@ -903,6 +903,52 @@ async function selectMatOptionByIndex(index: number, match: RegExp, label = `idx
   return pickFromMatSelect(trigger, match, label);
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Try every sub-category option (mat-select index 2) until one makes the
+// Continue button enable — i.e. that category actually has appointment slots.
+// Returns the chosen label, or null if none have slots. `preferred` (regex) is
+// tried first when it matches an option.
+async function selectSubCategoryWithSlots(preferred?: RegExp): Promise<string | null> {
+  const triggers = Array.from(document.querySelectorAll<HTMLElement>('mat-select'));
+  const trigger = triggers[2];
+  if (!trigger) { void postRegisterTrace('subCat: no trigger', { matSelectCount: triggers.length }); return null; }
+
+  // Open once to read the available option labels.
+  closeAnyOpenPanel();
+  await new Promise((r) => setTimeout(r, 200));
+  const inner = trigger.querySelector<HTMLElement>('.mat-mdc-select-trigger, .mat-select-trigger') ?? trigger;
+  await trustedClick(inner);
+  let texts: string[] = [];
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && texts.length === 0) {
+    texts = openPanelOptions(trigger).map((o) => (o.textContent ?? '').trim()).filter(Boolean);
+    if (texts.length === 0) await new Promise((r) => setTimeout(r, 300));
+  }
+  closeAnyOpenPanel();
+  void postRegisterTrace('subCat: options', { texts });
+  if (texts.length === 0) return null;
+
+  // Order: preferred match first, then the rest.
+  const ordered = preferred ? [...texts].sort((a, b) => (preferred.test(b) ? 1 : 0) - (preferred.test(a) ? 1 : 0)) : texts;
+
+  for (const text of ordered) {
+    const picked = await pickFromMatSelect(trigger, new RegExp('^\\s*' + escapeRegExp(text) + '\\s*$', 'i'), 'sub:' + text.slice(0, 24));
+    if (!picked) continue;
+    // Give VFS a moment to evaluate availability and enable/disable Continue.
+    await new Promise((r) => setTimeout(r, 2500));
+    const cont = findButtonByText(['continue']);
+    if (cont && isEnabledVisible(cont)) {
+      void postRegisterTrace('subCat: HAS SLOTS', { text });
+      return text;
+    }
+    void postRegisterTrace('subCat: no slots', { text });
+  }
+  return null;
+}
+
 async function selectMatOption(formControlName: string, match: RegExp): Promise<boolean> {
   const trigger =
     document.querySelector<HTMLElement>(`mat-select[formcontrolname="${formControlName}"]`) ??
@@ -1066,13 +1112,11 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
     await selectMatOptionByIndex(0, /.+/, 'centre');
     await new Promise((r) => setTimeout(r, 2500));
     await selectMatOptionByIndex(1, /long stay|visa d|national|work/i, 'visaCategory');
-    // Sub-category options load a few seconds AFTER the category is chosen, so
-    // retry — re-opening the dropdown each time until its real options appear.
-    let subOk = false;
-    for (let i = 0; i < 4 && !subOk; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      subOk = await selectMatOptionByIndex(2, new RegExp(p.subCategory, 'i'), 'subCategory');
-    }
+    await new Promise((r) => setTimeout(r, 3000));
+    // Try each sub-category until one has slots (Continue enables). Prefer the
+    // requested one (p.subCategory) but fall back to whatever is bookable.
+    const chosen = await selectSubCategoryWithSlots(new RegExp(p.subCategory, 'i'));
+    if (!chosen) throw new Error('NO_SLOTS_IN_ANY_SUBCATEGORY');
     await clickButtonByTextEnabled(['continue']);
   }
 
