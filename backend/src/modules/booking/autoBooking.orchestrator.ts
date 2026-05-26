@@ -50,7 +50,11 @@ export async function onLoggedInTab(
   url: string,
 ): Promise<void> {
   if (!env.AUTO_BOOK_ON_TAB_ENABLED) return;
-  if (!looksLoggedIn(url)) return;
+  if (!looksLoggedIn(url)) {
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[AUTO-BOOK] ${account.email} synced but URL not logged-in yet ("${url}") — waiting`);
+    return;
+  }
   if (activeSessions.has(account.id)) return; // already booking/monitoring
 
   const linked = await prisma.vfsAccount.findUnique({
