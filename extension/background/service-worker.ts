@@ -76,14 +76,16 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     try {
       const out: Record<string, string> = {};
       let hasAuth = false;
+      // VFS lift-api authenticates with CUSTOM headers — `authorize` +
+      // `clientsource` (NOT the standard `Authorization`). `route` (uzb/en/lva)
+      // is also required. Persist only once we've seen the real auth headers.
+      const AUTH_HEADERS = ['authorize', 'clientsource'];
       for (const h of details.requestHeaders ?? []) {
         if (h.name && typeof h.value === 'string') {
           out[h.name] = h.value;
-          if (h.name.toLowerCase() === 'authorization') hasAuth = true;
+          if (AUTH_HEADERS.includes(h.name.toLowerCase())) hasAuth = true;
         }
       }
-      // Only persist once we have the bearer token — avoids overwriting a good
-      // capture with a pre-auth request that has no Authorization header.
       if (hasAuth) void chrome.storage.local.set({ liftAuthHeaders: out });
     } catch {
       // Never break the request.
