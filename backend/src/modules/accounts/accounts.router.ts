@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '@middleware/auth.middleware';
 import { AppError } from '@middleware/errorHandler';
-import { accountPoolService } from './accountPool.service';
+import { accountPoolService, autoLinkAccountToProfile } from './accountPool.service';
 import { prisma } from '@config/database';
 import { decrypt, encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
@@ -148,6 +148,7 @@ accountsRouter.post('/', async (req: Request, res: Response, next: NextFunction)
         // encryptedPassword intentionally omitted
       },
     });
+    await autoLinkAccountToProfile(account.id);
 
     res.status(201).json({
       id: account.id,
@@ -629,6 +630,7 @@ accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response,
       },
       select: { id: true, email: true },
     });
+    await autoLinkAccountToProfile(account.id);
     logEvent('info', EventType.BOOKING_SUCCESS, `[RECOVER] account persisted ${account.email}`);
     res.status(201).json({ success: true, accountId: account.id, email: account.email });
   } catch (err) {

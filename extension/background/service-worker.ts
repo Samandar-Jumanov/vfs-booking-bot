@@ -573,7 +573,11 @@ function forwardToActiveActivationTab(correlationId: string, payload: { type: st
 
 async function runBookingFlow(msg: Extract<BackendMessage, { type: 'BG_BOOK_VFS' }>): Promise<void> {
   try {
-    const tab = await findWarmVfsTab();
+    // Parallel multi-account booking: when the payload names a specific account,
+    // book in THAT account's already-open tab instead of the single warm tab.
+    const tab = msg.payload.accountEmail
+      ? await findTabForAccount(msg.payload.accountEmail, msg.payload.accountTabUrl)
+      : await findWarmVfsTab();
     if (!tab?.id) {
       sendEvent({ type: 'EXT_BOOKING_FAILED', reason: 'WARM_TAB_REQUIRED', correlationId: msg.payload.correlationId });
       return;

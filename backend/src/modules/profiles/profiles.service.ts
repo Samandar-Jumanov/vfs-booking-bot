@@ -5,6 +5,7 @@ import { EventType, LogLevel, Prisma, Priority } from '@prisma/client';
 import { env } from '@config/env';
 import { logEvent } from '@modules/logs/logger';
 import { sendTelegram } from '@modules/notifications/telegram.bot';
+import { accountPoolService } from '@modules/accounts/accountPool.service';
 import { CreateProfileDto, OnboardProfileDto, UpdateProfileDto } from './profiles.schema';
 import { randomBytes } from 'crypto';
 
@@ -59,7 +60,9 @@ async function getLinkedAccountsByProfile(profileIds: string[]) {
 export async function createProfile(dto: CreateProfileDto) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await prisma.profile.create({ data: buildProfileCreateData(dto) });
+      const profile = await prisma.profile.create({ data: buildProfileCreateData(dto) });
+      await autoLinkProfile(profile.id);
+      return profile;
     } catch (err) {
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&
@@ -74,6 +77,30 @@ export async function createProfile(dto: CreateProfileDto) {
   }
 
   throw new AppError(500, 'Could not allocate profile status token', 'TOKEN_COLLISION');
+}
+
+/**
+ * Auto-link a freshly-created profile to a free VFS account (1:1, Model-A).
+ * Never throws — a missing free account just leaves the profile unlinked until
+ * one is added (linkAccountToFreeProfile picks it up on the account side).
+ */
+async function autoLinkProfile(profileId: string): Promise<void> {
+  try {
+    const accountId = await accountPoolService.linkProfileToFreeAccount(profileId);
+    if (accountId) {
+      logEvent('info', EventType.MONITOR_STARTED,
+        `[AUTO-LINK] profile ${profileId} linked to account ${accountId}`,
+        { profileId });
+    } else {
+      logEvent('info', EventType.MONITOR_STARTED,
+        `[AUTO-LINK] profile ${profileId} created but no free account to link yet`,
+        { profileId });
+    }
+  } catch (err) {
+    logEvent('warn', EventType.MONITOR_STARTED,
+      `[AUTO-LINK] failed to link profile ${profileId}: ${(err as Error).message}`,
+      { profileId });
+  }
 }
 
 export async function createOnboardProfile(dto: OnboardProfileDto) {
@@ -287,7 +314,14 @@ export async function updateProfile(id: string, dto: UpdateProfileDto) {
     delete updates.vfsPassword;
   }
 
-  return prisma.profile.update({ where: { id }, data: updates });
+  const updated = await prisma.profile.update({ where: { id }, data: updates });
+  // Onboard (public) profiles start inactive (pending payment) and get NO
+  // account at create-time. When the operator activates one (isActive false→true),
+  // link it to a free account so it's bookable. 1:1, non-fatal.
+  if (!existing.isActive && updated.isActive) {
+    await autoLinkProfile(updated.id);
+  }
+  return updated;
 }
 
 export async function deleteProfile(id: string) {

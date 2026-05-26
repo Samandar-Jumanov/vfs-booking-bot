@@ -68,6 +68,9 @@ export interface AutonomousBookingInput {
   email: string;
   subCategory: string;
   confirmPauseMs?: number;
+  // Target a specific account's open tab (parallel multi-account booking).
+  accountEmail?: string;
+  accountTabUrl?: string;
 }
 
 // ── Logout dispatch (BG_LOGOUT_VFS → LOGOUT_VIA_SPA in the extension) ────────

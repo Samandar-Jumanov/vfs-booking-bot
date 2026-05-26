@@ -199,6 +199,12 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
     });
     if (!hasDatadome) {
       console.warn(`[EXT_SESSION_SYNC] ${email} synced but no datadome cookie present; account NOT marked warm`);
+    } else {
+      // Logged-in tab detected → auto-booking orchestrator decides whether to
+      // book (or monitor) for this account's linked profile. No-op unless
+      // AUTO_BOOK_ON_TAB_ENABLED. Fire-and-forget; never block the sync.
+      const { onLoggedInTab } = await import('@modules/booking/autoBooking.orchestrator');
+      void onLoggedInTab({ id: acc.id, email: acc.email, tabUrl: url }, url);
     }
     return;
   }

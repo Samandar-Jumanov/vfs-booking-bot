@@ -77,6 +77,10 @@ export type BackendMessage =
         passportNumber: string; contact: string; email: string;
         subCategory: string; correlationId: string;
         confirmPauseMs?: number;
+        // When set, book in THIS specific account's already-open tab (parallel
+        // multi-account booking). When absent, fall back to the single warm tab.
+        accountEmail?: string;
+        accountTabUrl?: string;
       };
     }
   | { type: 'BG_LOGOUT_VFS'; correlationId: string }

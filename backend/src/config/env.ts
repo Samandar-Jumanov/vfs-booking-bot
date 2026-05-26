@@ -44,6 +44,14 @@ const envSchema = z.object({
   // Enable only after ExtensionDriver is wired and operator confirms a test cycle.
   LIFECYCLE_ENABLED: z.coerce.boolean().default(false),
 
+  // OFF by default — when ON, a logged-in VFS tab (detected via EXT_SESSION_SYNC)
+  // auto-triggers booking for that account's linked profile. Books REAL
+  // appointments with no confirmation pause, so enable only after login + the
+  // booking flow are validated live. Tabs are staggered to avoid a 429 burst.
+  AUTO_BOOK_ON_TAB_ENABLED: z.coerce.boolean().default(false),
+  // Base delay (ms) between staggered parallel bookings + random jitter on top.
+  AUTO_BOOK_STAGGER_MS: z.coerce.number().default(8000),
+
   // Telegram/email BOOKING_FAILED alerts — OFF by default so dev test fires and
   // EXT_SESSION_LOST events don't spam the operator/client channel. Failures are
   // still logged. Set true in production once the booking flow is validated.

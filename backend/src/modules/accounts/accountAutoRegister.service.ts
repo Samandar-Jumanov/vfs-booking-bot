@@ -8,6 +8,7 @@ import { sendToExtension } from '@modules/websocket/ws.server';
 import { encrypt } from '@utils/crypto';
 import { recordSpend } from '@modules/vendor/spend.recorder';
 import { getEmailProvider, getSmsProvider } from './providerFactory';
+import { autoLinkAccountToProfile } from './accountPool.service';
 import { AccountStatus } from '@prisma/client';
 
 // Approximate per-action vendor costs in USD. These are used for the
@@ -117,6 +118,7 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
     },
     select: { id: true, email: true },
   });
+  await autoLinkAccountToProfile(account.id);
 
   try {
     // The extension's MV3 service worker can be in an idle state when we
