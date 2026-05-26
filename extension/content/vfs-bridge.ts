@@ -1112,11 +1112,23 @@ async function pickFromMatSelect(trigger: HTMLElement, match: RegExp, label: str
   const deadline = Date.now() + 15_000;
   let option: HTMLElement | undefined;
   let lastSeen: string[] = [];
+  let lastReopen = Date.now();
   while (Date.now() < deadline && !option) {
     const opts = openPanelOptions(trigger);
     if (opts.length) lastSeen = opts.map((o) => (o.textContent ?? '').trim()).filter(Boolean);
     option = opts.find((o) => match.test((o.textContent ?? '').trim()));
-    if (!option) await new Promise((r) => setTimeout(r, 200));
+    if (!option) {
+      // If the panel comes back EMPTY (observed when re-opening a mat-select to
+      // try a second option — the swap case), the open click didn't take. Close
+      // and re-click the trigger every ~2.5s so options can re-render.
+      if (opts.length === 0 && Date.now() - lastReopen > 2500) {
+        closeAnyOpenPanel();
+        await new Promise((r) => setTimeout(r, 350));
+        await trustedClick(inner);
+        lastReopen = Date.now();
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
   if (!option) {
     void postRegisterTrace('selectMatOption: option not found', {
