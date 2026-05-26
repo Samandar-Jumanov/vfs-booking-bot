@@ -199,6 +199,19 @@ enum PollingRole {
   BOTH
 }
 
+enum LifecycleStateEnum {
+  NEW
+  REGISTERING
+  REGISTER_FAILED
+  PENDING_ACTIVATION
+  ACTIVATING
+  ACTIVE
+  LOGGING_IN
+  WARM
+  RESTRICTED
+  BLOCKED
+}
+
 model VfsAccount {
   id                String        @id @default(uuid())
   email             String        @unique
@@ -211,6 +224,11 @@ model VfsAccount {
   cooldownUntil     DateTime?
   cookieStore       Json?
   lastWarmedAt      DateTime?
+  lifecycleState    LifecycleStateEnum @default(NEW)
+  attemptCount      Int                @default(0)
+  lastAttemptAt     DateTime?
+  restrictedReason  String?
+  lastError         String?
   tabUrl            String?
   profileIds        String[]
   createdAt         DateTime      @default(now())
