@@ -141,18 +141,13 @@ export async function debuggerKeyPress(tabId: number, key: string): Promise<void
 
 export async function debuggerTypeText(tabId: number, text: string): Promise<void> {
   await debuggerAttach(tabId);
-  for (const ch of text) {
-    await sendCommand(tabId, 'Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      text: ch,
-      unmodifiedText: ch,
-    });
-    await sendCommand(tabId, 'Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      text: ch,
-      unmodifiedText: ch,
-    });
-  }
+  // Use Input.insertText: it inserts the literal string reliably for EVERY
+  // character (uppercase, symbols, unicode) and fires real beforeinput/input
+  // events the page's framework listens to. The previous per-char
+  // dispatchKeyEvent loop (text-only, no key/code/virtualKeyCode) dropped
+  // shift-modified characters — e.g. "VFSbot2026!" landed as 9 chars, causing
+  // wrong-password submits. insertText is the canonical fix for that.
+  await sendCommand(tabId, 'Input.insertText', { text });
 }
 
 // Auto-detach when the tab closes so we don't leak attachments.
