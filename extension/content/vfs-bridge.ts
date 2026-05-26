@@ -296,6 +296,12 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
   const pwdEl = document.querySelector<HTMLInputElement>(
     '#password, input[formcontrolname="password"], input[type="password"]',
   );
+  // Stop Chrome autofilling a STALE saved password over what we type. Observed
+  // 2026-05-26: a saved 9-char password overwrote "VFSbot2026!" during the
+  // multi-second Turnstile solve → pwdLen:9 → wrong-password submit. Marking the
+  // field new-password disables credential autofill for it.
+  try { emailEl?.setAttribute('autocomplete', 'off'); } catch { /* ignore */ }
+  try { pwdEl?.setAttribute('autocomplete', 'new-password'); } catch { /* ignore */ }
   if (emailEl) await trustedFill(emailEl, payload.email);
   if (pwdEl) await trustedFill(pwdEl, payload.password);
 
@@ -360,6 +366,17 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     hasRespField: Boolean(document.querySelector('[name="cf-turnstile-response"]')),
     href: location.href,
   });
+
+  // If Chrome autofill overwrote the password during the Turnstile solve (the
+  // snapshot above reveals it), re-type the correct value so submit uses the
+  // real password — not a stale saved one.
+  if (pwdNow && pwdNow.value !== payload.password) {
+    void postRegisterTrace('password drifted — re-filling before submit', {
+      hadLen: pwdNow.value.length, wantLen: payload.password.length,
+    });
+    await trustedFill(pwdNow, payload.password);
+    await new Promise((r) => setTimeout(r, 200));
+  }
 
   const initialUrl = window.location.href;
   await clickLoginSubmit(initialUrl);
