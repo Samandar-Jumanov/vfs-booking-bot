@@ -2103,12 +2103,12 @@ async function postRegisterTrace(step: string, meta?: Record<string, unknown>): 
   }
 }
 
-// Click an element via a full synthetic pointer/mouse event sequence — NO
-// chrome.debugger. Angular Material MDC components respond to this bubbling,
-// composed sequence (pointer + mouse + click) without needing event.isTrusted.
-// Dropped the debugger path so the bot no longer raises the "started debugging
-// this browser" automation signal. Login is operator-driven now; this drives
-// the booking-step dropdowns/buttons only.
+// Request a TRUSTED click at the element's centre via chrome.debugger (OS-level
+// mouse event) — passes Angular Material MDC's event.isTrusted check AND, for
+// text fields, gives the real focus the debugger keystrokes need to land.
+// NOTE: the chrome.debugger attach is NOT the Turnstile blocker — that was the
+// MAIN-world sniffer's page-patching (fixed 2026-05-26). VFS's login form
+// ignores synthetic value-setting, so real keystrokes are required here.
 async function trustedClick(element: HTMLElement): Promise<boolean> {
   const rect = element.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) {
@@ -2121,36 +2121,24 @@ async function trustedClick(element: HTMLElement): Promise<boolean> {
   const x = Math.round(r2.left + r2.width / 2);
   const y = Math.round(r2.top + r2.height / 2);
   try {
-    const base = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, buttons: 1 } as const;
-    const pointer = { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true } as PointerEventInit;
-    try { (element as HTMLElement).focus?.(); } catch { /* not focusable */ }
-    element.dispatchEvent(new PointerEvent('pointerover', pointer));
-    element.dispatchEvent(new PointerEvent('pointerenter', pointer));
-    element.dispatchEvent(new MouseEvent('mouseover', base));
-    element.dispatchEvent(new PointerEvent('pointerdown', pointer));
-    element.dispatchEvent(new MouseEvent('mousedown', base));
-    element.dispatchEvent(new PointerEvent('pointerup', { ...pointer, buttons: 0 }));
-    element.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
-    element.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
-    // Fallback for plain anchors/buttons that only honour the native method.
-    if (typeof (element as HTMLElement).click === 'function') {
-      try { (element as HTMLElement).click(); } catch { /* synthetic above already fired */ }
-    }
-    return true;
+    const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_CLICK', x, y });
+    if (res && (res as { ok?: boolean }).ok) return true;
+    void postRegisterTrace('trustedClick failed', { res });
+    showOperatorBanner(TRUSTED_CLICK_BLOCKED_BANNER);
+    return false;
   } catch (e) {
     void postRegisterTrace('trustedClick threw', { err: (e as Error).message });
+    showOperatorBanner(TRUSTED_CLICK_BLOCKED_BANNER);
     return false;
   }
 }
 
 async function trustedKey(key: string): Promise<boolean> {
   try {
-    const el = (document.activeElement as HTMLElement) || document.body;
-    const opts: KeyboardEventInit = { key, bubbles: true, cancelable: true, composed: true };
-    el.dispatchEvent(new KeyboardEvent('keydown', opts));
-    el.dispatchEvent(new KeyboardEvent('keypress', opts));
-    el.dispatchEvent(new KeyboardEvent('keyup', opts));
-    return true;
+    const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_KEY', key });
+    if (res && (res as { ok?: boolean }).ok) return true;
+    void postRegisterTrace('trustedKey failed', { key, res });
+    return false;
   } catch (e) {
     void postRegisterTrace('trustedKey threw', { key, err: (e as Error).message });
     return false;
@@ -2159,15 +2147,9 @@ async function trustedKey(key: string): Promise<boolean> {
 
 async function trustedType(text: string): Promise<boolean> {
   try {
-    const el = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
-    if (el && 'value' in el) {
-      // setInputValue sets the value via the native setter + dispatches the
-      // input/change events Angular's ngModel listens for — the SPA can't tell
-      // this from typing for form-validation purposes.
-      setInputValue(el, text);
-      return true;
-    }
-    void postRegisterTrace('trustedType: no focused input', {});
+    const res = await chrome.runtime.sendMessage({ type: 'TRUSTED_TYPE', text });
+    if (res && (res as { ok?: boolean }).ok) return true;
+    void postRegisterTrace('trustedType failed', { res });
     return false;
   } catch (e) {
     void postRegisterTrace('trustedType threw', { err: (e as Error).message });
