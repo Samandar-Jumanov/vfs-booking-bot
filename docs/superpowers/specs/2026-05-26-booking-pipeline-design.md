@@ -29,6 +29,15 @@
    BOOKED (confirmationNumber)  |  FAILED(code → feeds the shared 429/state logic)
 ```
 
+## 2a. Session keepalive (parked accounts go idle and get logged out)
+
+Observed: an account parked on the booking page goes **idle** and VFS shows "Session Expired or Invalid" → clicking OK reroutes to login. This is an **idle timeout**, distinct from `429001` (mass-login restriction). To keep a parked WARM account alive:
+
+- **`SessionKeepalive`**: at a short, **configurable** interval (operator default ~3s) re-trigger the **category/subcategory dropdown load** on the booking page so the session stays active.
+- **Rate-limit reconciliation (must verify live):** 3s ≈ 20 req/min, which would trip `429001` *if* the keepalive hits the **rate-limited slot-availability endpoint**. The dropdown-metadata call is expected to be a **separate, lighter endpoint** than the slot POST — but this is **verified live before shipping**. The keepalive interval and which action it performs are **config**, not hardcoded, so we can tune it below the 429 threshold if they share an endpoint.
+- **Keepalive ≠ slot poll:** keepalive is a frequent lightweight dropdown refresh (anti-idle); the slot-availability check is a separate, paced read. They may end up being the same dropdown action (if the dropdown reveals availability and is not rate-limited) — confirmed live. If the same action serves both and is safe, we use one loop; if not, two loops at different cadences.
+- A keepalive failure that lands on the login page → flips the account `WARM → ACTIVE` (needs re-login) via the shared state machine; it does **not** silently keep polling a dead session.
+
 ## 3. Components (thin layer over the account brain)
 
 - **`SlotWatcher`** — for each WARM account, polls the VFS slot endpoint (`lift-api…/appointment/slots`) on the **shared paced tick** (global rate limiter + per-account interval + jitter — same limiter as the account pipeline, so polling cannot burn accounts). Keeps `lastSeenSlots` per (centre, category) and fires `SLOT_DETECTED` only on a positive diff (so a slot that opens and closes between polls still triggers).
