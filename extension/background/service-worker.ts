@@ -959,8 +959,13 @@ async function pushCookiesToBackend(): Promise<void> {
     }
     const tabs = await chrome.tabs.query({ url: 'https://*.vfsglobal.com/*' });
     const tabUrl = tabs[0]?.url;
+    // Prefer the account bound to an open VFS tab (operator used "Open login
+    // (bind)") so cookies are attributed to the RIGHT pool account — not the
+    // hardcoded operator account. Cookies are domain-wide, so one logged-in
+    // account per Chrome profile; pick the first bound VFS tab.
+    const boundEmail = tabs.map((t) => (t.id != null ? tabAccountBindings.get(t.id) : undefined)).find(Boolean);
     const body = {
-      email: settings.customerEmail || 'jumanovsamandar84@gmail.com',
+      email: boundEmail || settings.customerEmail || 'jumanovsamandar84@gmail.com',
       cookies: cookies.map((c) => ({
         name: c.name,
         value: c.value,
