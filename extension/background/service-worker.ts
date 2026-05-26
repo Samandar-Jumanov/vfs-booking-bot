@@ -65,6 +65,34 @@ chrome.webRequest.onAuthRequired.addListener(
   ['blocking'],
 );
 
+// Capture the lift-api Authorization header at the NETWORK layer — no page
+// tampering. Replaces the old MAIN-world fetch/XHR monkey-patching that
+// Cloudflare detected and used to withhold the Turnstile widget. Observe-only.
+// Writes to chrome.storage.local.liftAuthHeaders, which vfs-bridge replays for
+// slot polling (same key the old sniffer used).
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    try {
+      const out: Record<string, string> = {};
+      let hasAuth = false;
+      for (const h of details.requestHeaders ?? []) {
+        if (h.name && typeof h.value === 'string') {
+          out[h.name] = h.value;
+          if (h.name.toLowerCase() === 'authorization') hasAuth = true;
+        }
+      }
+      // Only persist once we have the bearer token — avoids overwriting a good
+      // capture with a pre-auth request that has no Authorization header.
+      if (hasAuth) void chrome.storage.local.set({ liftAuthHeaders: out });
+    } catch {
+      // Never break the request.
+    }
+    return undefined;
+  },
+  { urls: ['*://lift-api.vfsglobal.com/*'] },
+  ['requestHeaders', 'extraHeaders'],
+);
+
 // MV3 idle-kills service workers in ~30s. We arm two recurring alarms so
 // the SW is woken on a fixed cadence — keeps the WS reconnect logic alive
 // and the heartbeat flowing to the backend. chrome.alarms.create is

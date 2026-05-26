@@ -81,6 +81,20 @@ function handleLiftAuthMessage(event: MessageEvent): void {
   }
 }
 
+// lift-api auth is now captured by the service worker (chrome.webRequest) and
+// written to chrome.storage.local.liftAuthHeaders. Keep our in-memory copy fresh
+// so the slot-poll replays the latest token. (Replaces the old MAIN-world
+// postMessage path, which is gone now that the sniffer no longer patches fetch.)
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    const next = changes[LIFT_AUTH_HEADERS_KEY]?.newValue;
+    if (isStringRecord(next)) liftHeaders = next;
+  });
+} catch {
+  // storage events unavailable — hydrate-on-load still covers the common case.
+}
+
 function isStringRecord(value: unknown): value is Record<string, string> {
   return typeof value === 'object'
     && value !== null

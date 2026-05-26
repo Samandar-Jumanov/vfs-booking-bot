@@ -15,11 +15,6 @@
   "content_scripts": [
     {
       "matches": ["https://*.vfsglobal.com/*"],
-      "exclude_matches": [
-        "https://*.vfsglobal.com/*login*",
-        "https://*.vfsglobal.com/*register*",
-        "https://*.vfsglobal.com/*activation*"
-      ],
       "js": ["content/lift-auth-sniffer.js"],
       "run_at": "document_start",
       "world": "MAIN"
