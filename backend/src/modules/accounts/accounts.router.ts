@@ -313,6 +313,21 @@ accountsRouter.post('/:id/open-tab', async (req: Request, res: Response, next: N
   }
 });
 
+// On-demand single CheckIsSlotAvailable poll via the operator's extension —
+// the dashboard "Check slots now" test handle. Rate-limited by VFS, so use
+// sparingly. Uses the currently-armed monitor codes (captured on the booking
+// page), so it's operator-scoped, not strictly per-account.
+accountsRouter.post('/check-slots', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const { triggerSlotCheck } = await import('@modules/booking/extension-dispatch.service');
+    const result = await triggerSlotCheck();
+    res.status(result.ok ? 200 : 409).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Test the autonomous 5-step booking flow (BG_BOOK_VFS → runBookingSteps).
 accountsRouter.post('/book-test', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {

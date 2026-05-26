@@ -210,6 +210,21 @@ export default function AccountPoolPage() {
     },
   });
 
+  // On-demand "Check slots now" — one CheckIsSlotAvailable poll via the extension.
+  const [checkSlotsMsg, setCheckSlotsMsg] = useState<string | null>(null);
+  const checkSlotsMutation = useMutation({
+    mutationFn: () => api.post('/accounts/check-slots').then((r) => r.data),
+    onSuccess: (data) => {
+      if (data?.earliestDate) setCheckSlotsMsg(`Slot available! earliest: ${data.earliestDate}`);
+      else if (data?.ok) setCheckSlotsMsg(`No slots (HTTP ${data.status ?? '?'})`);
+      else setCheckSlotsMsg(`Failed: ${data?.reason ?? 'unknown'}`);
+    },
+    onError: (err: any) => {
+      const reason = err?.response?.data?.reason ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
+      setCheckSlotsMsg(`Failed: ${reason}`);
+    },
+  });
+
   const [manualOpen, setManualOpen] = useState(false);
   const [mEmail, setMEmail] = useState('');
   const [mPassword, setMPassword] = useState('');
@@ -348,6 +363,19 @@ export default function AccountPoolPage() {
           <ExternalLink className="h-4 w-4" />
           Open {staleAccounts.length} stale login tab{staleAccounts.length === 1 ? '' : 's'}
         </button>
+        <button
+          type="button"
+          className="btn-secondary h-10 gap-2"
+          title="Run ONE CheckIsSlotAvailable poll right now (uses the booking codes captured from the logged-in tab). Rate-limited — use sparingly."
+          onClick={() => checkSlotsMutation.mutate()}
+          disabled={checkSlotsMutation.isPending}
+        >
+          {checkSlotsMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          Check slots now
+        </button>
+        {checkSlotsMsg && (
+          <span className={`text-sm ${checkSlotsMsg.startsWith('Failed') || checkSlotsMsg.startsWith('No') ? 'text-red-500' : 'text-green-500'}`}>{checkSlotsMsg}</span>
+        )}
         {autoCreateMsg && (
           <span className={`text-sm ${autoCreateMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{autoCreateMsg}</span>
         )}

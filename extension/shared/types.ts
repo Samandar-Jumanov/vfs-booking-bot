@@ -89,6 +89,8 @@ export type BackendMessage =
   // BIND that tab to this account's email, so session-sync from the tab is
   // unambiguously tagged (enables auto-booking on the right account).
   | { type: 'BG_OPEN_ACCOUNT_TAB'; correlationId: string; email: string; loginUrl: string }
+  // On-demand single CheckIsSlotAvailable poll (dashboard "Check slots now").
+  | { type: 'BG_CHECK_SLOTS_NOW'; correlationId: string }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -130,6 +132,7 @@ export type ExtensionEvent =
   | { type: 'EXT_LOGIN_SUCCESS'; correlationId: string; email: string; url: string }
   | { type: 'EXT_LOGIN_FIELDS_FILLED'; correlationId: string; email: string; captchaSolved: boolean }
   | { type: 'EXT_ACCOUNT_TAB_OPENED'; correlationId: string; email: string; tabId: number }
+  | { type: 'EXT_SLOT_CHECK_RESULT'; correlationId: string; status: number; earliestDate?: string; data?: unknown; error?: string }
   | { type: 'EXT_LOGIN_FAILED'; correlationId: string; email: string; reason: string }
   | { type: 'EXT_ACTIVATION_NEED_LINK'; correlationId: string; email: string }
   | { type: 'EXT_ACTIVATION_SUBMITTED'; correlationId: string; email: string }

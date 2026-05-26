@@ -146,6 +146,50 @@ export function resolveActivationVisit(correlationId: string, result: ExtensionA
   slot.resolve(result);
 }
 
+// ── On-demand slot check (dashboard "Check slots now") ──────────────────────
+export interface SlotCheckResult {
+  ok: boolean;
+  status?: number;
+  earliestDate?: string;
+  data?: unknown;
+  reason?: string;
+}
+
+interface PendingSlotCheck {
+  resolve: (result: SlotCheckResult) => void;
+  timer: NodeJS.Timeout;
+}
+
+const pendingSlotCheck = new Map<string, PendingSlotCheck>();
+
+/** Called by the extension event handler when EXT_SLOT_CHECK_RESULT arrives. */
+export function resolveSlotCheck(correlationId: string, result: SlotCheckResult): void {
+  const slot = pendingSlotCheck.get(correlationId);
+  if (!slot) return;
+  pendingSlotCheck.delete(correlationId);
+  clearTimeout(slot.timer);
+  slot.resolve(result);
+}
+
+/** Run ONE CheckIsSlotAvailable poll via the operator's extension (uses the
+ *  currently-armed monitor codes). Awaits the result with a 30s timeout. */
+export async function triggerSlotCheck(): Promise<SlotCheckResult> {
+  const operatorId = await resolveOperatorUserId();
+  if (!operatorId) return { ok: false, reason: 'NO_OPERATOR_CONNECTED' };
+  const { sendToExtension, isExtensionLive } = await import('@modules/websocket/ws.server');
+  if (!isExtensionLive(operatorId)) return { ok: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };
+  const correlationId = randomUUID();
+  const accepted = sendToExtension(operatorId, { type: 'BG_CHECK_SLOTS_NOW', correlationId });
+  if (!accepted) return { ok: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };
+  return new Promise<SlotCheckResult>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingSlotCheck.delete(correlationId);
+      resolve({ ok: false, reason: 'SLOT_CHECK_TIMEOUT' });
+    }, 30_000);
+    pendingSlotCheck.set(correlationId, { resolve, timer });
+  });
+}
+
 /**
  * Ask the operator's extension to open the activation link in its own Chrome
  * tab (clean UZ IP) and confirm activation. Awaits the EXT_ACTIVATION_VISIT

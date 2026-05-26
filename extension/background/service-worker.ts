@@ -336,6 +336,7 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_LOGIN_SUCCESS' ||
     message.type === 'EXT_LOGIN_FIELDS_FILLED' ||
     message.type === 'EXT_ACCOUNT_TAB_OPENED' ||
+    message.type === 'EXT_SLOT_CHECK_RESULT' ||
     message.type === 'EXT_LOGIN_FAILED' ||
     message.type === 'EXT_ACTIVATION_SUBMITTED' ||
     message.type === 'EXT_ACTIVATION_SUCCESS' ||
@@ -390,6 +391,10 @@ function handleBackendMessage(message: BackendMessage): void {
   }
   if (message.type === 'BG_OPEN_ACCOUNT_TAB') {
     void runOpenAccountTab(message);
+    return;
+  }
+  if (message.type === 'BG_CHECK_SLOTS_NOW') {
+    void runSlotCheckNow(message);
     return;
   }
   if (message.type === 'BG_LOGIN_CAPTCHA_TOKEN') {
@@ -599,6 +604,36 @@ async function runOpenAccountTab(msg: Extract<BackendMessage, { type: 'BG_OPEN_A
     sendEvent({ type: 'EXT_ACCOUNT_TAB_OPENED', correlationId: msg.correlationId, email: msg.email, tabId: tab.id });
   } catch (err) {
     sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: (err as Error).message });
+  }
+}
+
+// On-demand single CheckIsSlotAvailable poll (dashboard "Check slots now").
+// Uses the currently-armed activeMonitor (auto-captured from VFS's own request
+// when the operator navigated the booking page). Returns the API result.
+async function runSlotCheckNow(msg: Extract<BackendMessage, { type: 'BG_CHECK_SLOTS_NOW' }>): Promise<void> {
+  try {
+    let monitor = runtimeState.activeMonitor;
+    if (!monitor) {
+      const stored = (await chrome.storage.local.get(null)) as { runtimeState?: RuntimeState };
+      monitor = stored.runtimeState?.activeMonitor;
+    }
+    if (!monitor) {
+      sendEvent({ type: 'EXT_SLOT_CHECK_RESULT', correlationId: msg.correlationId, status: 0,
+        error: 'NO_MONITOR_ARMED — open the booking page once so the codes are captured' });
+      return;
+    }
+    const result = await sendToVfsTab({ type: 'POLL_SLOT', monitor }) as {
+      status?: number; earliestDate?: string; data?: unknown;
+    };
+    sendEvent({
+      type: 'EXT_SLOT_CHECK_RESULT',
+      correlationId: msg.correlationId,
+      status: result.status ?? 0,
+      earliestDate: result.earliestDate,
+      data: result.data,
+    });
+  } catch (err) {
+    sendEvent({ type: 'EXT_SLOT_CHECK_RESULT', correlationId: msg.correlationId, status: 0, error: (err as Error).message });
   }
 }
 
