@@ -608,25 +608,32 @@ async function runLogoutFlow(msg: Extract<BackendMessage, { type: 'BG_LOGOUT_VFS
 async function runActivationVisit(msg: Extract<BackendMessage, { type: 'BG_VISIT_ACTIVATION_LINK' }>): Promise<void> {
   let createdTabId: number | undefined;
   try {
+    void swTrace('activation visit start', { link: (msg.link ?? '').slice(0, 70) });
     const tab = await chrome.tabs.create({ url: msg.link, active: true });
     if (!tab.id) {
+      void swTrace('activation TAB_OPEN_FAILED', {});
       sendEvent({ type: 'EXT_ACTIVATION_VISIT_FAILED', correlationId: msg.correlationId, reason: 'TAB_OPEN_FAILED' });
       return;
     }
     createdTabId = tab.id;
+    void swTrace('activation tab created', { tabId: tab.id });
     await waitForTabComplete(tab.id, 30_000);
+    void swTrace('activation tab load settled', { tabId: tab.id });
     const [injection] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => ({ href: location.href, bodyText: document.body.innerText.slice(0, 400) }),
     });
     const probe = (injection?.result as { href: string; bodyText: string } | undefined) ?? { href: '', bodyText: '' };
+    void swTrace('activation page probe', { href: probe.href.slice(0, 90), bodyLen: probe.bodyText.length, bodySample: probe.bodyText.slice(0, 80) });
     const verdict = evaluateActivationVisit(probe);
+    void swTrace('activation verdict', { success: verdict.success, reason: verdict.reason });
     if (verdict.success) {
       sendEvent({ type: 'EXT_ACTIVATION_VISIT_SUCCESS', correlationId: msg.correlationId });
     } else {
       sendEvent({ type: 'EXT_ACTIVATION_VISIT_FAILED', correlationId: msg.correlationId, reason: verdict.reason });
     }
   } catch (err) {
+    void swTrace('activation visit ERROR', { reason: (err as Error).message });
     sendEvent({ type: 'EXT_ACTIVATION_VISIT_FAILED', correlationId: msg.correlationId, reason: (err as Error).message });
   } finally {
     if (createdTabId != null) {
