@@ -263,7 +263,12 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     // the email from VFS DOM. In the account-pool model, customerEmail is the
     // VFS account email being managed by this Chrome profile.
     const settings = await getSettings();
+    // Prefer the email bound to THIS tab (operator opened it for a specific
+    // account from the dashboard) — it's authoritative when VFS doesn't render
+    // the email in the DOM. Fall back to DOM-detected email, then settings.
+    const boundEmail = sender?.tab?.id != null ? tabAccountBindings.get(sender.tab.id) : undefined;
     const resolvedEmail =
+      boundEmail ||
       (typeof message.email === 'string' && message.email) ||
       settings.customerEmail ||
       undefined;
@@ -286,6 +291,7 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_LOGIN_NEED_CAPTCHA' ||
     message.type === 'EXT_LOGIN_SUCCESS' ||
     message.type === 'EXT_LOGIN_FIELDS_FILLED' ||
+    message.type === 'EXT_ACCOUNT_TAB_OPENED' ||
     message.type === 'EXT_LOGIN_FAILED' ||
     message.type === 'EXT_ACTIVATION_SUBMITTED' ||
     message.type === 'EXT_ACTIVATION_SUCCESS' ||
@@ -336,6 +342,10 @@ function handleBackendMessage(message: BackendMessage): void {
   }
   if (message.type === 'BG_LOGIN_VFS_ACCOUNT') {
     void runLoginFlow(message);
+    return;
+  }
+  if (message.type === 'BG_OPEN_ACCOUNT_TAB') {
+    void runOpenAccountTab(message);
     return;
   }
   if (message.type === 'BG_LOGIN_CAPTCHA_TOKEN') {
@@ -505,6 +515,46 @@ async function clearVfsSession(tabId: number): Promise<void> {
     });
   } catch {
     /* tab not on a scriptable origin — ignore */
+  }
+}
+
+// tabId → bound account email. Set when the operator opens an account's login
+// tab from the dashboard (BG_OPEN_ACCOUNT_TAB). Lets EXT_SESSION_SYNC tag the
+// correct account even when VFS doesn't expose the email in the page DOM —
+// which is what blocked the auto-booking trigger from firing.
+const tabAccountBindings = new Map<number, string>();
+void chrome.storage.local.get({ tabAccountBindings: {} }).then((s) => {
+  const stored = (s.tabAccountBindings ?? {}) as Record<string, string>;
+  for (const [tabId, email] of Object.entries(stored)) tabAccountBindings.set(Number(tabId), email);
+});
+function persistTabBindings(): void {
+  const obj: Record<string, string> = {};
+  for (const [tabId, email] of tabAccountBindings) obj[String(tabId)] = email;
+  void chrome.storage.local.set({ tabAccountBindings: obj });
+}
+function bindTabToAccount(tabId: number, email: string): void {
+  tabAccountBindings.set(tabId, email);
+  persistTabBindings();
+}
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabAccountBindings.delete(tabId)) persistTabBindings();
+});
+
+// Open a VFS login tab for a specific pool account and BIND it to that account's
+// email. The operator then logs in manually in this tab; session-sync from it
+// is tagged with the bound email so the backend knows which account it is.
+async function runOpenAccountTab(msg: Extract<BackendMessage, { type: 'BG_OPEN_ACCOUNT_TAB' }>): Promise<void> {
+  try {
+    const tab = await chrome.tabs.create({ url: msg.loginUrl, active: true });
+    if (!tab.id) {
+      sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: 'TAB_OPEN_FAILED' });
+      return;
+    }
+    bindTabToAccount(tab.id, msg.email);
+    await swTrace('account tab opened + bound', { tabId: tab.id, email: msg.email });
+    sendEvent({ type: 'EXT_ACCOUNT_TAB_OPENED', correlationId: msg.correlationId, email: msg.email, tabId: tab.id });
+  } catch (err) {
+    sendEvent({ type: 'EXT_LOGIN_FAILED', correlationId: msg.correlationId, email: msg.email, reason: (err as Error).message });
   }
 }
 

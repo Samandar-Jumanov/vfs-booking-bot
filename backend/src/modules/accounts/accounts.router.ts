@@ -8,7 +8,7 @@ import { decrypt, encrypt } from '@utils/crypto';
 import { registerVfsAccount } from '@modules/engine/vfs/vfs.registration';
 import { autoRegisterAccount, fetchEmailVerificationLink, visitActivationLink } from './accountAutoRegister.service';
 import { accountBatchService } from './accountBatch.service';
-import { loginAccount } from './accountLoginService';
+import { loginAccount, openAccountLoginTab } from './accountLoginService';
 import { cancelLoginBatch, getLoginBatch, startLoginBatch } from './loginBatch.service';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
@@ -294,6 +294,19 @@ accountsRouter.post('/:id/auto-login', async (req: Request, res: Response, next:
     if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
     const fillOnly = Boolean((req.body as { fillOnly?: boolean } | undefined)?.fillOnly);
     const result = await loginAccount(req.params.id, fillOnly);
+    res.status(result.success ? 200 : 409).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Operator picks an account → extension opens a VFS login tab BOUND to this
+// account's email. Operator logs in manually in that tab; session-sync is then
+// tagged with the right account so the auto-booking orchestrator can fire.
+accountsRouter.post('/:id/open-tab', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const result = await openAccountLoginTab(req.params.id);
     res.status(result.success ? 200 : 409).json(result);
   } catch (err) {
     next(err);

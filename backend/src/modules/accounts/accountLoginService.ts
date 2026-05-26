@@ -89,6 +89,39 @@ export async function loginAccount(accountId: string, fillOnly = false): Promise
   });
 }
 
+/**
+ * Operator picked an account in the dashboard → tell the extension to open a
+ * VFS login tab for it and BIND that tab to the account's email. The operator
+ * then logs in manually in that tab; session-sync is tagged with the bound
+ * email so the auto-booking orchestrator knows which account it is.
+ */
+export async function openAccountLoginTab(
+  accountId: string,
+): Promise<{ success: boolean; email?: string; reason?: string }> {
+  const account = await prisma.vfsAccount.findUnique({
+    where: { id: accountId },
+    select: { id: true, email: true },
+  });
+  if (!account) throw new AppError(404, `VfsAccount "${accountId}" not found`, 'NOT_FOUND');
+
+  const operatorUserId = await resolveOperatorUserId();
+  if (!operatorUserId) return { success: false, reason: 'OPERATOR_NOT_FOUND' };
+
+  const correlationId = crypto.randomUUID();
+  const loginUrl = 'https://visa.vfsglobal.com/uzb/en/lva/login';
+  const accepted = sendToExtension(operatorUserId, {
+    type: 'BG_OPEN_ACCOUNT_TAB',
+    correlationId,
+    email: account.email,
+    loginUrl,
+  });
+  if (!accepted) return { success: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };
+
+  logEvent('info', EventType.BOOKING_ATTEMPT,
+    `[OPEN-TAB] opened+bound login tab for ${account.email}`, { accountId: account.id, correlationId });
+  return { success: true, email: account.email };
+}
+
 export async function handleLoginNeedsCaptcha(
   operatorUserId: string,
   event: { correlationId: string; siteKey: string; pageUrl: string },

@@ -193,6 +193,23 @@ export default function AccountPoolPage() {
     },
   });
 
+  // Open a CLEAN VFS login tab bound to this account (no debugger, no autofill —
+  // so the Turnstile captcha actually renders). Operator logs in manually; the
+  // bound tab lets the backend tag session-sync with the right account, which
+  // is what lets auto-booking fire.
+  const openTabMutation = useMutation({
+    mutationFn: (accountId: string) => api.post(`/accounts/${accountId}/open-tab`).then((r) => r.data),
+    onSuccess: (data) => {
+      setAutoLoginMsg(data?.success
+        ? `Opened bound login tab for ${data.email} — log in there; booking arms automatically`
+        : `Failed: ${data?.reason ?? 'unknown'}`);
+    },
+    onError: (err: any) => {
+      const reason = err?.response?.data?.reason ?? err?.response?.data?.error ?? err?.message ?? 'unknown error';
+      setAutoLoginMsg(`Failed: ${reason}`);
+    },
+  });
+
   const [manualOpen, setManualOpen] = useState(false);
   const [mEmail, setMEmail] = useState('');
   const [mPassword, setMPassword] = useState('');
@@ -751,16 +768,16 @@ export default function AccountPoolPage() {
                     <button
                       type="button"
                       className="btn-secondary h-8 gap-1.5 text-xs"
-                      title="Bot opens the login tab, fills email + password, and attempts the captcha — then you solve the captcha (if needed) and click Sign In."
-                      onClick={() => { setAutoLoginMsg(null); copyText(a.email); autoLoginMutation.mutate({ accountId: a.id, fillOnly: true }); }}
-                      disabled={autoLoginMutation.isPending && autoLoginMutation.variables?.accountId === a.id}
+                      title="Opens a CLEAN VFS login tab bound to this account (no bot driving it, so the captcha renders). Log in manually here — booking then arms automatically for this account."
+                      onClick={() => { setAutoLoginMsg(null); copyText(a.email); openTabMutation.mutate(a.id); }}
+                      disabled={openTabMutation.isPending && openTabMutation.variables === a.id}
                     >
-                      {autoLoginMutation.isPending && autoLoginMutation.variables?.accountId === a.id && autoLoginMutation.variables?.fillOnly ? (
+                      {openTabMutation.isPending && openTabMutation.variables === a.id ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <ExternalLink className="h-3.5 w-3.5" />
                       )}
-                      Open login (fill)
+                      Open login (bind)
                     </button>
                     <button
                       type="button"

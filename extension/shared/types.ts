@@ -85,6 +85,10 @@ export type BackendMessage =
     }
   | { type: 'BG_LOGOUT_VFS'; correlationId: string }
   | { type: 'BG_VISIT_ACTIVATION_LINK'; correlationId: string; link: string }
+  // Operator picked an account in the dashboard → open a VFS tab for it and
+  // BIND that tab to this account's email, so session-sync from the tab is
+  // unambiguously tagged (enables auto-booking on the right account).
+  | { type: 'BG_OPEN_ACCOUNT_TAB'; correlationId: string; email: string; loginUrl: string }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -125,6 +129,7 @@ export type ExtensionEvent =
   | { type: 'EXT_LOGIN_NEED_CAPTCHA'; correlationId: string; siteKey: string; pageUrl: string }
   | { type: 'EXT_LOGIN_SUCCESS'; correlationId: string; email: string; url: string }
   | { type: 'EXT_LOGIN_FIELDS_FILLED'; correlationId: string; email: string; captchaSolved: boolean }
+  | { type: 'EXT_ACCOUNT_TAB_OPENED'; correlationId: string; email: string; tabId: number }
   | { type: 'EXT_LOGIN_FAILED'; correlationId: string; email: string; reason: string }
   | { type: 'EXT_ACTIVATION_NEED_LINK'; correlationId: string; email: string }
   | { type: 'EXT_ACTIVATION_SUBMITTED'; correlationId: string; email: string }
