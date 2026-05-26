@@ -1252,7 +1252,45 @@ async function pickFirstSlot(): Promise<boolean> {
   return false;
 }
 
+// From the dashboard/home, click into the booking wizard so the Step-1
+// dropdowns (mat-select) render. The "Start New Booking" control may be a
+// <button>, <a>, or a styled card — search broadly. Always traces the visible
+// clickables so we can learn the exact label from logs if the match misses.
+async function enterBookingWizardFromDashboard(): Promise<boolean> {
+  const phrases = [
+    'start new booking', 'book appointment', 'book an appointment', 'schedule appointment',
+    'new booking', 'start booking', 'book now', 'continue booking', 'start application', 'start',
+  ];
+  const clickables = Array.from(
+    document.querySelectorAll<HTMLElement>('button, a, [role="button"], input[type="submit"], mat-card, .mat-card, .mat-mdc-card'),
+  ).filter(isVisible);
+  void postRegisterTrace('booking: dashboard clickables', {
+    href: location.href,
+    texts: clickables
+      .map((e) => (e.innerText || (e as HTMLInputElement).value || '').replace(/\s+/g, ' ').trim().slice(0, 40))
+      .filter(Boolean)
+      .slice(0, 30),
+  });
+  const target = clickables.find((e) => {
+    const t = (e.innerText || (e as HTMLInputElement).value || '').toLowerCase();
+    return phrases.some((p) => t.includes(p));
+  });
+  if (!target) {
+    void postRegisterTrace('booking: NO wizard-entry control found on dashboard', { href: location.href });
+    return false;
+  }
+  void postRegisterTrace('booking: clicking wizard entry', { text: (target.innerText || '').trim().slice(0, 40) });
+  await trustedClick(closestClickable(target));
+  await waitForElement('mat-select', 20_000).catch(() => undefined);
+  return Boolean(document.querySelector('mat-select'));
+}
+
 async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
+  // STEP 0 — if we're on the dashboard (no dropdowns yet), enter the wizard.
+  if (!document.querySelector('mat-select')) {
+    await enterBookingWizardFromDashboard();
+  }
+
   // STEP 1 — Appointment Details (center / category / sub-category dropdowns).
   // Each dropdown loads the next one's options via an API call, so wait for the
   // dependent select to actually have options before trying to pick from it.
