@@ -51,6 +51,9 @@ const envSchema = z.object({
   AUTO_BOOK_ON_TAB_ENABLED: z.coerce.boolean().default(false),
   // Base delay (ms) between staggered parallel bookings + random jitter on top.
   AUTO_BOOK_STAGGER_MS: z.coerce.number().default(8000),
+  // Gap (ms) between slot re-checks while monitoring an account (no full-wizard
+  // hammering → protects against VFS 429). Default 3 min + jitter.
+  AUTO_BOOK_MONITOR_INTERVAL_MS: z.coerce.number().default(180000),
 
   // Telegram/email BOOKING_FAILED alerts — OFF by default so dev test fires and
   // EXT_SESSION_LOST events don't spam the operator/client channel. Failures are

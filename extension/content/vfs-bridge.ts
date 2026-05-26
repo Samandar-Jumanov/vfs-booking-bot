@@ -1194,7 +1194,7 @@ async function emitBookingEvent(event: ExtensionEvent): Promise<void> {
 async function handleBookingViaSpa(payload: BookingFlowPayload): Promise<void> {
   currentCorrelationId = payload.correlationId;
   try {
-    const confirmationNumber = await withTimeout(runBookingSteps(payload), 240_000, 'BOOKING_TIMEOUT');
+    const confirmationNumber = await withTimeout(runBookingSteps(payload), 300_000, 'BOOKING_TIMEOUT');
     await emitBookingEvent({ type: 'EXT_BOOKING_COMPLETED', confirmationNumber, correlationId: payload.correlationId });
   } catch (error) {
     await emitBookingEvent({ type: 'EXT_BOOKING_FAILED', reason: (error as Error).message, correlationId: payload.correlationId });
@@ -1233,6 +1233,26 @@ async function clickButtonByTextEnabled(words: string[], timeoutMs = 30_000): Pr
   }
   void postRegisterTrace('booking: button never enabled', { words });
   return false;
+}
+
+// After "Continue" on Appointment Details, VFS pops a "Verify Captcha" modal
+// whose Cloudflare Turnstile AUTO-PASSES inside the logged-in session (it shows
+// "Success!" even with the bot attached — unlike the login wall). Wait for the
+// modal's Submit to enable (= Turnstile passed) and click it. If no modal
+// appears, this is a harmless no-op.
+async function handleVerifyCaptchaModal(): Promise<void> {
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    const submit = findButtonByText(['submit']);
+    if (submit && isEnabledVisible(submit)) {
+      await trustedClick(submit);
+      void postRegisterTrace('booking: clicked Verify-Captcha Submit', {});
+      await new Promise((r) => setTimeout(r, 1500));
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  void postRegisterTrace('booking: no Verify-Captcha modal Submit (skipped)', {});
 }
 
 async function solveTurnstileIfPresent(correlationId: string): Promise<void> {
@@ -1343,6 +1363,9 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
     const chosen = await selectSubCategoryWithSlots(pattern);
     if (!chosen) throw new Error('NO_SLOTS_IN_ALLOWED_SUBCATEGORY');
     await clickButtonByTextEnabled(['continue']);
+    // VFS pops a "Verify Captcha" modal after Continue; its Turnstile AUTO-PASSES
+    // in the logged-in session (shows "Success!"). Click the modal's Submit.
+    await handleVerifyCaptchaModal();
   }
 
   // STEP 2 — Your Details

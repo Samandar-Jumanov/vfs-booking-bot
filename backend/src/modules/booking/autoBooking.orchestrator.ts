@@ -117,36 +117,45 @@ async function bookOrMonitor(
       logEvent('info', EventType.BOOKING_SUCCESS,
         `[AUTO-BOOK] booked ${account.email} (conf ${result.confirmationNumber ?? '?'})`,
         { profileId });
+      // Notify (Telegram/email) — goes to the customer's telegramChatId if set,
+      // else the operator channel. Booking success always fires regardless of
+      // the failure-alert flag.
+      try {
+        const { dispatchNotification } = await import('@modules/notifications/notification.service');
+        await dispatchNotification({
+          event: 'BOOKING_SUCCESS',
+          profileId,
+          profileName: profile.fullName,
+          accountEmail: account.email,
+          confirmationNo: result.confirmationNumber,
+          destination: 'lva',
+        });
+      } catch (e) {
+        logEvent('warn', EventType.BOOKING_FAILED,
+          `[AUTO-BOOK] booked but notify failed: ${(e as Error).message}`, { profileId });
+      }
       clearAccountSession(account.id);
       return;
     }
 
+    // No slot OR a transient failure → keep MONITORING on the SLOW interval
+    // (never the 30s cookie-push) so we don't hammer VFS into a 429. Bounded.
     const reason = result.reason ?? 'UNKNOWN';
-    // No slot yet → monitor: re-attempt after an interval (bounded), with jitter.
-    if (/NO_SLOT|SLOT|NOT_AVAILABLE|NO_APPOINTMENT|UNAVAILABLE/i.test(reason)) {
-      const attempts = (monitorAttempts.get(account.id) ?? 0) + 1;
-      monitorAttempts.set(account.id, attempts);
-      if (attempts > MAX_MONITOR_ATTEMPTS) {
-        logEvent('info', EventType.BOOKING_ATTEMPT,
-          `[AUTO-BOOK] ${account.email} no slot after ${MAX_MONITOR_ATTEMPTS} checks — giving up`,
-          { profileId });
-        clearAccountSession(account.id);
-        return;
-      }
-      activeSessions.set(account.id, 'monitoring');
-      const interval = env.AUTO_BOOK_STAGGER_MS * 6 + Math.floor(Math.random() * env.AUTO_BOOK_STAGGER_MS);
+    const attempts = (monitorAttempts.get(account.id) ?? 0) + 1;
+    monitorAttempts.set(account.id, attempts);
+    if (attempts > MAX_MONITOR_ATTEMPTS) {
       logEvent('info', EventType.BOOKING_ATTEMPT,
-        `[AUTO-BOOK] ${account.email} no slot (#${attempts}) → re-checking in ${(interval / 1000).toFixed(0)}s`,
+        `[AUTO-BOOK] ${account.email} still no booking after ${MAX_MONITOR_ATTEMPTS} checks (last: ${reason}) — giving up`,
         { profileId });
-      setTimeout(() => { void bookOrMonitor(account, profile, profileId); }, interval);
+      clearAccountSession(account.id);
       return;
     }
-
-    // Hard failure (offline, timeout, error) — release the guard so a future
-    // login sync can retry; don't loop on a broken session.
-    logEvent('warn', EventType.BOOKING_FAILED,
-      `[AUTO-BOOK] ${account.email} booking failed: ${reason}`, { profileId });
-    clearAccountSession(account.id);
+    activeSessions.set(account.id, 'monitoring');
+    const interval = env.AUTO_BOOK_MONITOR_INTERVAL_MS + Math.floor(Math.random() * env.AUTO_BOOK_STAGGER_MS);
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[AUTO-BOOK] ${account.email} no booking (#${attempts}, ${reason}) → re-checking in ${(interval / 1000).toFixed(0)}s`,
+      { profileId });
+    setTimeout(() => { void bookOrMonitor(account, profile, profileId); }, interval);
   } catch (err) {
     logEvent('warn', EventType.BOOKING_FAILED,
       `[AUTO-BOOK] ${account.email} booking threw: ${(err as Error).message}`, { profileId });
