@@ -570,8 +570,14 @@ accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response,
     logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email} (via BrightData)`);
     const visit = await visitActivationLink(link).catch((e) => ({ status: 0, err: (e as Error).message }));
     logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] activation link response status=${visit.status}`);
-    if ('status' in visit && typeof visit.status === 'number' && visit.status >= 400) {
-      res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visit.status}` });
+    // The activation only counts if the link visit genuinely succeeded (2xx/3xx).
+    // status=0 means the request never landed (BrightData proxy failed / blocked)
+    // — marking the account ACTIVE on a status=0 produced "ACTIVE in our DB but
+    // VFS says inactive" (fake activations). Require a real success status.
+    const visitStatus = ('status' in visit && typeof visit.status === 'number') ? visit.status : 0;
+    if (visitStatus < 200 || visitStatus >= 400) {
+      logEvent('warn', EventType.BOOKING_FAILED, `[RECOVER] activation NOT confirmed for ${email} (status=${visitStatus}) — not marking ACTIVE`);
+      res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visitStatus || 'NO_RESPONSE'}` });
       return;
     }
 
