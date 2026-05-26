@@ -50,6 +50,8 @@ export interface PacerConfig {
   cooldown429001Ms: number;
   /** +/- fraction of jitter applied to gaps (0.3 = ±30%). */
   jitterFraction: number;
+  /** Session max age before WARM→ACTIVE re-login is triggered. */
+  sessionFreshnessMs: number;
 }
 
 export interface AccountTiming {
@@ -61,4 +63,6 @@ export interface AccountTiming {
   cooldownUntil: number | null;
   /** ms epoch the WARM session was established, or null. */
   warmedAt: number | null;
+  /** Consecutive attempt counter — reset on success, bumped on retry. */
+  attemptCount: number;
 }

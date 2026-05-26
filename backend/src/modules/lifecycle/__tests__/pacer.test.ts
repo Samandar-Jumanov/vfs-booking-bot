@@ -4,9 +4,10 @@ import type { PacerConfig, AccountTiming } from '../types';
 const cfg: PacerConfig = {
   globalMinGapMs: 60_000, perAccountMinIntervalMs: 90_000,
   cooldown429202Ms: 7_200_000, cooldown429001Ms: 21_600_000, jitterFraction: 0,
+  sessionFreshnessMs: 43_200_000,
 };
 const acct = (over: Partial<AccountTiming>): AccountTiming => ({
-  id: 'a', lifecycleState: 'ACTIVE', lastAttemptAt: null, cooldownUntil: null, warmedAt: null, ...over,
+  id: 'a', lifecycleState: 'ACTIVE', lastAttemptAt: null, cooldownUntil: null, warmedAt: null, attemptCount: 0, ...over,
 });
 
 describe('pacer', () => {
