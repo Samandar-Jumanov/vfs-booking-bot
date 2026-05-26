@@ -266,16 +266,30 @@ export async function fetchEmailVerificationLink(email: string): Promise<string 
   while (Date.now() < deadline) {
     const messages = await emailProvider.listInbox(email).catch(() => []);
     for (const message of messages) {
-      // Defang URL line-wrapping that Mailsac's text endpoint adds:
-      //   1. Quoted-printable soft breaks (`=\r?\n`) split URLs at column 76.
-      //   2. Bare newlines inside URLs (some clients wrap without `=`).
-      // Remove both BEFORE running the link regex.
+      // The VFS activation token is a long base64 string (contains + / =) and the
+      // email WRAPS it across lines with whitespace (observed 2026-05-26:
+      // "…KDSIwNiLR hWy1szYpGf…"). The old regex stopped at the first space →
+      // truncated token → invalid link → VFS bounced to /login without activating.
       let body = String(message.body ?? '');
-      body = body.replace(/=\r?\n/g, ''); // QP soft breaks
-      // Also: HTML entity decode common cases (&amp; → &)
-      body = body.replace(/&amp;/g, '&');
-      const match = body.match(/https?:\/\/[^\s"<>]+(?:verify|confirm|activate)[^\s"<>]*/i);
-      if (match) return match[0];
+      body = body.replace(/=\r?\n/g, '');   // quoted-printable soft breaks
+      body = body.replace(/&amp;/g, '&');   // entity decode
+      const LINK_RE = /activateemail|activate|verify|confirm/i;
+      // 1) Prefer the clean <a href="..."> URL — a single attribute value, so no
+      //    line-wrap whitespace. Strip any stray whitespace just in case.
+      const hrefs = body.match(/href\s*=\s*["']([^"']+)["']/gi) ?? [];
+      for (const h of hrefs) {
+        const url = h.replace(/^href\s*=\s*["']/i, '').replace(/["']$/, '').replace(/\s+/g, '');
+        if (/^https?:\/\//i.test(url) && LINK_RE.test(url)) return url;
+      }
+      // 2) Fallback: the plain-text link. Find its start, take a generous span,
+      //    cut at a hard delimiter, then strip ALL internal whitespace (base64
+      //    tokens never contain real spaces — any are email line-wrapping).
+      const start = body.search(/https?:\/\/\S*(?:activateemail|activate|verify|confirm)/i);
+      if (start >= 0) {
+        const cut = body.slice(start, start + 800).split(/["'<>]|\r?\n\s*\r?\n|Thank you|Regards/i)[0];
+        const url = cut.replace(/\s+/g, '');
+        if (/^https?:\/\//i.test(url)) return url;
+      }
     }
     await sleep(5_000);
   }
