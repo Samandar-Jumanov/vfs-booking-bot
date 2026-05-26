@@ -174,9 +174,16 @@ export default function AccountPoolPage() {
 
   const [autoLoginMsg, setAutoLoginMsg] = useState<string | null>(null);
   const autoLoginMutation = useMutation({
-    mutationFn: (accountId: string) => api.post(`/accounts/${accountId}/auto-login`).then((r) => r.data),
-    onSuccess: (data) => {
-      setAutoLoginMsg(data?.success ? `Warmed ${data.email}` : `Failed: ${data?.reason ?? 'unknown'}`);
+    mutationFn: ({ accountId, fillOnly }: { accountId: string; fillOnly?: boolean }) =>
+      api.post(`/accounts/${accountId}/auto-login`, { fillOnly: Boolean(fillOnly) }).then((r) => r.data),
+    onSuccess: (data, vars) => {
+      if (!data?.success) {
+        setAutoLoginMsg(`Failed: ${data?.reason ?? 'unknown'}`);
+      } else if (vars.fillOnly) {
+        setAutoLoginMsg(`Fields filled for ${data.email} — solve the captcha & click Sign In in the opened tab`);
+      } else {
+        setAutoLoginMsg(`Warmed ${data.email}`);
+      }
       qc.invalidateQueries({ queryKey: ['account-pool'] });
     },
     onError: (err: any) => {
@@ -254,11 +261,6 @@ export default function AccountPoolPage() {
 
   const copyText = (text: string) => {
     void navigator.clipboard?.writeText(text).catch(() => undefined);
-  };
-
-  const openLoginTab = (account: PoolItem) => {
-    copyText(account.email);
-    window.open(`${account.loginUrl}?email=${encodeURIComponent(account.email)}`, '_blank', 'noopener,noreferrer');
   };
 
   const openAllStale = () => {
@@ -749,18 +751,24 @@ export default function AccountPoolPage() {
                     <button
                       type="button"
                       className="btn-secondary h-8 gap-1.5 text-xs"
-                      onClick={() => openLoginTab(a)}
+                      title="Bot opens the login tab, fills email + password, and attempts the captcha — then you solve the captcha (if needed) and click Sign In."
+                      onClick={() => { setAutoLoginMsg(null); copyText(a.email); autoLoginMutation.mutate({ accountId: a.id, fillOnly: true }); }}
+                      disabled={autoLoginMutation.isPending && autoLoginMutation.variables?.accountId === a.id}
                     >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      Open login
+                      {autoLoginMutation.isPending && autoLoginMutation.variables?.accountId === a.id && autoLoginMutation.variables?.fillOnly ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      )}
+                      Open login (fill)
                     </button>
                     <button
                       type="button"
                       className="btn-secondary h-8 gap-1.5 text-xs"
-                      onClick={() => { setAutoLoginMsg(null); autoLoginMutation.mutate(a.id); }}
-                      disabled={autoLoginMutation.isPending && autoLoginMutation.variables === a.id}
+                      onClick={() => { setAutoLoginMsg(null); autoLoginMutation.mutate({ accountId: a.id }); }}
+                      disabled={autoLoginMutation.isPending && autoLoginMutation.variables?.accountId === a.id}
                     >
-                      {autoLoginMutation.isPending && autoLoginMutation.variables === a.id ? (
+                      {autoLoginMutation.isPending && autoLoginMutation.variables?.accountId === a.id && !autoLoginMutation.variables?.fillOnly ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <RefreshCw className="h-3.5 w-3.5" />

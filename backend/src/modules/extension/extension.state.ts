@@ -144,7 +144,7 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   if (event.type && !['EXT_HEARTBEAT', 'EXT_SESSION_SYNC', 'EXT_SLOT_DETECTED',
     'EXT_SESSION_LOST', 'EXT_REGISTER_NEED_EMAIL_LINK', 'EXT_REGISTER_NEED_SMS_OTP',
     'EXT_REGISTER_NEED_CAPTCHA', 'EXT_REGISTER_SUBMITTED', 'EXT_REGISTER_COMPLETED', 'EXT_REGISTER_FAILED',
-    'EXT_LOGIN_NEED_CAPTCHA', 'EXT_LOGIN_SUCCESS', 'EXT_LOGIN_FAILED',
+    'EXT_LOGIN_NEED_CAPTCHA', 'EXT_LOGIN_SUCCESS', 'EXT_LOGIN_FIELDS_FILLED', 'EXT_LOGIN_FAILED',
     'EXT_LOGOUT_SUCCESS', 'EXT_LOGOUT_FAILED',
     'EXT_ACTIVATION_VISIT_SUCCESS', 'EXT_ACTIVATION_VISIT_FAILED',
     'EXT_BOOKING_COMPLETED', 'EXT_BOOKING_FAILED', 'EXT_POLL_RESULT',
@@ -295,6 +295,12 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   if (event.type === 'EXT_LOGIN_SUCCESS' && typeof event.correlationId === 'string') {
     const { resolveLoginSuccess } = await import('@modules/accounts/accountLoginService');
     await resolveLoginSuccess(event.correlationId);
+    return;
+  }
+
+  if (event.type === 'EXT_LOGIN_FIELDS_FILLED' && typeof event.correlationId === 'string') {
+    const { resolveLoginFieldsFilled } = await import('@modules/accounts/accountLoginService');
+    resolveLoginFieldsFilled(event.correlationId, Boolean(event.captchaSolved));
     return;
   }
 

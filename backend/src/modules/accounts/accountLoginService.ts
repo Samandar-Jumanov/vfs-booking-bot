@@ -28,7 +28,7 @@ const pendingLogins = new Map<string, PendingLogin>();
 let cronStarted = false;
 let cronRunning = false;
 
-export async function loginAccount(accountId: string): Promise<LoginResult> {
+export async function loginAccount(accountId: string, fillOnly = false): Promise<LoginResult> {
   const account = await prisma.vfsAccount.findUnique({
     where: { id: accountId },
     select: { id: true, email: true, encryptedPassword: true, status: true },
@@ -69,6 +69,7 @@ export async function loginAccount(accountId: string): Promise<LoginResult> {
     password: decrypt(account.encryptedPassword),
     loginUrl,
     correlationId,
+    fillOnly,
   });
   if (!accepted) {
     return { success: false, accountId: account.id, email: account.email, reason: 'OPERATOR_EXTENSION_OFFLINE' };
@@ -125,6 +126,25 @@ export async function resolveLoginSuccess(correlationId: string): Promise<void> 
     accountId: pending.accountId,
     email: pending.email,
     lastWarmedAt: account?.lastWarmedAt ?? null,
+  });
+}
+
+// fillOnly mode: the bot filled the fields + attempted the captcha, then handed
+// off to the operator (no Sign In click). Resolve the pending promise as success
+// of the BOT'S part — NOT a real warmed session, so don't touch lastWarmedAt.
+export function resolveLoginFieldsFilled(correlationId: string, captchaSolved: boolean): void {
+  const pending = pendingLogins.get(correlationId);
+  if (!pending) return;
+  pendingLogins.delete(correlationId);
+  clearTimeout(pending.timer);
+  logEvent('info', EventType.BOOKING_ATTEMPT,
+    `[LOGIN] fields filled for ${pending.email} (captcha ${captchaSolved ? 'auto-applied' : 'left for operator'}) — operator finishes`,
+    { accountId: pending.accountId, correlationId });
+  pending.resolve({
+    success: true,
+    accountId: pending.accountId,
+    email: pending.email,
+    lastWarmedAt: null,
   });
 }
 

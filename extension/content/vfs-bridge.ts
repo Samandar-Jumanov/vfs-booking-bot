@@ -332,6 +332,7 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     hasTurnstile, siteKey, tsAction, tsCdata,
     widgetHtml: (tsWidget?.outerHTML ?? '(none)').replace(/\s+/g, ' ').slice(0, 200),
   });
+  let captchaApplied = false;
   if (hasTurnstile) {
     await emitLoginEvent({
       type: 'EXT_LOGIN_NEED_CAPTCHA',
@@ -340,8 +341,13 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
       pageUrl: window.location.href,
     });
     const token = await waitForRegisterSignal('loginCaptchaToken', 90_000);
-    if (!token) throw new Error('LOGIN_CAPTCHA_TOKEN_MISSING');
-    await applyRegisterCaptchaToken(token);
+    // In fillOnly mode a missing/rejected token is NOT fatal — the operator
+    // finishes the captcha by hand. Only hard-fail the fully-automated path.
+    if (!token && !payload.fillOnly) throw new Error('LOGIN_CAPTCHA_TOKEN_MISSING');
+    if (token) {
+      await applyRegisterCaptchaToken(token);
+      captchaApplied = true;
+    }
     await new Promise((r) => setTimeout(r, 1500)); // let VFS validate + enable Sign In
   }
 
@@ -385,6 +391,24 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
     });
     await trustedFill(pwdNow, payload.password);
     await new Promise((r) => setTimeout(r, 200));
+  }
+
+  // fillOnly: the bot has filled the fields + attempted the 2Captcha solve.
+  // Stop here WITHOUT clicking Sign In — login's managed Turnstile rejects an
+  // injected token ("mandatory field"), so the operator solves the captcha by
+  // hand and submits. Leaving the tab focused on the email field for them.
+  if (payload.fillOnly) {
+    if (emailField) await trustedClick(emailField).catch(() => undefined);
+    void postRegisterTrace('login fillOnly — fields filled, handing off to operator', {
+      captchaApplied, href: location.href,
+    });
+    await emitLoginEvent({
+      type: 'EXT_LOGIN_FIELDS_FILLED',
+      correlationId: payload.correlationId,
+      email: payload.email,
+      captchaSolved: captchaApplied,
+    });
+    return;
   }
 
   const initialUrl = window.location.href;

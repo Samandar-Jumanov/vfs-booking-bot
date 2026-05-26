@@ -285,6 +285,7 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_REGISTER_FAILED' ||
     message.type === 'EXT_LOGIN_NEED_CAPTCHA' ||
     message.type === 'EXT_LOGIN_SUCCESS' ||
+    message.type === 'EXT_LOGIN_FIELDS_FILLED' ||
     message.type === 'EXT_LOGIN_FAILED' ||
     message.type === 'EXT_ACTIVATION_SUBMITTED' ||
     message.type === 'EXT_ACTIVATION_SUCCESS' ||
@@ -437,6 +438,7 @@ async function runLoginFlow(msg: Extract<BackendMessage, { type: 'BG_LOGIN_VFS_A
         email: msg.email,
         password: msg.password,
         correlationId: msg.correlationId,
+        fillOnly: msg.fillOnly,
       },
     });
     await swTrace('LOGIN_VIA_SPA sent ok');

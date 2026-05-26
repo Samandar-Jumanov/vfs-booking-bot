@@ -291,7 +291,8 @@ accountsRouter.put('/:id/cooldown', async (req: Request, res: Response, next: Ne
 accountsRouter.post('/:id/auto-login', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
-    const result = await loginAccount(req.params.id);
+    const fillOnly = Boolean((req.body as { fillOnly?: boolean } | undefined)?.fillOnly);
+    const result = await loginAccount(req.params.id, fillOnly);
     res.status(result.success ? 200 : 409).json(result);
   } catch (err) {
     next(err);

@@ -65,7 +65,7 @@ export type BackendMessage =
   | { type: 'BG_REGISTER_EMAIL_LINK'; correlationId: string; link: string | null }
   | { type: 'BG_REGISTER_SMS_OTP'; correlationId: string; otp: string | null }
   | { type: 'BG_REGISTER_CAPTCHA_TOKEN'; correlationId: string; token: string | null }
-  | { type: 'BG_LOGIN_VFS_ACCOUNT'; email: string; password: string; loginUrl: string; correlationId: string }
+  | { type: 'BG_LOGIN_VFS_ACCOUNT'; email: string; password: string; loginUrl: string; correlationId: string; fillOnly?: boolean }
   | { type: 'BG_LOGIN_CAPTCHA_TOKEN'; correlationId: string; token: string | null }
   | { type: 'BG_ACTIVATE_VFS_ACCOUNT'; email: string; loginUrl: string; correlationId: string }
   | { type: 'BG_ACTIVATION_DONE'; correlationId: string; ok: boolean; reason?: string }
@@ -120,6 +120,7 @@ export type ExtensionEvent =
   | { type: 'EXT_REGISTER_FAILED'; correlationId: string; reason: string }
   | { type: 'EXT_LOGIN_NEED_CAPTCHA'; correlationId: string; siteKey: string; pageUrl: string }
   | { type: 'EXT_LOGIN_SUCCESS'; correlationId: string; email: string; url: string }
+  | { type: 'EXT_LOGIN_FIELDS_FILLED'; correlationId: string; email: string; captchaSolved: boolean }
   | { type: 'EXT_LOGIN_FAILED'; correlationId: string; email: string; reason: string }
   | { type: 'EXT_ACTIVATION_NEED_LINK'; correlationId: string; email: string }
   | { type: 'EXT_ACTIVATION_SUBMITTED'; correlationId: string; email: string }
@@ -189,6 +190,10 @@ export interface LoginFormPayload {
   email: string;
   password: string;
   correlationId: string;
+  // When true, the bot fills the fields + attempts the 2Captcha solve, then
+  // STOPS before clicking Sign In — the operator solves the captcha (if the
+  // injected token is rejected, as login's managed Turnstile does) and submits.
+  fillOnly?: boolean;
 }
 
 export interface PollSlotResult {
