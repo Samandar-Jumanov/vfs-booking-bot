@@ -274,20 +274,23 @@ export async function fetchEmailVerificationLink(email: string): Promise<string 
       body = body.replace(/=\r?\n/g, '');   // quoted-printable soft breaks
       body = body.replace(/&amp;/g, '&');   // entity decode
       const LINK_RE = /activateemail|activate|verify|confirm/i;
-      // 1) Prefer the clean <a href="..."> URL — a single attribute value, so no
-      //    line-wrap whitespace. Strip any stray whitespace just in case.
+      // Strip internal line-wrap whitespace (base64 tokens have no real spaces)
+      // AND trailing brackets/quotes the email/HTML leaves on the URL — observed
+      // 2026-05-26: a trailing "]" ("…CNg==]") made the token invalid → VFS
+      // redirected to /login WITHOUT activating. Keep "=" (base64 padding).
+      const clean = (u: string): string => u.replace(/\s+/g, '').replace(/[)\]}>'"`,]+$/, '');
+      // 1) Prefer the clean <a href="..."> URL — a single attribute value.
       const hrefs = body.match(/href\s*=\s*["']([^"']+)["']/gi) ?? [];
       for (const h of hrefs) {
-        const url = h.replace(/^href\s*=\s*["']/i, '').replace(/["']$/, '').replace(/\s+/g, '');
+        const url = clean(h.replace(/^href\s*=\s*["']/i, '').replace(/["']$/, ''));
         if (/^https?:\/\//i.test(url) && LINK_RE.test(url)) return url;
       }
       // 2) Fallback: the plain-text link. Find its start, take a generous span,
-      //    cut at a hard delimiter, then strip ALL internal whitespace (base64
-      //    tokens never contain real spaces — any are email line-wrapping).
+      //    cut at a hard delimiter, then clean it.
       const start = body.search(/https?:\/\/\S*(?:activateemail|activate|verify|confirm)/i);
       if (start >= 0) {
-        const cut = body.slice(start, start + 800).split(/["'<>]|\r?\n\s*\r?\n|Thank you|Regards/i)[0];
-        const url = cut.replace(/\s+/g, '');
+        const cut = body.slice(start, start + 800).split(/["'<>\]]|\r?\n\s*\r?\n|Thank you|Regards/i)[0];
+        const url = clean(cut);
         if (/^https?:\/\//i.test(url)) return url;
       }
     }
