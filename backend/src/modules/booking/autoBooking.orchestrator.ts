@@ -26,15 +26,21 @@ type SessionState = 'booking' | 'monitoring';
 // accountId → current state. Guards against EXT_SESSION_SYNC (fires every 60s)
 // re-triggering a booking that's already in flight or monitoring.
 const activeSessions = new Map<string, SessionState>();
-// Per-account monitor attempt counters (bounded so we never hammer VFS forever).
-const monitorAttempts = new Map<string, number>();
+
+// Accounts currently MONITORING via the cheap CheckIsSlotAvailable API poll
+// (armed in the extension). When EXT_SLOT_DETECTED fires we book these — the
+// heavy booking wizard runs ONLY on a real slot, not on every check.
+type MonitorCtx = {
+  account: { id: string; email: string; tabUrl: string | null };
+  profile: Profile;
+  profileId: string;
+};
+const monitoringContext = new Map<string, MonitorCtx>();
 
 // Stagger cursor: the wall-clock time the most recently scheduled booking will
 // fire at. Each new trigger is scheduled at least AUTO_BOOK_STAGGER_MS after the
 // previous one, plus random jitter.
 let lastScheduledAt = 0;
-
-const MAX_MONITOR_ATTEMPTS = 30;
 
 function looksLoggedIn(url: string): boolean {
   if (/\/login\b/i.test(url)) return false;
@@ -75,7 +81,6 @@ export async function onLoggedInTab(
   }
 
   activeSessions.set(account.id, 'booking');
-  monitorAttempts.set(account.id, 0);
 
   // Stagger: schedule at least AUTO_BOOK_STAGGER_MS after the previous trigger,
   // plus random jitter ∈ [0, stagger). Parallel logins thus fan out instead of
@@ -99,7 +104,25 @@ export async function onLoggedInTab(
  *  re-login can re-trigger booking. */
 export function clearAccountSession(accountId: string): void {
   activeSessions.delete(accountId);
-  monitorAttempts.delete(accountId);
+  monitoringContext.delete(accountId);
+}
+
+/**
+ * Called when the extension's cheap CheckIsSlotAvailable poll reports a slot
+ * (EXT_SLOT_DETECTED). Book every account currently MONITORING — the booking
+ * wizard runs only now, on a real slot, not on every check. (One logged-in
+ * account per Chrome profile today, so this is typically a single account.)
+ */
+export async function onSlotDetected(date?: string): Promise<void> {
+  if (!env.AUTO_BOOK_ON_TAB_ENABLED) return;
+  for (const [accountId, ctx] of monitoringContext) {
+    if (activeSessions.get(accountId) === 'booking') continue; // already booking
+    logEvent('info', EventType.BOOKING_ATTEMPT,
+      `[AUTO-BOOK] slot detected (${date ?? '?'}) → booking ${ctx.account.email}`,
+      { profileId: ctx.profileId });
+    activeSessions.set(accountId, 'booking');
+    void bookOrMonitor(ctx.account, ctx.profile, ctx.profileId);
+  }
 }
 
 async function bookOrMonitor(
@@ -138,24 +161,24 @@ async function bookOrMonitor(
       return;
     }
 
-    // No slot OR a transient failure → keep MONITORING on the SLOW interval
-    // (never the 30s cookie-push) so we don't hammer VFS into a 429. Bounded.
     const reason = result.reason ?? 'UNKNOWN';
-    const attempts = (monitorAttempts.get(account.id) ?? 0) + 1;
-    monitorAttempts.set(account.id, attempts);
-    if (attempts > MAX_MONITOR_ATTEMPTS) {
+    // No slot → DON'T re-run the heavy wizard (that's what burns the account
+    // into a 429). The one wizard pass just now armed the extension's cheap
+    // CheckIsSlotAvailable poll (auto-captured codes). Register for MONITORING
+    // and wait for EXT_SLOT_DETECTED → onSlotDetected() books then.
+    if (/NO_SLOT|SLOT|NOT_AVAILABLE|NO_APPOINTMENT|UNAVAILABLE/i.test(reason)) {
+      activeSessions.set(account.id, 'monitoring');
+      monitoringContext.set(account.id, { account, profile, profileId });
       logEvent('info', EventType.BOOKING_ATTEMPT,
-        `[AUTO-BOOK] ${account.email} still no booking after ${MAX_MONITOR_ATTEMPTS} checks (last: ${reason}) — giving up`,
+        `[AUTO-BOOK] ${account.email} no slot → now MONITORING via cheap API poll (books on slot-detected, no wizard re-runs)`,
         { profileId });
-      clearAccountSession(account.id);
       return;
     }
-    activeSessions.set(account.id, 'monitoring');
-    const interval = env.AUTO_BOOK_MONITOR_INTERVAL_MS + Math.floor(Math.random() * env.AUTO_BOOK_STAGGER_MS);
-    logEvent('info', EventType.BOOKING_ATTEMPT,
-      `[AUTO-BOOK] ${account.email} no booking (#${attempts}, ${reason}) → re-checking in ${(interval / 1000).toFixed(0)}s`,
-      { profileId });
-    setTimeout(() => { void bookOrMonitor(account, profile, profileId); }, interval);
+
+    // Hard failure (offline/timeout/error) — release so a later login re-arms.
+    logEvent('warn', EventType.BOOKING_FAILED,
+      `[AUTO-BOOK] ${account.email} booking failed: ${reason}`, { profileId });
+    clearAccountSession(account.id);
   } catch (err) {
     logEvent('warn', EventType.BOOKING_FAILED,
       `[AUTO-BOOK] ${account.email} booking threw: ${(err as Error).message}`, { profileId });

@@ -216,6 +216,10 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
       destination: String(event.destination ?? 'lva'),
       slotDate: String(event.date ?? ''),
     });
+    // The cheap CheckIsSlotAvailable poll found a slot → book the monitoring
+    // account(s) NOW (the heavy wizard runs only on a real slot, not per check).
+    const { onSlotDetected } = await import('@modules/booking/autoBooking.orchestrator');
+    void onSlotDetected(typeof event.date === 'string' ? event.date : undefined);
     return;
   }
 

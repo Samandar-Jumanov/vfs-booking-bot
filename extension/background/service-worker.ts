@@ -94,6 +94,42 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['requestHeaders', 'extraHeaders'],
 );
 
+// Capture VFS's OWN CheckIsSlotAvailable request body — it carries the exact
+// centre/visa-category codes for the route the operator/bot navigated to. We
+// AUTO-ARM the lightweight 1-min slot poller (activeMonitor) from it, so after a
+// single wizard navigation we can monitor via this cheap API call instead of
+// re-running the whole booking wizard (which burns the account → 429001).
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    try {
+      if (!/CheckIsSlotAvailable/i.test(details.url)) return undefined;
+      const bytes = details.requestBody?.raw?.[0]?.bytes;
+      if (!bytes) return undefined;
+      const json = JSON.parse(new TextDecoder('utf-8').decode(new Uint8Array(bytes))) as Record<string, unknown>;
+      const monitor = {
+        sourceCountry: String(json.countryCode ?? 'uzb'),
+        destination: String(json.missionCode ?? 'lva'),
+        vacCode: String(json.vacCode ?? ''),
+        visaCategoryCode: String(json.visaCategoryCode ?? ''),
+        roleName: String(json.roleName ?? 'Individual'),
+        loginUser: String(json.loginUser ?? ''),
+      };
+      if (monitor.vacCode && monitor.visaCategoryCode) {
+        runtimeState = { ...runtimeState, activeMonitor: monitor };
+        void saveRuntimeState();
+        void swTrace('auto-armed slot monitor from CheckIsSlotAvailable', {
+          vacCode: monitor.vacCode, visaCategoryCode: monitor.visaCategoryCode,
+        });
+      }
+    } catch {
+      // Never break the request.
+    }
+    return undefined;
+  },
+  { urls: ['*://lift-api.vfsglobal.com/*'] },
+  ['requestBody'],
+);
+
 // MV3 idle-kills service workers in ~30s. We arm two recurring alarms so
 // the SW is woken on a fixed cadence — keeps the WS reconnect logic alive
 // and the heartbeat flowing to the backend. chrome.alarms.create is
