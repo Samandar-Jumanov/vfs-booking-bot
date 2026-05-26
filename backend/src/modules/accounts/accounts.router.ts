@@ -719,11 +719,13 @@ accountsRouter.post('/inject-cookies', async (req: Request, res: Response, next:
 
     logEvent('info', EventType.MONITOR_STARTED, `VFS cookies injected for ${account.email} (${body.cookies.length} cookies)`);
 
-    // This HTTP cookie-push is the active warm path (more reliable than the WS
-    // EXT_SESSION_SYNC). When the account is warm (datadome) and the tab is on a
-    // logged-in page, arm the auto-booking orchestrator for its linked profile.
-    // No-op unless AUTO_BOOK_ON_TAB_ENABLED.
-    if (hasDatadome) {
+    // This HTTP cookie-push is the active warm path. Arm the auto-booking
+    // orchestrator whenever the tab is on a logged-in page — NOT gated on the
+    // datadome cookie: booking runs as UI clicks in the already-logged-in tab,
+    // which doesn't need datadome (that's only for backend lift-api polling).
+    // The orchestrator's own looksLoggedIn(url) is the real gate. No-op unless
+    // AUTO_BOOK_ON_TAB_ENABLED.
+    {
       const { onLoggedInTab } = await import('@modules/booking/autoBooking.orchestrator');
       void onLoggedInTab(
         { id: account.id, email: account.email, tabUrl: body.tabUrl ?? null },
