@@ -332,16 +332,40 @@ export async function handleExtensionEvent(customerId: string, event: { type?: s
   if (event.type === 'EXT_REGISTER_NEED_EMAIL_LINK' && typeof event.correlationId === 'string') {
     const { logEvent } = await import('@modules/logs/logger');
     const { EventType } = await import('@prisma/client');
+    const email = String(event.email ?? '');
     logEvent('info', EventType.BOOKING_ATTEMPT,
-      `[REGISTER] step: NEED_EMAIL_LINK — polling Mailsac for ${event.email}`);
+      `[REGISTER] step: NEED_EMAIL_LINK — polling Mailsac for ${email}`);
     const { fetchEmailVerificationLink } = await import('@modules/accounts/accountAutoRegister.service');
-    const link = await fetchEmailVerificationLink(String(event.email ?? ''));
+    const link = await fetchEmailVerificationLink(email);
     logEvent('info', EventType.BOOKING_ATTEMPT,
-      `[REGISTER] email link ${link ? 'received' : 'MISSING after 2 min'}: ${link ? link.slice(0,60) + '…' : 'null'}`);
+      `[REGISTER] email link ${link ? 'received' : 'MISSING after 2 min'}: ${link ? link.slice(0, 60) + '…' : 'null'}`);
+
+    // AUTO-ACTIVATE right after register: open the link via the extension
+    // (confirmed visit on the clean UZ IP) and mark the account ACTIVE only on
+    // success. This chains create → activate into one hands-off flow. If it
+    // succeeds we send link=null so the register tab does NOT re-navigate (which
+    // would re-visit/consume the one-time link); on failure we fall back to the
+    // old behaviour (send the link, let the register tab navigate to it).
+    let autoActivated = false;
+    if (link) {
+      try {
+        const { triggerActivationVisit } = await import('@modules/booking/extension-dispatch.service');
+        const visit = await triggerActivationVisit(link);
+        if (visit.success) {
+          await prisma.vfsAccount.updateMany({ where: { email, status: 'PENDING' }, data: { status: AccountStatus.ACTIVE } });
+          autoActivated = true;
+          logEvent('info', EventType.BOOKING_SUCCESS, `[REGISTER] auto-activated ${email} after register (confirmed visit)`);
+        } else {
+          logEvent('warn', EventType.BOOKING_FAILED, `[REGISTER] auto-activation visit failed for ${email}: ${visit.reason ?? 'unknown'} — falling back to in-tab navigate`);
+        }
+      } catch (err) {
+        logEvent('warn', EventType.BOOKING_FAILED, `[REGISTER] auto-activation threw for ${email}: ${(err as Error).message}`);
+      }
+    }
     sendToExtension(customerId, {
       type: 'BG_REGISTER_EMAIL_LINK',
       correlationId: event.correlationId,
-      link: link ?? null,
+      link: autoActivated ? null : (link ?? null),
     });
     return;
   }
