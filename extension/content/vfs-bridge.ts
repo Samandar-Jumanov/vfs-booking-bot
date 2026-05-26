@@ -1301,12 +1301,27 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
   // Each dropdown loads the next one's options via an API call, so wait for the
   // dependent select to actually have options before trying to pick from it.
   if (document.querySelector('mat-select')) {
-    // Select by POSITION (0=centre, 1=visa category, 2=sub-category) — robust to
-    // unknown formcontrolnames. Each dropdown's options load via API after the
-    // previous pick, so give a beat between them.
+    // DIAGNOSTIC: dump every dropdown's attributes so we can target by
+    // formcontrolname/label instead of fragile position indexing (the indices
+    // shift between runs → cross-wired centre/category/sub-category).
+    const _sels = Array.from(document.querySelectorAll<HTMLElement>('mat-select'));
+    void postRegisterTrace('STEP1 mat-selects', {
+      count: _sels.length,
+      selects: _sels.map((s, i) => ({
+        i,
+        fc: s.getAttribute('formcontrolname'),
+        aria: s.getAttribute('aria-label') || s.getAttribute('aria-labelledby'),
+        id: s.id,
+        val: (s.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 45),
+      })),
+    });
+
+    // Select by POSITION (0=centre, 1=visa category, 2=sub-category). Category
+    // match is "long stay" specifically — NOT a bare "visa d", which also
+    // matches sub-category options and caused wrong picks.
     await selectMatOptionByIndex(0, /.+/, 'centre');
     await new Promise((r) => setTimeout(r, 2500));
-    await selectMatOptionByIndex(1, /long stay|visa d|national|work/i, 'visaCategory');
+    await selectMatOptionByIndex(1, /long stay/i, 'visaCategory');
     await new Promise((r) => setTimeout(r, 3000));
     // Only book the Work D-visa sub-categories (UZ/TJK/TKM → LVA scope):
     // "Work (Visa D) Uzbek, Turkmen" and "Work(D Visa) Tajik". A specific
