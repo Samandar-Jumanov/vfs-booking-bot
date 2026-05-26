@@ -118,6 +118,58 @@ export async function triggerLogout(): Promise<ExtensionLogoutResult> {
   });
 }
 
+// ── Activation-link visit dispatch (BG_VISIT_ACTIVATION_LINK in the extension) ─
+// The extension opens the VFS activation link in a real Chrome tab on the
+// operator's clean UZ IP and confirms activation, replacing the BrightData
+// HTTP visit that returned status=0 and falsely marked accounts ACTIVE.
+export interface ExtensionActivationVisitResult {
+  success: boolean;
+  reason?: string;
+}
+
+interface PendingActivationVisit {
+  resolve: (result: ExtensionActivationVisitResult) => void;
+  timer: NodeJS.Timeout;
+}
+
+const pendingActivationVisit = new Map<string, PendingActivationVisit>();
+
+/** Called by the extension event handler when EXT_ACTIVATION_VISIT_SUCCESS/FAILED arrives. */
+export function resolveActivationVisit(correlationId: string, result: ExtensionActivationVisitResult): void {
+  const slot = pendingActivationVisit.get(correlationId);
+  if (!slot) return;
+  pendingActivationVisit.delete(correlationId);
+  clearTimeout(slot.timer);
+  slot.resolve(result);
+}
+
+/**
+ * Ask the operator's extension to open the activation link in its own Chrome
+ * tab (clean UZ IP) and confirm activation. Awaits the EXT_ACTIVATION_VISIT
+ * result with a 60s timeout.
+ */
+export async function triggerActivationVisit(link: string): Promise<ExtensionActivationVisitResult> {
+  const operatorId = await resolveOperatorUserId();
+  if (!operatorId) return { success: false, reason: 'NO_OPERATOR_CONNECTED' };
+  const { sendToExtension, isExtensionLive, listExtensionConnections } = await import('@modules/websocket/ws.server');
+  if (!isExtensionLive(operatorId)) {
+    return {
+      success: false,
+      reason: `OPERATOR_EXTENSION_OFFLINE (operatorId=${operatorId}; live keys=[${listExtensionConnections().join(', ')}])`,
+    };
+  }
+  const correlationId = randomUUID();
+  const accepted = sendToExtension(operatorId, { type: 'BG_VISIT_ACTIVATION_LINK', correlationId, link });
+  if (!accepted) return { success: false, reason: 'OPERATOR_EXTENSION_OFFLINE' };
+  return new Promise<ExtensionActivationVisitResult>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingActivationVisit.delete(correlationId);
+      resolve({ success: false, reason: 'ACTIVATION_VISIT_TIMEOUT' });
+    }, 60_000);
+    pendingActivationVisit.set(correlationId, { resolve, timer });
+  });
+}
+
 export async function triggerAutonomousBooking(input: AutonomousBookingInput): Promise<ExtensionBookingResult> {
   const operatorId = await resolveOperatorUserId();
   if (!operatorId) return { success: false, reason: 'NO_OPERATOR_CONNECTED' };

@@ -12,6 +12,7 @@ import { loginAccount } from './accountLoginService';
 import { cancelLoginBatch, getLoginBatch, startLoginBatch } from './loginBatch.service';
 import axios from 'axios';
 import { logEvent } from '@modules/logs/logger';
+import { isExtensionLive } from '@modules/websocket/ws.server';
 import { AccountStatus, EventType, PollingRole } from '@prisma/client';
 
 export const accountsRouter = Router();
@@ -567,18 +568,37 @@ accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response,
       return;
     }
 
-    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email} (via BrightData)`);
-    const visit = await visitActivationLink(link).catch((e) => ({ status: 0, err: (e as Error).message }));
-    logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] activation link response status=${visit.status}`);
-    // The activation only counts if the link visit genuinely succeeded (2xx/3xx).
-    // status=0 means the request never landed (BrightData proxy failed / blocked)
-    // — marking the account ACTIVE on a status=0 produced "ACTIVE in our DB but
-    // VFS says inactive" (fake activations). Require a real success status.
-    const visitStatus = ('status' in visit && typeof visit.status === 'number') ? visit.status : 0;
-    if (visitStatus < 200 || visitStatus >= 400) {
-      logEvent('warn', EventType.BOOKING_FAILED, `[RECOVER] activation NOT confirmed for ${email} (status=${visitStatus}) — not marking ACTIVE`);
-      res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visitStatus || 'NO_RESPONSE'}` });
-      return;
+    // Preferred path: the operator's extension opens the link in a real Chrome
+    // tab on its clean UZ IP and confirms activation. The old BrightData HTTP
+    // visit returned status=0 (proxy never landed on VFS) yet the account was
+    // marked ACTIVE anyway — a fake activation. We mark ACTIVE only on a
+    // CONFIRMED success in either path.
+    const operatorId = process.env.OPERATOR_USER_ID;
+    const operatorLive = operatorId ? isExtensionLive(operatorId) : false;
+    if (operatorLive) {
+      logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email} (via operator extension)`);
+      const { triggerActivationVisit } = await import('@modules/booking/extension-dispatch.service');
+      const visit = await triggerActivationVisit(link);
+      logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] extension activation visit success=${visit.success} reason=${visit.reason ?? ''}`);
+      if (!visit.success) {
+        logEvent('warn', EventType.BOOKING_FAILED, `[RECOVER] activation NOT confirmed for ${email} (${visit.reason ?? 'unknown'}) — not marking ACTIVE`);
+        res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visit.reason ?? 'EXTENSION'}` });
+        return;
+      }
+    } else {
+      logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] visiting link for ${email} (via BrightData fallback)`);
+      const visit = await visitActivationLink(link).catch((e) => ({ status: 0, err: (e as Error).message }));
+      logEvent('info', EventType.BOOKING_ATTEMPT, `[RECOVER] activation link response status=${visit.status}`);
+      // The activation only counts if the link visit genuinely succeeded (2xx/3xx).
+      // status=0 means the request never landed (BrightData proxy failed / blocked)
+      // — marking the account ACTIVE on a status=0 produced "ACTIVE in our DB but
+      // VFS says inactive" (fake activations). Require a real success status.
+      const visitStatus = ('status' in visit && typeof visit.status === 'number') ? visit.status : 0;
+      if (visitStatus < 200 || visitStatus >= 400) {
+        logEvent('warn', EventType.BOOKING_FAILED, `[RECOVER] activation NOT confirmed for ${email} (status=${visitStatus}) — not marking ACTIVE`);
+        res.status(409).json({ success: false, reason: `EMAIL_LINK_VISIT_FAILED_${visitStatus || 'NO_RESPONSE'}` });
+        return;
+      }
     }
 
     const existing = existingAccount ?? await prisma.vfsAccount.findUnique({ where: { email } });
