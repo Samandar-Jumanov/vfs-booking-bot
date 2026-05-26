@@ -322,7 +322,16 @@ async function runLoginSteps(payload: LoginFormPayload): Promise<void> {
   }
   const siteKey =
     document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || VFS_LOGIN_TURNSTILE_SITEKEY;
-  void postRegisterTrace('login turnstile', { hasTurnstile, siteKey });
+  // Capture the widget's action/cdata — a 2Captcha token solved WITHOUT these is
+  // rejected by VFS ("mandatory field"). If they exist as DOM attributes we can
+  // pass them to the solver (Path 2). This trace tells us if that's possible.
+  const tsWidget = document.querySelector<HTMLElement>('[data-sitekey], .cf-turnstile, div[id^="cf-"]');
+  const tsAction = tsWidget?.getAttribute('data-action') ?? null;
+  const tsCdata = tsWidget?.getAttribute('data-cdata') ?? null;
+  void postRegisterTrace('login turnstile', {
+    hasTurnstile, siteKey, tsAction, tsCdata,
+    widgetHtml: (tsWidget?.outerHTML ?? '(none)').replace(/\s+/g, ' ').slice(0, 200),
+  });
   if (hasTurnstile) {
     await emitLoginEvent({
       type: 'EXT_LOGIN_NEED_CAPTCHA',
