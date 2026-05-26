@@ -1,6 +1,7 @@
 import { ExtensionWsClient } from '../shared/ws-client';
 import { debuggerClickAt, debuggerAttach, debuggerKeyPress, debuggerTypeText } from './debugger.helper';
 import type { BackendMessage, ContentCommand, ExtensionSettings, ExtensionEvent, MonitorConfig, RuntimeState } from '../shared/types';
+import { evaluateActivationVisit } from '../shared/activation-heuristic';
 
 const SW_VERSION = '2026-05-25-autonomous-booking';
 const log = (...args: unknown[]) => console.log('[VFS-SW]', ...args);
@@ -289,7 +290,9 @@ async function handleRuntimeMessage(message: { type?: string; [key: string]: unk
     message.type === 'EXT_ACTIVATION_SUCCESS' ||
     message.type === 'EXT_ACTIVATION_FAILED' ||
     message.type === 'EXT_LOGOUT_SUCCESS' ||
-    message.type === 'EXT_LOGOUT_FAILED'
+    message.type === 'EXT_LOGOUT_FAILED' ||
+    message.type === 'EXT_ACTIVATION_VISIT_SUCCESS' ||
+    message.type === 'EXT_ACTIVATION_VISIT_FAILED'
   ) {
     sendEvent(message as ExtensionEvent);
     return { ok: true };
@@ -348,6 +351,10 @@ function handleBackendMessage(message: BackendMessage): void {
   }
   if (message.type === 'BG_LOGOUT_VFS') {
     void runLogoutFlow(message);
+    return;
+  }
+  if (message.type === 'BG_VISIT_ACTIVATION_LINK') {
+    void runActivationVisit(message);
     return;
   }
   if (message.type === 'BG_ACTIVATION_DONE') {
@@ -590,6 +597,41 @@ async function runLogoutFlow(msg: Extract<BackendMessage, { type: 'BG_LOGOUT_VFS
     });
   } catch (err) {
     sendEvent({ type: 'EXT_LOGOUT_FAILED', correlationId: msg.correlationId, reason: (err as Error).message });
+  }
+}
+
+// Open a VFS account-activation link in a REAL Chrome tab on the operator's
+// clean UZ IP, read the landed page, and decide success via the pure
+// activation-heuristic. Replaces the BrightData HTTP visit that returned
+// status=0 and falsely marked accounts ACTIVE. This is chrome.tabs.create in
+// the operator browser (allowed) — never a backend page.goto.
+async function runActivationVisit(msg: Extract<BackendMessage, { type: 'BG_VISIT_ACTIVATION_LINK' }>): Promise<void> {
+  let createdTabId: number | undefined;
+  try {
+    const tab = await chrome.tabs.create({ url: msg.link, active: true });
+    if (!tab.id) {
+      sendEvent({ type: 'EXT_ACTIVATION_VISIT_FAILED', correlationId: msg.correlationId, reason: 'TAB_OPEN_FAILED' });
+      return;
+    }
+    createdTabId = tab.id;
+    await waitForTabComplete(tab.id, 30_000);
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({ href: location.href, bodyText: document.body.innerText.slice(0, 400) }),
+    });
+    const probe = (injection?.result as { href: string; bodyText: string } | undefined) ?? { href: '', bodyText: '' };
+    const verdict = evaluateActivationVisit(probe);
+    if (verdict.success) {
+      sendEvent({ type: 'EXT_ACTIVATION_VISIT_SUCCESS', correlationId: msg.correlationId });
+    } else {
+      sendEvent({ type: 'EXT_ACTIVATION_VISIT_FAILED', correlationId: msg.correlationId, reason: verdict.reason });
+    }
+  } catch (err) {
+    sendEvent({ type: 'EXT_ACTIVATION_VISIT_FAILED', correlationId: msg.correlationId, reason: (err as Error).message });
+  } finally {
+    if (createdTabId != null) {
+      await chrome.tabs.remove(createdTabId).catch(() => undefined);
+    }
   }
 }
 

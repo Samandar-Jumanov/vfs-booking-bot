@@ -80,6 +80,7 @@ export type BackendMessage =
       };
     }
   | { type: 'BG_LOGOUT_VFS'; correlationId: string }
+  | { type: 'BG_VISIT_ACTIVATION_LINK'; correlationId: string; link: string }
   | { type: 'INJECT_FAKE_SLOT'; destination: string; date: string };
 
 export interface BookingCommand {
@@ -127,6 +128,8 @@ export type ExtensionEvent =
   | { type: 'EXT_LOGGED_IN'; email?: string }
   | { type: 'EXT_LOGOUT_SUCCESS'; correlationId: string; email?: string }
   | { type: 'EXT_LOGOUT_FAILED'; correlationId: string; reason: string }
+  | { type: 'EXT_ACTIVATION_VISIT_SUCCESS'; correlationId: string }
+  | { type: 'EXT_ACTIVATION_VISIT_FAILED'; correlationId: string; reason: string }
   | { type: 'EXT_POLL_RESULT'; destination: string; status: number; data?: unknown }
   | {
       type: 'EXT_SESSION_SYNC';
