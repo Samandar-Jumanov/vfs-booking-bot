@@ -39,6 +39,11 @@ const envSchema = z.object({
   // only with per-account throttling / fresh-IP rotation in place.
   LOGIN_CRON_ENABLED: z.coerce.boolean().default(false),
 
+  // Hands-off account lifecycle tick (register/activate/login paced pipeline).
+  // OFF by default — turning this ON runs VFS-touching actions automatically.
+  // Enable only after ExtensionDriver is wired and operator confirms a test cycle.
+  LIFECYCLE_ENABLED: z.coerce.boolean().default(false),
+
   // Telegram/email BOOKING_FAILED alerts — OFF by default so dev test fires and
   // EXT_SESSION_LOST events don't spam the operator/client channel. Failures are
   // still logged. Set true in production once the booking flow is validated.
