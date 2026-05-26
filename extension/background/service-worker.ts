@@ -102,6 +102,14 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     try {
+      // DISCOVERY: log every lift-api endpoint the site hits, so we can see the
+      // full API surface (GetCenters, GetVisaCategory, slots, BookAppointment…)
+      // and decide which read-only ones to replay. Path only — no payloads.
+      try {
+        const u = new URL(details.url);
+        void swTrace('lift-api call', { method: details.method, path: u.pathname });
+      } catch { /* ignore */ }
+
       if (!/CheckIsSlotAvailable/i.test(details.url)) return undefined;
       const bytes = details.requestBody?.raw?.[0]?.bytes;
       if (!bytes) return undefined;
