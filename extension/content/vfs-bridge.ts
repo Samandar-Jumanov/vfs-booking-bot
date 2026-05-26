@@ -1063,10 +1063,16 @@ async function selectSubCategoryWithSlots(preferred?: RegExp): Promise<string | 
   void postRegisterTrace('subCat: options', { texts });
   if (texts.length === 0) return null;
 
-  // Order: preferred match first, then the rest.
-  const ordered = preferred ? [...texts].sort((a, b) => (preferred.test(b) ? 1 : 0) - (preferred.test(a) ? 1 : 0)) : texts;
+  // RESTRICT to the requested sub-category type — only these are booked. We want
+  // exclusively the Work D-visa sub-categories (e.g. "Work (Visa D) Uzbek,
+  // Turkmen", "Work(D Visa) Tajik"); never auto-book some other category.
+  const candidates = preferred ? texts.filter((t) => preferred.test(t)) : texts;
+  if (candidates.length === 0) {
+    void postRegisterTrace('subCat: no option matched the allowed type', { texts, pattern: String(preferred) });
+    return null;
+  }
 
-  for (const text of ordered) {
+  for (const text of candidates) {
     const picked = await pickFromMatSelect(trigger, new RegExp('^\\s*' + escapeRegExp(text) + '\\s*$', 'i'), 'sub:' + text.slice(0, 24));
     if (!picked) continue;
     // Give VFS a moment to evaluate availability and enable/disable Continue.
@@ -1302,10 +1308,13 @@ async function runBookingSteps(p: BookingFlowPayload): Promise<string> {
     await new Promise((r) => setTimeout(r, 2500));
     await selectMatOptionByIndex(1, /long stay|visa d|national|work/i, 'visaCategory');
     await new Promise((r) => setTimeout(r, 3000));
-    // Try each sub-category until one has slots (Continue enables). Prefer the
-    // requested one (p.subCategory) but fall back to whatever is bookable.
-    const chosen = await selectSubCategoryWithSlots(new RegExp(p.subCategory, 'i'));
-    if (!chosen) throw new Error('NO_SLOTS_IN_ANY_SUBCATEGORY');
+    // Only book the Work D-visa sub-categories (UZ/TJK/TKM → LVA scope):
+    // "Work (Visa D) Uzbek, Turkmen" and "Work(D Visa) Tajik". A specific
+    // p.subCategory (e.g. "tajik") further narrows it; empty = both work types.
+    const WORK_VISA_D = /work\s*\(?\s*(?:visa\s*d|d\s*visa)/i;
+    const pattern = p.subCategory ? new RegExp(p.subCategory, 'i') : WORK_VISA_D;
+    const chosen = await selectSubCategoryWithSlots(pattern);
+    if (!chosen) throw new Error('NO_SLOTS_IN_ALLOWED_SUBCATEGORY');
     await clickButtonByTextEnabled(['continue']);
   }
 
