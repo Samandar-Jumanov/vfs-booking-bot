@@ -26,6 +26,8 @@ interface NotificationPayload {
   confirmationNo?: string;
   accountEmail?: string;
   slotDate?: string;
+  /** Slot reference in the form "{slotDate}@{accountEmail}" — used in SLOT_DETECTED + booking messages. */
+  slotId?: string;
   errorMessage?: string;
   reason?: string;
   minutesRemaining?: number;
@@ -149,15 +151,23 @@ function formatTelegramMessage(p: NotificationPayload & { profileName?: string }
   switch (p.event) {
     case 'SLOT_DETECTED':
       return [
-        'Slot available',
+        `Book for slot: <b>${escapeTelegramHtml(p.slotId ?? p.slotDate ?? 'TBD')}</b>`,
         `Destination: <b>${escapeTelegramHtml(p.destination ?? 'VFS')}</b>`,
-        `Date: <b>${escapeTelegramHtml(p.slotDate)}</b>`,
         `Account: <code>${escapeTelegramHtml(p.accountEmail)}</code>`,
       ].join('\n');
     case 'BOOKING_SUCCESS':
-      return `✅ Booked — *${p.profileName ?? 'Unknown'}* → ${p.destination ?? 'VFS'} on ${p.slotDate ?? 'N/A'}\nConf #: \`${p.confirmationNo ?? 'N/A'}\``;
+      return [
+        '✅ Booked',
+        `Profile: <b>${escapeTelegramHtml(p.profileName ?? 'Unknown')}</b>`,
+        `Conf #: <code>${escapeTelegramHtml(p.confirmationNo ?? 'N/A')}</code>`,
+        `Slot: <b>${escapeTelegramHtml(p.slotId ?? p.slotDate ?? 'N/A')}</b>`,
+      ].join('\n');
     case 'BOOKING_FAILED':
-      return `❌ Booking failed — ${p.reason ?? p.errorMessage ?? 'Unknown error'}\nManual review needed.`;
+      return [
+        '❌ Booking failed',
+        `Profile: <b>${escapeTelegramHtml(p.profileName ?? 'Unknown')}</b>`,
+        `Reason: <b>${escapeTelegramHtml(p.reason ?? p.errorMessage ?? 'Unknown')}</b>`,
+      ].join('\n');
     case 'CAPTCHA_MANUAL_NEEDED':
       return '🤖 Captcha needed — open the dashboard to solve';
     case 'COOKIE_EXPIRING_SOON':

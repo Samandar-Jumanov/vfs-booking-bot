@@ -71,6 +71,16 @@ async function bootstrap() {
 
   server.listen(env.PORT, () => {
     console.info(`✅ Server running on port ${env.PORT} [${env.NODE_ENV}]`);
+
+    // Heartbeat: fires ~every 20 min when pipeline is active (gated by TELEGRAM_BOT_TOKEN)
+    if (env.TELEGRAM_BOT_TOKEN) {
+      import('./modules/notifications/heartbeat').then(({ heartbeat }) => {
+        heartbeat.start();
+        console.info('✅ Heartbeat scheduler started');
+      }).catch((err: any) => {
+        console.warn('Heartbeat scheduler failed to start:', err?.message ?? String(err));
+      });
+    }
   });
 
   // ── Graceful shutdown ────────────────────────────────────────────────────

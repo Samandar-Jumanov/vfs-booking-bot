@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { getLogs, createCsvExportStream, LogFilter, clearLogs as clearLogsService } from './logs.service';
 import { getOptimalPollingWindows } from './analytics.service';
+import { prisma } from '@config/database';
 
 export async function listLogs(req: Request, res: Response, next: NextFunction) {
   try {
@@ -53,6 +54,34 @@ export async function clearLogs(req: Request, res: Response, next: NextFunction)
   try {
     await clearLogsService();
     res.json({ message: 'Logs cleared successfully' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function listPipelineEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const limit = Math.min(Number(req.query.limit ?? 100), 500);
+    const offset = Number(req.query.offset ?? 0);
+    const severity = req.query.severity as string | undefined;
+    const accountId = req.query.accountId as string | undefined;
+
+    const where = {
+      ...(severity ? { severity: severity as any } : {}),
+      ...(accountId ? { accountId } : {}),
+    };
+
+    const [events, total] = await Promise.all([
+      (prisma as any).pipelineEvent.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      (prisma as any).pipelineEvent.count({ where }),
+    ]);
+
+    res.json({ total, events });
   } catch (err) {
     next(err);
   }

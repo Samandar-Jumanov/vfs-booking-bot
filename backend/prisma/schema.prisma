@@ -256,6 +256,12 @@ enum VendorKind {
   OTHER
 }
 
+enum PipelineSeverity {
+  INFO
+  WARN
+  CRITICAL
+}
+
 // Every billable action against a paid third-party (vendor) is logged here.
 // Cost stored as integer micro-USD so we never lose cents to float math.
 model VendorSpend {
@@ -273,4 +279,25 @@ model VendorSpend {
   @@index([profileId])
   @@index([createdAt])
   @@map("vendor_spend")
+}
+
+model PipelineEvent {
+  id             String            @id @default(cuid())
+  action         String            // e.g. "register", "activate", "login", "book", "slot_check"
+  accountId      String?
+  profileId      String?
+  beforeState    String?           // lifecycle state before action
+  afterState     String?           // lifecycle state after action
+  error          String?           // error message if failed
+  url            String?           // VFS URL at time of event
+  screenshotPath String?           // path to screenshot file
+  lastNetwork    String?           // last network call observed (JSON stringified)
+  severity       PipelineSeverity  @default(INFO)
+  createdAt      DateTime          @default(now())
+
+  @@index([accountId])
+  @@index([profileId])
+  @@index([severity])
+  @@index([createdAt])
+  @@map("pipeline_events")
 }

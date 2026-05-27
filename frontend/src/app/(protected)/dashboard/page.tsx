@@ -59,6 +59,36 @@ interface BookingSummary {
   }>;
 }
 
+interface ScenarioAccountItem {
+  id: string;
+  email: string;
+  status: string;
+  lifecycleState: string;
+  pollingRole: string;
+  lastAttemptAt: string | null;
+  cooldownUntil: string | null;
+}
+
+interface ScenarioResult {
+  triggered: boolean;
+  reason?: string;
+  registrationsQueued?: number;
+  reconciliation?: {
+    total: number;
+    activated: number;
+    linkMissing: number;
+    failed: number;
+    candidateEmails: string[];
+  };
+  accounts?: {
+    total: number;
+    active: number;
+    pending: number;
+    spare: number;
+    items: ScenarioAccountItem[];
+  };
+}
+
 type WizardStep = 'explain' | 'open' | 'paste' | 'inject';
 type InjectState = 'idle' | 'saving' | 'success' | 'error';
 
@@ -199,6 +229,13 @@ export default function DashboardPage() {
     },
   });
 
+  const scenarioMutation = useMutation<ScenarioResult, Error, void>({
+    mutationFn: async () => {
+      const response = await api.post<ScenarioResult>('/scenario/start', { poolMinSpare: 2 });
+      return response.data;
+    },
+  });
+
   const monitorCards = useMemo<MonitorCardModel[]>(() => {
     const source = status.length ? status : monitors;
     return source.map((monitor) => {
@@ -335,6 +372,97 @@ export default function DashboardPage() {
           <SummaryCard label="Failed today" value={(bookingSummary?.bookings.failedToday ?? 0).toString()} icon={AlertTriangle} compact />
           <SummaryCard label="Fresh accounts" value={`${bookingSummary?.accounts.fresh ?? 0}/${bookingSummary?.accounts.total ?? 0}`} icon={ShieldCheck} compact />
           <SummaryCard label="Active profiles" value={(bookingSummary?.profiles.active ?? 0).toString()} icon={User} compact />
+        </section>
+
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-black uppercase tracking-widest text-foreground">Scenario</h2>
+          </div>
+          <motion.div
+            layout
+            className="card bg-card/60 p-5 space-y-4"
+          >
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-bold">Start Scenario</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Checks the spare account pool, queues registrations if needed, and activates PENDING accounts via Mailsac.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => scenarioMutation.mutate()}
+                disabled={scenarioMutation.isPending}
+                className="btn-primary h-11 gap-2 shrink-0"
+              >
+                {scenarioMutation.isPending
+                  ? <RefreshCcw className="h-4 w-4 animate-spin" />
+                  : <Play className="h-4 w-4" />}
+                {scenarioMutation.isPending ? 'Running...' : 'Start Scenario'}
+              </button>
+            </div>
+
+            {scenarioMutation.isError && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                {scenarioMutation.error?.message ?? 'Scenario failed.'}
+              </div>
+            )}
+
+            {scenarioMutation.isSuccess && scenarioMutation.data && (
+              <>
+                {!scenarioMutation.data.triggered ? (
+                  <div className="rounded-lg border border-zinc-500/30 bg-zinc-500/10 p-3 text-sm text-zinc-400">
+                    Scenario disabled — set <code className="font-mono">SCENARIO_ENABLED=true</code> in the backend to enable it.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
+                      Triggered: <strong>{scenarioMutation.data.registrationsQueued ?? 0}</strong> registration(s) queued,{' '}
+                      <strong>{scenarioMutation.data.reconciliation?.activated ?? 0}</strong> account(s) activated.
+                    </div>
+
+                    {scenarioMutation.data.accounts && scenarioMutation.data.accounts.items.length > 0 && (
+                      <div className="overflow-x-auto rounded-lg border border-white/10">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-white/10 bg-accent/40 text-left">
+                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Email</th>
+                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Status</th>
+                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Lifecycle</th>
+                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Role</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {scenarioMutation.data.accounts.items.map((item) => (
+                              <tr key={item.id} className="border-b border-white/5 last:border-0 hover:bg-accent/20">
+                                <td className="px-3 py-2 font-mono text-[11px]">
+                                  {item.email.length > 28 ? `${item.email.slice(0, 14)}…${item.email.slice(-10)}` : item.email}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <span className={cn(
+                                    'rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest',
+                                    item.status === 'ACTIVE' && 'bg-green-500/15 text-green-400',
+                                    item.status === 'PENDING' && 'bg-amber-500/15 text-amber-400',
+                                    item.status === 'BLOCKED' && 'bg-red-500/15 text-red-400',
+                                    item.status === 'COOLDOWN' && 'bg-blue-500/15 text-blue-400',
+                                    !['ACTIVE','PENDING','BLOCKED','COOLDOWN'].includes(item.status) && 'bg-zinc-500/15 text-zinc-400',
+                                  )}>
+                                    {item.status}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.lifecycleState}</td>
+                                <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.pollingRole}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </motion.div>
         </section>
 
         <section className="space-y-3">

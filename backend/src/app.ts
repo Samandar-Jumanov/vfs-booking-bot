@@ -21,6 +21,7 @@ import { emailRouter } from '@modules/email/email.router';
 import { vendorRouter } from '@modules/vendor/vendor.router';
 import { bootstrapRouter } from '@modules/auth/bootstrap.router';
 import { statusRouter } from '@modules/status/status.router';
+import { scenarioRouter } from '@modules/scenario/scenario.router';
 
 export function createApp() {
   const app = express();
@@ -143,6 +144,7 @@ export function createApp() {
   app.use('/api/accounts', accountsRouter);
   app.use('/api/extension', extensionRouter);
   app.use('/api/vendor', vendorRouter);
+  app.use('/api/scenario', scenarioRouter);
 
   // ── Error handler (must be last) ─────────────────────────────────────────
   app.use(errorHandler);

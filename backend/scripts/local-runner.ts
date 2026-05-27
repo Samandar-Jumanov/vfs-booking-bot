@@ -37,12 +37,20 @@ function safeDecrypt(enc?: string | null): string {
   try { return decrypt(enc); } catch { return ''; }
 }
 
-async function launchForAccount(account: { id: string; email: string; encryptedPassword: string; profileIds: string[] }) {
+async function launchForAccount(account: { id: string; email: string; encryptedPassword: string; profileIds: string[]; pollingRole: string }) {
   const profile = await prisma.profile.findFirst({
     where: { id: { in: account.profileIds }, isActive: true },
   });
   const password = safeDecrypt(account.encryptedPassword);
   if (!password) { log(`skip ${account.email}: password decrypt failed`); return; }
+
+  // WATCHER accounts monitor only — never book, regardless of RUNNER_BOOK_ENABLED.
+  // BOOKER or BOTH accounts respect the RUNNER_BOOK_ENABLED env flag.
+  const bookEnabled =
+    account.pollingRole === 'WATCHER'
+      ? ''
+      : process.env.RUNNER_BOOK_ENABLED === '1' ? '1' : '';
+  log(`account ${account.email} pollingRole=${account.pollingRole} → BOOK_ENABLED=${bookEnabled || 'off'}`);
 
   const [firstName, ...rest] = (profile?.fullName ?? 'Test User').trim().split(/\s+/);
   const env: NodeJS.ProcessEnv = {
@@ -51,7 +59,7 @@ async function launchForAccount(account: { id: string; email: string; encryptedP
     VFS_EMAIL: account.email,
     VFS_PASSWORD: password,
     MONITOR_INTERVAL: process.env.MONITOR_INTERVAL ?? '180',
-    BOOK_ENABLED: process.env.RUNNER_BOOK_ENABLED === '1' ? '1' : '',
+    BOOK_ENABLED: bookEnabled,
   };
   if (profile) {
     env.PROFILE_FIRSTNAME = firstName;
@@ -63,11 +71,11 @@ async function launchForAccount(account: { id: string; email: string; encryptedP
   }
 
   if (process.env.RUNNER_DRY_RUN === '1') {
-    log(`DRY-RUN would launch ${account.email} (profile=${profile?.fullName ?? 'NONE'}, passportLen=${(env.PROFILE_PASSPORT ?? '').length}, pwLen=${password.length})`);
+    log(`DRY-RUN would launch ${account.email} (role=${account.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, passportLen=${(env.PROFILE_PASSPORT ?? '').length}, pwLen=${password.length}, book=${bookEnabled === '1'})`);
     running.set(account.id, { on: () => {}, kill: () => {} } as unknown as ChildProcess); // mark so we don't re-pick in this run
     return;
   }
-  log(`launching pipeline for ${account.email} (profile: ${profile?.fullName ?? 'NONE — monitor only'}, book=${env.BOOK_ENABLED === '1'})`);
+  log(`launching pipeline for ${account.email} (role=${account.pollingRole}, profile: ${profile?.fullName ?? 'NONE — monitor only'}, book=${bookEnabled === '1'})`);
   const child = spawn('python', [PIPELINE], { env, stdio: 'inherit' });
   running.set(account.id, child);
   child.on('exit', (code) => {
@@ -80,7 +88,7 @@ async function tick() {
   if (running.size >= MAX_CONCURRENT) return;
   const candidates = await prisma.vfsAccount.findMany({
     where: { status: 'ACTIVE', NOT: { profileIds: { isEmpty: true } } },
-    select: { id: true, email: true, encryptedPassword: true, profileIds: true },
+    select: { id: true, email: true, encryptedPassword: true, profileIds: true, pollingRole: true },
     orderBy: { lastWarmedAt: 'asc' },
     take: 20,
   });

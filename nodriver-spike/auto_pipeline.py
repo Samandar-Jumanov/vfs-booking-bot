@@ -11,6 +11,10 @@ Run (PowerShell):
 Env:
   MONITOR_INTERVAL  seconds between slot re-checks (default 120)
   BOOK_ENABLED      "1" to actually book on a slot (default off = monitor only, safe)
+  BOOK_DRY_RUN      "1" to run the full booking flow up to the Review screen, take a
+                    screenshot, and exit WITHOUT clicking Submit/Confirm. Useful for
+                    validating the booking flow end-to-end. If both BOOK_DRY_RUN and
+                    BOOK_ENABLED are set, DRY_RUN takes precedence (no actual submit).
   SUBCAT            regex to pick sub-category (default: Work D-visa)
   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  optional alerts
   PROFILE_*         applicant data for booking (firstName,lastName,nationality,passport,contact)
@@ -33,6 +37,7 @@ PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
 MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "120"))
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
+BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
 SUBCAT = re.compile(os.environ.get("SUBCAT", r"work\s*\(?\s*(?:visa\s*d|d\s*visa)"), re.I)
 SHOTS = pathlib.Path(__file__).parent / "shots"
 SHOTS.mkdir(exist_ok=True)
@@ -327,6 +332,11 @@ async def book(page, subcat):
     await click_button_text(page, ["continue", "next"], timeout=15)
     # Step 5 — Review → Submit
     await asyncio.sleep(1.5)
+    if BOOK_DRY_RUN:
+        ts = int(asyncio.get_event_loop().time())
+        await shot(page, f"dry_review_{ts}")
+        log(f"DRY-RUN: reached review screen — screenshot saved to shots/dry_review_{ts}.png — not submitting")
+        return True
     ok = await click_button_text(page, ["submit", "confirm", "pay"], timeout=20)
     await shot(page, "pipe_after_submit")
     log("BOOK: submit clicked:", ok, "url:", await jeval(page, "location.href"))
@@ -335,8 +345,12 @@ async def book(page, subcat):
 
 # ── MAIN ───────────────────────────────────────────────────────────────────
 async def main():
+    global BOOK_ENABLED
     if not EMAIL or not PASSWORD:
         log("ERROR: set VFS_EMAIL/VFS_PASSWORD"); sys.exit(2)
+    if BOOK_DRY_RUN and BOOK_ENABLED:
+        log("WARN: both BOOK_DRY_RUN and BOOK_ENABLED are set — DRY_RUN takes precedence (no actual submit)")
+        BOOK_ENABLED = False
     import nodriver as uc
     browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
     page = await browser.get(LOGIN_URL)
@@ -357,12 +371,17 @@ async def main():
         slot = await select_route(page)
         if slot:
             telegram(f"[bot] SLOT FOUND for {EMAIL}: {slot}")
-            if BOOK_ENABLED:
+            if BOOK_DRY_RUN:
+                booked = await book(page, slot)
+                telegram(f"[bot] DRY-RUN: reached review screen for {EMAIL} ({slot}) — not submitted")
+                break
+            elif BOOK_ENABLED:
                 booked = await book(page, slot)
                 telegram(f"[bot] booking {'submitted' if booked else 'attempted'} for {EMAIL} ({slot})")
+                break
             else:
                 log("slot found but BOOK_ENABLED off — stopping for operator")
-            break
+                break
         log(f"no slot — re-checking in {MONITOR_INTERVAL}s")
         # go back to a clean Appointment Details state for the next check
         await asyncio.sleep(MONITOR_INTERVAL)

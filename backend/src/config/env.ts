@@ -111,6 +111,10 @@ const envSchema = z.object({
   SESSION_DIR: z.string().default('/app/sessions'),
   BOOKING_MAX_RETRIES: z.coerce.number().default(3),
   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: z.string().optional(),
+
+  // Heartbeat: how often (ms) to send the "watching" Telegram digest.
+  // Default 20 minutes — fires at most once per interval, never per slot check.
+  HEARTBEAT_INTERVAL_MS: z.coerce.number().default(20 * 60 * 1000),
 });
 
 const parsed = envSchema.safeParse(process.env);
