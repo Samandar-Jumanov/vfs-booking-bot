@@ -1,3 +1,5 @@
 session.json
 shots/
 __pycache__/
+register-out.json
+*.log
