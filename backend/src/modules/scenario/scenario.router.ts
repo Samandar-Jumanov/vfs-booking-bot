@@ -136,16 +136,13 @@ scenarioRouter.post(
         console.log(`[scenario] spare=${spareActive} >= min=${poolMinSpare}, no registrations queued`);
       }
 
-      // ── Step 3: Reconcile PENDING accounts in the BACKGROUND ───────────────
-      // CRITICAL: do NOT await this. reconcilePending loops every PENDING account
-      // sequentially (Mailsac fetch + activation visit + 2s pacing) — with N PENDING
-      // it takes minutes and made the request 502 (Railway request timeout). The
-      // backend process is long-lived and holds the extension WS, so we fire it
-      // and forget; the dashboard polls GET /status to watch progress.
-      console.log(`[scenario] reconciling ${pendingCount} PENDING account(s) in background…`);
-      void reconcilePending(false)
-        .then((r) => console.log(`[scenario] reconcile done: activated=${r.activated} linkMissing=${r.linkMissing} failed=${r.failed}`))
-        .catch((e) => console.error('[scenario] reconcile error:', (e as Error).message));
+      // ── Step 3: (activation is handled by the WORKER per-account) ──────────
+      // The orchestrator worker now activates each account it registers, via
+      // POST /api/pipeline/reconcile (extension). We deliberately do NOT mass-
+      // reconcile every PENDING here — that opened a browser tab per old PENDING
+      // account (and previously 502'd the request). Only the worker activates,
+      // one account at a time, as part of the run.
+      console.log(`[scenario] ${pendingCount} PENDING account(s) exist — activation left to the worker (no mass reconcile)`);
 
       // ── Step 4: Snapshot all accounts for dashboard display ────────────────
       const accountRows = await prisma.vfsAccount.findMany({
