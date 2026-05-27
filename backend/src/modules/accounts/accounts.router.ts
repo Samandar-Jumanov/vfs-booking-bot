@@ -50,6 +50,35 @@ const loginBatchSchema = z.object({
 
 const PENDING_STATUS = 'PENDING' as AccountStatus;
 
+// ── nodriver registration queue ─────────────────────────────────────────────
+// The Railway backend can't run nodriver (no UZ IP / no Chrome). So the dashboard
+// only BUMPS a counter here; the register-runner on the operator's UZ machine
+// drains it one-at-a-time (throttle-paced) and inserts the new accounts. This
+// decouples the dashboard click from the actual VFS registration.
+const REG_QUEUE_KEY = 'pending_registration_requests';
+
+async function getRegQueue(): Promise<number> {
+  const row = await prisma.settings.findUnique({ where: { key: REG_QUEUE_KEY } });
+  const v = row?.value as unknown;
+  if (typeof v === 'number') return Math.max(0, Math.floor(v));
+  if (v && typeof v === 'object' && typeof (v as { count?: unknown }).count === 'number') {
+    return Math.max(0, Math.floor((v as { count: number }).count));
+  }
+  return 0;
+}
+
+async function setRegQueue(n: number): Promise<number> {
+  const val = Math.max(0, Math.floor(n));
+  await prisma.settings.upsert({
+    where: { key: REG_QUEUE_KEY },
+    update: { value: val },
+    create: { key: REG_QUEUE_KEY, value: val },
+  });
+  return val;
+}
+
+const requestRegSchema = z.object({ count: z.coerce.number().int().min(1).max(50).default(1) });
+
 function cookieStoreHasDatadome(cookieStore: unknown): boolean {
   if (!cookieStore) return false;
   if (typeof cookieStore === 'string') return /datadome/i.test(cookieStore);
@@ -497,6 +526,54 @@ accountsRouter.post('/auto-create', async (req: Request, res: Response, next: Ne
     const message = err instanceof Error ? err.message : String(err);
     logEvent('error', EventType.BOOKING_FAILED, `auto-register threw: ${message}`);
     res.status(500).json({ success: false, error: message });
+  }
+});
+
+// ── POST /api/accounts/request-registration ──────────────────────────────────
+/**
+ * Dashboard "Create Account (nodriver)" → enqueue N registration requests. The
+ * operator's register-runner (running on the clean UZ machine) drains the queue
+ * one-at-a-time with throttle pacing and persists each new account. Returns the
+ * new pending total. This is the reliable nodriver path (vs the extension-driven
+ * /auto-create which can't pass Turnstile).
+ *
+ * Body: { count?: number }  (default 1, max 50)
+ */
+accountsRouter.post('/request-registration', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    const { count } = requestRegSchema.parse(req.body ?? {});
+    const pending = await setRegQueue((await getRegQueue()) + count);
+    logEvent('info', EventType.BOOKING_ATTEMPT, `Queued ${count} nodriver registration(s)`, { pending });
+    res.status(202).json({ success: true, queued: count, pending });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/accounts/registration-queue ─────────────────────────────────────
+// Dashboard polls this to show queue depth + how many spare accounts exist.
+accountsRouter.get('/registration-queue', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const [pending, spareActive] = await Promise.all([
+      getRegQueue(),
+      prisma.vfsAccount.count({ where: { status: 'ACTIVE', profileIds: { isEmpty: true } } }),
+    ]);
+    res.json({ pending, spareActive });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /api/accounts/registration-queue/reset ──────────────────────────────
+// Clear the queue (operator "cancel pending registrations").
+accountsRouter.post('/registration-queue/reset', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
+    await setRegQueue(0);
+    res.json({ success: true, pending: 0 });
+  } catch (err) {
+    next(err);
   }
 });
 
