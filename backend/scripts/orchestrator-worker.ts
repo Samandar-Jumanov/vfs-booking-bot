@@ -125,14 +125,26 @@ interface MilestoneBody {
 async function postMilestone(body: MilestoneBody): Promise<void> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (WORKER_TOKEN) headers['Authorization'] = `Bearer ${WORKER_TOKEN}`;
-  try {
-    await fetch(`${BACKEND_URL}/api/pipeline/event`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-  } catch (e) {
-    log('milestone POST failed:', (e as Error).message);
+  // Retry on transient network failure (flaky worker↔backend link) so a blip
+  // doesn't silently drop a state update. 3 attempts, 1s/2s/4s backoff.
+  const MAX = 3;
+  for (let attempt = 1; attempt <= MAX; attempt++) {
+    try {
+      const resp = await fetch(`${BACKEND_URL}/api/pipeline/event`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) return;
+      // non-2xx (e.g. 401/400) won't fix on retry — log and stop
+      log(`milestone POST ${body.step} → HTTP ${resp.status} (not retrying)`);
+      return;
+    } catch (e) {
+      const last = attempt === MAX;
+      log(`milestone POST ${body.step} failed (attempt ${attempt}/${MAX})${last ? ' — giving up' : ', retrying'}: ${(e as Error).message}`);
+      if (last) return;
+      await sleep(2 ** (attempt - 1) * 1000);
+    }
   }
 }
 
@@ -480,6 +492,9 @@ async function driveRun(runId: string): Promise<void> {
   const now = Date.now();
 
   // 3. Load ACTIVE accounts for login → monitor → book
+  // RUN_LIMIT (alias SIMULATE_LIMIT) caps how many accounts a run drives — keeps
+  // demo/real runs from touching the whole pool at once. 0/unset = no cap.
+  const simulateLimit = Number(process.env.RUN_LIMIT ?? process.env.SIMULATE_LIMIT ?? 0);
   const accounts = await prisma.vfsAccount.findMany({
     where: { status: 'ACTIVE' },
     select: {
@@ -491,6 +506,7 @@ async function driveRun(runId: string): Promise<void> {
       pollingRole: true,
     },
     orderBy: { lastAttemptAt: 'asc' },
+    ...(simulateLimit > 0 ? { take: simulateLimit } : {}),
   });
 
   if (accounts.length === 0) {

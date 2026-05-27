@@ -273,12 +273,21 @@ export default function DashboardPage() {
     },
   });
 
+  // Always poll status (not gated on activeRunId) so the run + per-account
+  // progress are restored on page load / reload — the server holds the latest
+  // run in scenario_run, so a reload re-attaches to an in-flight run instead of
+  // losing the view.
   const { data: scenarioStatus } = useQuery<ScenarioStatusResponse>({
-    queryKey: ['scenario-status', activeRunId],
-    queryFn: () => api.get<ScenarioStatusResponse>(`/scenario/status${activeRunId ? `?runId=${activeRunId}` : ''}`).then((r) => r.data),
+    queryKey: ['scenario-status'],
+    queryFn: () => api.get<ScenarioStatusResponse>('/scenario/status').then((r) => r.data),
     refetchInterval: 4000,
-    enabled: activeRunId !== null,
   });
+
+  // Restore the active run id from the server (survives reload).
+  useEffect(() => {
+    const serverRunId = scenarioStatus?.run?.runId;
+    if (serverRunId && serverRunId !== activeRunId) setActiveRunId(serverRunId);
+  }, [scenarioStatus?.run?.runId, activeRunId]);
 
   const monitorCards = useMemo<MonitorCardModel[]>(() => {
     const source = status.length ? status : monitors;
