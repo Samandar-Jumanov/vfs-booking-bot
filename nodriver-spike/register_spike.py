@@ -67,6 +67,30 @@ async def dismiss_consent(page):
         const b=[...document.querySelectorAll('button,a')].find(x=>/accept all|accept cookies|i agree/i.test(x.innerText||'')); if(b){b.click();return 1;} return 0;})()""")
 
 
+async def safe_click(page, el):
+    """Trusted click with fallbacks. nodriver's mouse_click raises 'could not find
+    position' when the element has no layout box (overlay mid-animation, off-screen,
+    or covered by the cookie popup). Scroll it in, retry, then JS-click by id."""
+    try:
+        await el.scroll_into_view()
+    except Exception:
+        pass
+    try:
+        await el.mouse_click()
+        return True
+    except Exception:
+        pass
+    # fallback: JS click by element id (Material options select on a plain .click())
+    try:
+        oid = (el.attrs.get("id") if hasattr(el, "attrs") else "") or ""
+        if oid:
+            ok = await jeval(page, f"(()=>{{const e=document.getElementById('{oid}'); if(e){{e.click(); return 1;}} return 0;}})()")
+            return bool(ok)
+    except Exception:
+        pass
+    return False
+
+
 async def fill(page, selectors, value, label):
     for sel in selectors:
         try:
@@ -85,7 +109,13 @@ async def fill(page, selectors, value, label):
 def mailsac_link(email):
     """Poll Mailsac for the activation email; extract the clean activation link."""
     base = "https://mailsac.com/api"
-    hdr = {"Mailsac-Key": MAILSAC_KEY}
+    # Mailsac is behind Cloudflare, which bans urllib's default UA (error 1010).
+    # Send a normal browser User-Agent + Accept to get through.
+    hdr = {
+        "Mailsac-Key": MAILSAC_KEY,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
     enc = urllib.parse.quote(email, safe="")  # URL-encode the @ — unencoded => 403
     try:
         req = urllib.request.Request(f"{base}/addresses/{enc}/messages", headers=hdr)
@@ -170,6 +200,12 @@ async def main():
     await fill(page, ['input[formcontrolname="confirmPassword"]', 'input[name="confirmPassword"]'], password, "confirmPassword")
     await fill(page, ['input[formcontrolname="contact"]', 'input[type="tel"]', 'input[name="contact"]'], phone, "contact")
 
+    # dismiss the cookie-consent popup BEFORE the dial-code dropdown — it loads
+    # late and covers/displaces the dropdown overlay, which made mouse_click on the
+    # +998 option crash with "could not find position".
+    await dismiss_consent(page)
+    await asyncio.sleep(0.4)
+
     # dial code → +998 / Uzbekistan. VFS UZ uses formcontrolname="dialcode"
     # (lowercase). Try native <select> first, then the mat-select (open → maybe
     # type "998" into a search box → click the matching option).
@@ -196,18 +232,20 @@ async def main():
                 inner = await trig.query_selector('.mat-mdc-select-trigger, .mat-select-trigger')
             except Exception:
                 inner = None
-            await (inner or trig).mouse_click()
+            await safe_click(page, inner or trig)
             await asyncio.sleep(1.2)
             OPT_SEL = "mat-option, .mat-option, .mat-mdc-option, [role=option], .ng-option"
             picked = False
             for attempt in range(10):
                 for o in await page.select_all(OPT_SEL):
                     if re.search(r"\b\+?998\b|uzbek", (o.text or ""), re.I):
-                        await o.mouse_click(); picked = True; log("dialcode chose", (o.text or '').strip()[:30]); break
+                        if await safe_click(page, o):
+                            picked = True; log("dialcode chose", (o.text or '').strip()[:30])
+                        break
                 if picked:
                     break
                 if attempt == 3:  # re-click to (re)open if panel didn't appear
-                    await (inner or trig).mouse_click()
+                    await safe_click(page, inner or trig)
                 await asyncio.sleep(0.5)
             if not picked:
                 opts = [(o.text or "").strip() for o in await page.select_all(OPT_SEL)]
@@ -216,41 +254,47 @@ async def main():
         else:
             log("WARN dialcode dropdown not found")
 
-    # check all consent checkboxes — JS .click() on Material checkboxes silently
-    # fails (proved by a screenshot: boxes stayed unchecked → button disabled).
-    # Use TRUSTED clicks on each checkbox host, then VERIFY every box is ticked.
-    async def count_checked():
-        # only count VISIBLE consent checkboxes (hidden Cloudflare/form boxes inflate the count)
-        v = await jeval(page, "(()=>{const all=[...document.querySelectorAll('mat-checkbox input[type=checkbox],input[type=checkbox]')].filter(c=>{const h=c.closest('mat-checkbox')||c; return h.offsetParent!==null;}); return JSON.stringify({total:all.length, checked:all.filter(c=>c.checked).length});})()")
+    # Tick ALL 3 consents reliably. Material MDC checkboxes are flaky to click
+    # (trusted host-click landed 2/3 or 0/3 on some runs → button stayed disabled).
+    # Per visible+unchecked box: trusted-click its clickable region, then a JS
+    # native-input .click() fallback (toggles + fires change → Angular), verifying.
+    async def boxes_state():
+        v = await jeval(page, """(()=>{const arr=[...document.querySelectorAll('mat-checkbox')];
+            return JSON.stringify(arr.map((c,i)=>{const inp=c.querySelector('input[type=checkbox]'); return {i, vis:c.offsetParent!==null, chk:!!(inp&&inp.checked)};}));})()""")
         try:
             return json.loads(v)
         except Exception:
-            return {"total": 0, "checked": 0}
-    for attempt in range(5):
-        st = await count_checked()
-        if st["total"] and st["checked"] >= st["total"]:
+            return []
+    for attempt in range(8):
+        states = await boxes_state()
+        unchecked = [s["i"] for s in states if s.get("vis") and not s.get("chk")]
+        total_vis = len([s for s in states if s.get("vis")])
+        if total_vis and not unchecked:
             break
-        # trusted click each unchecked box (click the mat-checkbox host / label, not the hidden input)
-        boxes = await page.select_all("mat-checkbox, .mat-checkbox, .mat-mdc-checkbox")
-        if not boxes:
-            boxes = await page.select_all("input[type=checkbox]")
-        for bx in boxes:
-            try:
-                ck = None
+        hosts = await page.select_all("mat-checkbox")
+        for idx in unchecked:
+            if idx >= len(hosts):
+                continue
+            bx = hosts[idx]
+            # 1) trusted click on the clickable region (ripple/touch-target/label), else host
+            target = None
+            for sel in (".mdc-checkbox", ".mat-mdc-checkbox-touch-target", "label", ".mdc-checkbox__ripple"):
                 try:
-                    ck = await bx.query_selector("input[type=checkbox]")
+                    t = await bx.query_selector(sel)
+                    if t:
+                        target = t; break
                 except Exception:
-                    ck = None
-                is_checked = bool(ck and (ck.attrs.get("checked") is not None if hasattr(ck, "attrs") else False))
-                if not is_checked:
-                    await bx.scroll_into_view()
-                    await bx.mouse_click()
-                    await asyncio.sleep(0.2)
-            except Exception:
-                pass
-        await asyncio.sleep(0.4)
-    st = await count_checked()
-    log(f"consents checked: {st['checked']}/{st['total']}")
+                    pass
+            await safe_click(page, target or bx)
+            await asyncio.sleep(0.15)
+            # 2) JS native-input fallback if still unchecked
+            await jeval(page, f"(()=>{{const c=document.querySelectorAll('mat-checkbox')[{idx}]; if(c){{const i=c.querySelector('input[type=checkbox]'); if(i&&!i.checked){{i.click();}}}}}})()")
+            await asyncio.sleep(0.15)
+        await asyncio.sleep(0.3)
+    states = await boxes_state()
+    checked_vis = len([s for s in states if s.get("vis") and s.get("chk")])
+    total_vis = len([s for s in states if s.get("vis")])
+    log(f"consents checked: {checked_vis}/{total_vis}")
     await asyncio.sleep(1)
 
     # wait for Turnstile to auto-pass → Register button enables
@@ -285,35 +329,50 @@ async def main():
         return JSON.stringify({covered: el!==b && !b.contains(el), topEl: el?el.tagName.toLowerCase()+'.'+String(el.className||'').slice(0,30):'none'});})()""")
     log("overlay check before submit:", ov)
 
-    # click Register — the button is BELOW THE FOLD (elementFromPoint=null at its
-    # center → coordinate-click hit nothing → no API fired). Scroll it into view first.
+    # Submit is FLAKY: a single synthetic click sometimes fires no /user/registration
+    # POST (Angular's submit handler doesn't latch the CDP click). So RETRY, alternating
+    # a trusted coordinate-click with an in-page JS .click(), until the POST actually
+    # fires (watched via the network capture) or we navigate off /register.
+    def reg_posted():
+        return any("registration" in n.lower() or "/user/register" in n.lower() for n in net)
+
     clicked = False
-    for b in await page.select_all("button"):
-        if re.search(r"register|sign\s*up|create", (b.text or ""), re.I):
-            try:
-                await b.scroll_into_view()
-                await asyncio.sleep(0.4)
-                # re-clear any overlay that may have appeared, then verify on-screen
-                await jeval(page, "(()=>{['#onetrust-banner-sdk','.cdk-overlay-backdrop','.onetrust-pc-dark-filter'].forEach(s=>{const e=document.querySelector(s);if(e)e.remove();});})()")
-                onscreen = await jeval(page, """(()=>{const b=[...document.querySelectorAll('button')].find(x=>/register|sign\\s*up|create/i.test(x.innerText||'')&&x.offsetParent);
-                    if(!b)return 'no-btn'; const r=b.getBoundingClientRect(); const el=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
-                    return JSON.stringify({onScreen: !!(el&&(el===b||b.contains(el)||b.contains(el)||el.contains(b))), topEl: el?el.tagName.toLowerCase():'null', top: Math.round(r.top), vh: window.innerHeight});})()""")
-                log("button after scroll:", onscreen)
-                await b.mouse_click(); clicked = True; log("clicked Register:", (b.text or '').strip()[:20]); break
-            except Exception as e:
-                log("click err:", e)
-    await asyncio.sleep(6)
+    submitted = False
+    for attempt in range(6):
+        # clear any late overlay each time
+        await jeval(page, "(()=>{['#onetrust-banner-sdk','.cdk-overlay-backdrop','.onetrust-pc-dark-filter'].forEach(s=>{const e=document.querySelector(s);if(e)e.remove();});})()")
+        if attempt % 2 == 0:
+            # trusted coordinate click on the (scrolled-in) Register button
+            tb = None
+            for b in await page.select_all("button"):
+                if re.search(r"register|sign\s*up|create", (b.text or ""), re.I):
+                    tb = b; break
+            if tb and await safe_click(page, tb):
+                clicked = True
+        else:
+            # in-page JS click fallback (fires Angular's handler directly)
+            did = await jeval(page, "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/register|sign\\s*up|create/i.test(x.innerText||'')&&!x.disabled&&x.offsetParent); if(b){b.click();return 1;} return 0;})()")
+            if did:
+                clicked = True
+        await asyncio.sleep(3)
+        url = await jeval(page, "location.href") or ""
+        if reg_posted() or "/register" not in url or bool(await jeval(page, "/success|verification|check your email|activate/i.test(document.body.innerText||'')")):
+            submitted = True; break
+        log(f"submit attempt {attempt + 1}: no POST yet (url=…/{url.rsplit('/', 1)[-1]}), retrying")
     url = await jeval(page, "location.href") or ""
-    errs = await jeval(page, """(()=>[...document.querySelectorAll('mat-error,.mat-error,[class*="error" i]')].filter(e=>e.offsetParent&&(e.innerText||'').trim()).map(e=>(e.innerText||'').trim().slice(0,60)).slice(0,4))()""")
-    submitted = "/register" not in url or bool(await jeval(page, "/success|verification|check your email|activate/i.test(document.body.innerText||'')"))
+    if reg_posted():
+        submitted = True
     log("post-register url:", url, "| clicked:", clicked, "| submittedSignal:", submitted)
     log("NETWORK (register/user/lift-api calls):", net if net else "(NONE — click fired no API)")
 
-    # activation via Mailsac
+    # activation via Mailsac — the ARRIVAL of the VFS activation email is the
+    # AUTHORITATIVE proof of registration. The in-page network capture / URL check
+    # are unreliable (missed a confirmed POST → false "registered:false"), so we
+    # trust the email: if it arrives, registration definitely succeeded.
     activated = False
+    link = None
     if MAILSAC_KEY:
         log("polling Mailsac for activation email…")
-        link = None
         for _ in range(20):  # ~2 min
             link = mailsac_link(email)
             if link:
@@ -321,18 +380,29 @@ async def main():
             await asyncio.sleep(6)
         if link:
             log("activation link:", link[:70], "…")
+            log("REGISTRATION CONFIRMED via activation email" + ("" if submitted else " (network capture had missed the POST)"))
             try:
                 tab = await browser.get(link, new_tab=True)
                 await asyncio.sleep(8)
-                txt = await jeval(tab, "document.body.innerText.slice(0,200)") or ""
-                activated = not re.search(r"invalid|expired|error", txt, re.I)
-                log("activation page:", txt.replace(chr(10), " ")[:120])
+                txt = await jeval(tab, "document.body.innerText.slice(0,300)") or ""
+                aurl = await jeval(tab, "location.href") or ""
+                low = txt.lower()
+                if re.search(r"invalid|expired|link has|not (?:been )?activat|error activat", low):
+                    activated = False  # explicit failure
+                elif re.search(r"activat(?:ed|ion successful)|verified|success", low) or "/login" in aurl:
+                    # VFS redirects to the Sign-in page after a successful activation
+                    activated = True
+                else:
+                    activated = False
+                log(f"activation page (url=…/{aurl.rsplit('/', 1)[-1].split('?')[0]}):", txt.replace(chr(10), " ")[:120])
             except Exception as e:
                 log("activation visit err:", e)
         else:
             log("no activation email found in Mailsac (register may not have submitted)")
 
-    out = {"email": email, "password": password, "phone": "998" + phone, "registered": submitted, "activated": activated}
+    # registered is true if EITHER the in-page signal OR (authoritatively) the email arrived
+    registered = bool(submitted or link)
+    out = {"email": email, "password": password, "phone": "998" + phone, "registered": registered, "activated": activated}
     (SHOTS.parent / "register-out.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     log("RESULT:", json.dumps(out))
     log("done — browser open 10s")

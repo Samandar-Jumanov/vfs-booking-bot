@@ -76,7 +76,7 @@ function log(...a: unknown[]) {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Spawn register_spike.py, capture stdout, parse the final `[REG] RESULT: {...}` line. */
-function runSpike(): RegResult | null {
+function runSpike(): { result: RegResult | null; crashed: boolean } {
   if (!process.env.MAILSAC_API_KEY) {
     log('WARN MAILSAC_API_KEY not set — account will register but not auto-activate (status PENDING)');
   }
@@ -88,16 +88,17 @@ function runSpike(): RegResult | null {
   const out = `${res.stdout ?? ''}${res.stderr ?? ''}`;
   // echo the spike's own log lines so the operator sees progress
   out.split(/\r?\n/).filter(Boolean).forEach((l) => console.log('  ' + l));
+  const crashed = /Traceback \(most recent call last\)|SyntaxError|ModuleNotFoundError/.test(out);
   const m = out.match(/\[REG\]\s+RESULT:\s+(\{.*\})\s*$/m);
   if (!m) {
-    log('no RESULT line from register_spike — treating as failure');
-    return null;
+    log(crashed ? 'register_spike CRASHED (Python traceback) — not a throttle' : 'no RESULT line from register_spike');
+    return { result: null, crashed };
   }
   try {
-    return JSON.parse(m[1]) as RegResult;
+    return { result: JSON.parse(m[1]) as RegResult, crashed };
   } catch (e) {
     log('could not parse RESULT json:', (e as Error).message);
-    return null;
+    return { result: null, crashed };
   }
 }
 
@@ -140,8 +141,13 @@ async function registerOne(label: string): Promise<RegOutcome> {
     return 'ok';
   }
   log(`registering ${label}…`);
-  const r = runSpike();
-  if (!r || (!r.registered && r.error === 'form_not_rendered')) {
+  const { result: r, crashed } = runSpike();
+  if (crashed) {
+    // a Python bug, not a VFS throttle — don't trigger a 45-min cooldown
+    log('register_spike crashed — treating as a (recoverable) failure, no throttle backoff');
+    return 'failed';
+  }
+  if (!r || r.error === 'form_not_rendered') {
     log('THROTTLED — VFS withheld the form. Backing off (retry after a 30-60min cooldown).');
     return 'throttled';
   }
