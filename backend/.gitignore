@@ -1,0 +1,3 @@
+
+# orchestrator worker secrets (local only)
+.env.worker
