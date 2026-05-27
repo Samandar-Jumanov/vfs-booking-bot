@@ -153,6 +153,14 @@ pipelineRouter.post(
         severity: body.status === 'fail' ? 'CRITICAL' : 'INFO',
       });
 
+      // Feed the heartbeat so its "last check" timestamp + state reflect REAL
+      // monitoring (the worker does the checks; the backend heartbeat only knew
+      // about them via this). Idle backend → no recordCheck → heartbeat stays silent.
+      if (body.step === 'monitoring' || body.step === 'slot_found') {
+        const { heartbeat } = await import('@modules/notifications/heartbeat');
+        heartbeat.recordCheck(body.step === 'slot_found');
+      }
+
       // ── Step 4: Fire Telegram notifications for key steps ────────────────────
       if (body.step === 'slot_found' || (body.step === 'monitoring' && body.slotId)) {
         await dispatchNotification({

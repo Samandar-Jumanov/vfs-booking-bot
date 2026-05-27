@@ -48,6 +48,7 @@ describe('HeartbeatScheduler', () => {
     const getCount = jest.fn().mockResolvedValue(3);
     const scheduler = new HeartbeatScheduler(20 * 60 * 1000, getCount);
 
+    scheduler.recordCheck(false); // heartbeat only fires after a recent check
     scheduler.start();
     scheduler.start(); // second call must be a no-op
 
@@ -68,6 +69,7 @@ describe('HeartbeatScheduler', () => {
     const getCount = jest.fn().mockResolvedValue(7);
     const scheduler = new HeartbeatScheduler(20 * 60 * 1000, getCount);
 
+    scheduler.recordCheck(false);
     await scheduler.fireNow();
 
     expect(mockSendTelegram).toHaveBeenCalledTimes(1);
@@ -113,9 +115,20 @@ describe('HeartbeatScheduler', () => {
     const getCount = jest.fn().mockResolvedValue(10);
     const scheduler = new HeartbeatScheduler(20 * 60 * 1000, getCount);
 
+    scheduler.recordCheck(false);
     await scheduler.fireNow();
 
     expect(getCount).toHaveBeenCalledTimes(1);
+  });
+
+  // ── idle: no recent check → heartbeat stays silent (no "--:--" spam) ──────
+  it('fireNow() does NOT send when no slot-check has been recorded (idle)', async () => {
+    const getCount = jest.fn().mockResolvedValue(23);
+    const scheduler = new HeartbeatScheduler(20 * 60 * 1000, getCount);
+
+    await scheduler.fireNow(); // no recordCheck → idle → skip
+
+    expect(mockSendTelegram).not.toHaveBeenCalled();
   });
 
   // ── 7. Timer interval fires fireNow automatically ─────────────────────────
@@ -124,6 +137,7 @@ describe('HeartbeatScheduler', () => {
     const getCount = jest.fn().mockResolvedValue(1);
     const scheduler = new HeartbeatScheduler(20 * 60 * 1000, getCount);
 
+    scheduler.recordCheck(false); // recent check so the interval fire isn't skipped as idle
     scheduler.start();
     jest.advanceTimersByTime(20 * 60 * 1000);
 
@@ -163,6 +177,7 @@ describe('HeartbeatScheduler', () => {
     const getCount = jest.fn().mockResolvedValue(3);
     const scheduler = new HeartbeatScheduler(20 * 60 * 1000, getCount);
 
+    scheduler.recordCheck(false); // recent check so we reach the no-token branch (not the idle skip)
     await scheduler.fireNow();
 
     expect(mockSendTelegram).not.toHaveBeenCalled();

@@ -61,6 +61,15 @@ export class HeartbeatScheduler {
 
   /** Immediately send a heartbeat message (exposed for testing and the manual test script). */
   async fireNow(): Promise<void> {
+    // Only narrate while actually monitoring: skip if no slot-check has been
+    // recorded recently. Prevents idle spam + the "--:--" placeholder when no
+    // run is active (the timer fires every interval regardless).
+    const stale = !this.lastCheckAt || Date.now() - this.lastCheckAt.getTime() > this.intervalMs * 2;
+    if (stale) {
+      console.info('[heartbeat] idle (no recent slot-check) — skipping heartbeat');
+      return;
+    }
+
     if (!env.TELEGRAM_BOT_TOKEN) {
       // Log to console only — no error thrown.
       const count = await this.getActiveCount().catch(() => 0);
