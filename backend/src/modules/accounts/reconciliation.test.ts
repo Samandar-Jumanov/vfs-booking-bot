@@ -116,37 +116,19 @@ describe('tryActivate()', () => {
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
-  it('returns activated and updates DB when HTTP visit returns 200', async () => {
+  it('FAILS LOUDLY (no activation) when the extension is offline', async () => {
+    // extension offline (default mock) → must NOT fake-activate via HTTP fallback
     mockFindUnique.mockResolvedValueOnce({ id: 'acc-1', email: 'a@mailsac.com' });
     mockFetchLink.mockResolvedValueOnce('https://visa.vfsglobal.com/uzb/en/lva/activateemail?token=abc');
-    mockVisitLink.mockResolvedValueOnce({ status: 200 });
-
-    const result = await tryActivate('acc-1');
-
-    expect(result).toBe('activated');
-    expect(mockUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'acc-1' },
-        data: {
-          status: 'ACTIVE',
-          lifecycleState: 'ACTIVE',
-        },
-      }),
-    );
-  });
-
-  it('returns failed when HTTP visit returns 500', async () => {
-    mockFindUnique.mockResolvedValueOnce({ id: 'acc-1', email: 'a@mailsac.com' });
-    mockFetchLink.mockResolvedValueOnce('https://visa.vfsglobal.com/activateemail?token=abc');
-    mockVisitLink.mockResolvedValueOnce({ status: 500 });
 
     const result = await tryActivate('acc-1');
 
     expect(result).toBe('failed');
     expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockVisitLink).not.toHaveBeenCalled(); // HTTP fallback removed entirely
   });
 
-  it('uses extension path when operator is live, skips HTTP fallback on success', async () => {
+  it('activates via the extension when the operator is live', async () => {
     process.env.OPERATOR_USER_ID = 'operator-1';
     mockIsExtensionLive.mockReturnValue(true);
     mockFindUnique.mockResolvedValueOnce({ id: 'acc-1', email: 'a@mailsac.com' });
@@ -159,7 +141,6 @@ describe('tryActivate()', () => {
     expect(mockTriggerActivation).toHaveBeenCalledWith(
       'https://visa.vfsglobal.com/activateemail?token=abc',
     );
-    // HTTP fallback should NOT be called when extension succeeds
     expect(mockVisitLink).not.toHaveBeenCalled();
     expect(mockUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -168,19 +149,18 @@ describe('tryActivate()', () => {
     );
   });
 
-  it('falls back to HTTP when extension path fails', async () => {
+  it('returns failed (no HTTP fallback) when the extension visit fails', async () => {
     process.env.OPERATOR_USER_ID = 'operator-1';
     mockIsExtensionLive.mockReturnValue(true);
     mockFindUnique.mockResolvedValueOnce({ id: 'acc-1', email: 'a@mailsac.com' });
     mockFetchLink.mockResolvedValueOnce('https://visa.vfsglobal.com/activateemail?token=abc');
     mockTriggerActivation.mockResolvedValueOnce({ success: false, reason: 'TIMEOUT' });
-    mockVisitLink.mockResolvedValueOnce({ status: 302 });
 
     const result = await tryActivate('acc-1');
 
-    expect(result).toBe('activated');
-    expect(mockVisitLink).toHaveBeenCalled();
-    expect(mockUpdate).toHaveBeenCalled();
+    expect(result).toBe('failed');
+    expect(mockVisitLink).not.toHaveBeenCalled(); // no fake fallback
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
 
@@ -204,16 +184,18 @@ describe('reconcilePending()', () => {
     expect(mockFetchLink).not.toHaveBeenCalled();
   });
 
-  it('live mode calls tryActivate for each candidate', async () => {
+  it('live mode calls tryActivate for each candidate (extension live)', async () => {
+    process.env.OPERATOR_USER_ID = 'operator-1';
+    mockIsExtensionLive.mockReturnValue(true);
     mockFindMany.mockResolvedValueOnce([PENDING_CANDIDATE, PENDING_CANDIDATE_2]);
-    // First candidate: activation succeeds via HTTP
+    // First candidate: activation succeeds via the extension
     mockFindUnique
       .mockResolvedValueOnce({ id: PENDING_CANDIDATE.id, email: PENDING_CANDIDATE.email })
       .mockResolvedValueOnce({ id: PENDING_CANDIDATE_2.id, email: PENDING_CANDIDATE_2.email });
     mockFetchLink
       .mockResolvedValueOnce('https://visa.vfsglobal.com/activateemail?token=abc')
       .mockResolvedValueOnce(null); // second candidate has no link
-    mockVisitLink.mockResolvedValueOnce({ status: 200 });
+    mockTriggerActivation.mockResolvedValueOnce({ success: true });
 
     const report = await reconcilePending(false);
 

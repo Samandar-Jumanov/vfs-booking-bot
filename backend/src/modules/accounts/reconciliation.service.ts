@@ -11,7 +11,6 @@ import { prisma } from '@config/database';
 import { AccountStatus, LifecycleStateEnum } from '@prisma/client';
 import {
   fetchEmailVerificationLink,
-  visitActivationLink,
 } from '@modules/accounts/accountAutoRegister.service';
 import {
   isExtensionLive,
@@ -74,34 +73,25 @@ export async function tryActivate(
   const link = await fetchEmailVerificationLink(account.email).catch(() => null);
   if (!link) return 'link_missing';
 
-  // Step 2: visit the activation link.
-  // Prefer the extension path (real UZ browser) when the operator is live.
+  // Step 2: visit the activation link — EXTENSION ONLY (fail-loud).
+  // The activation link must open in the operator's real, Cloudflare-cleared Chrome.
+  // The old HTTP/BrightData fallback was removed: BrightData can't reach vfsglobal
+  // (returns status 0) and "succeeding" on a non-2xx produced fake activations
+  // (ACTIVE in our DB, inactive at VFS). If the extension is offline we FAIL LOUDLY
+  // and leave the account PENDING rather than pretend.
   const operatorUserId = process.env.OPERATOR_USER_ID;
-  let activationOk = false;
-
-  if (operatorUserId && isExtensionLive(operatorUserId)) {
-    try {
-      const extResult = await triggerActivationVisit(link);
-      if (extResult.success) {
-        activationOk = true;
-      }
-      // If extension path failed, fall through to HTTP fallback below.
-    } catch {
-      // Fall through to HTTP fallback.
-    }
+  if (!operatorUserId || !isExtensionLive(operatorUserId)) {
+    console.warn(`[reconcile] extension offline — cannot activate ${account.email}; leaving PENDING`);
+    return 'failed';
   }
 
-  if (!activationOk) {
-    // HTTP fallback — routes through BrightData UZ proxy if configured.
-    try {
-      const resp = await visitActivationLink(link);
-      // 200-399 = success (200 OK, 302 redirect to dashboard, etc.)
-      if (resp.status >= 200 && resp.status < 400) {
-        activationOk = true;
-      }
-    } catch {
-      return 'failed';
-    }
+  let activationOk = false;
+  try {
+    const extResult = await triggerActivationVisit(link);
+    activationOk = extResult.success === true;
+  } catch (e) {
+    console.warn(`[reconcile] activation visit threw for ${account.email}: ${(e as Error).message}`);
+    return 'failed';
   }
 
   if (!activationOk) return 'failed';
