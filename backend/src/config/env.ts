@@ -115,6 +115,10 @@ const envSchema = z.object({
   // Heartbeat: how often (ms) to send the "watching" Telegram digest.
   // Default 20 minutes — fires at most once per interval, never per slot check.
   HEARTBEAT_INTERVAL_MS: z.coerce.number().default(20 * 60 * 1000),
+
+  // Shared secret for the UZ-machine orchestrator worker posting milestones to
+  // /api/pipeline/event. Optional — if unset all requests are accepted (dev mode).
+  WORKER_TOKEN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

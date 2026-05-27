@@ -13,6 +13,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import crypto from 'crypto';
 import { requireAuth } from '@middleware/auth.middleware';
 import { prisma } from '@config/database';
 import { reconcilePending, type ReconciliationReport } from '@modules/accounts/reconciliation.service';
@@ -65,6 +66,7 @@ interface ScenarioAccountItem {
 interface ScenarioStartResponse {
   triggered: boolean;
   reason?: string;
+  runId?: string;
   registrationsQueued?: number;
   reconciliation?: ReconciliationReport;
   accounts?: {
@@ -74,6 +76,15 @@ interface ScenarioStartResponse {
     spare: number;
     items: ScenarioAccountItem[];
   };
+}
+
+const SCENARIO_RUN_KEY = 'scenario_run';
+
+interface ScenarioRunMeta {
+  runId: string;
+  requestedAt: string;
+  poolMinSpare: number;
+  status: string;
 }
 
 scenarioRouter.post(
@@ -91,6 +102,20 @@ scenarioRouter.post(
       // ── Parse body ─────────────────────────────────────────────────────────
       const body = startScenarioSchema.parse(req.body ?? {});
       const { poolMinSpare } = body;
+
+      // ── Generate run ID + persist run metadata ─────────────────────────────
+      const runId = crypto.randomUUID();
+      const runMeta: ScenarioRunMeta = {
+        runId,
+        requestedAt: new Date().toISOString(),
+        poolMinSpare,
+        status: 'requested',
+      };
+      await prisma.settings.upsert({
+        where: { key: SCENARIO_RUN_KEY },
+        update: { value: runMeta as unknown as Parameters<typeof prisma.settings.upsert>[0]['update']['value'] },
+        create: { key: SCENARIO_RUN_KEY, value: runMeta as unknown as Parameters<typeof prisma.settings.create>[0]['data']['value'] },
+      });
 
       // ── Step 1: Query current pool state ───────────────────────────────────
       const [spareActive, totalActive, pendingCount] = await Promise.all([
@@ -148,6 +173,7 @@ scenarioRouter.post(
 
       res.status(200).json({
         triggered: true,
+        runId,
         registrationsQueued,
         reconciliation,
         accounts: {
@@ -158,6 +184,101 @@ scenarioRouter.post(
           items,
         },
       });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── GET /api/scenario/status ──────────────────────────────────────────────────
+/**
+ * Returns the current scenario run metadata plus per-account pipeline state.
+ * Query param: runId (optional — ignored server-side, returned for client correlation)
+ *
+ * The pipelineEvent table may not exist in older deployments — any error reading
+ * it is swallowed and lastStep/lastStepAt/lastError are null for all accounts.
+ */
+
+interface ScenarioStatusAccountItem {
+  id: string;
+  email: string;
+  status: string;
+  lifecycleState: string;
+  pollingRole: string;
+  lastAttemptAt: Date | null;
+  cooldownUntil: Date | null;
+  lastStep: string | null;
+  lastStepAt: Date | null;
+  lastError: string | null;
+}
+
+interface ScenarioStatusResponse {
+  run: ScenarioRunMeta | null;
+  accounts: ScenarioStatusAccountItem[];
+}
+
+scenarioRouter.get(
+  '/status',
+  requireAuth,
+  async (req: Request, res: Response<ScenarioStatusResponse>, next: NextFunction): Promise<void> => {
+    try {
+      // ── Read run metadata ──────────────────────────────────────────────────
+      const runRow = await prisma.settings.findUnique({ where: { key: SCENARIO_RUN_KEY } });
+      const run = runRow ? (runRow.value as unknown as ScenarioRunMeta) : null;
+
+      // ── Read all accounts ──────────────────────────────────────────────────
+      const accountRows = await prisma.vfsAccount.findMany({
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          email: true,
+          status: true,
+          lifecycleState: true,
+          pollingRole: true,
+          lastAttemptAt: true,
+          cooldownUntil: true,
+        },
+      });
+
+      // ── Try to get last PipelineEvent per account ──────────────────────────
+      // Swallowed if the pipelineEvent table hasn't been migrated yet.
+      type EventRow = { accountId: string | null; action: string; createdAt: Date; error: string | null };
+      const eventsByAccount = new Map<string, EventRow>();
+
+      try {
+        const events = await (prisma as any).pipelineEvent.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+          select: { accountId: true, action: true, createdAt: true, error: true },
+        }) as EventRow[];
+
+        for (const ev of events) {
+          if (ev.accountId && !eventsByAccount.has(ev.accountId)) {
+            eventsByAccount.set(ev.accountId, ev);
+          }
+        }
+      } catch {
+        // pipelineEvent table not yet migrated — degrade gracefully.
+      }
+
+      // ── Build response ─────────────────────────────────────────────────────
+      const accounts: ScenarioStatusAccountItem[] = accountRows.map((a) => {
+        const latestEvent = eventsByAccount.get(a.id);
+        return {
+          id: a.id,
+          email: a.email,
+          status: a.status,
+          lifecycleState: a.lifecycleState,
+          pollingRole: a.pollingRole,
+          lastAttemptAt: a.lastAttemptAt,
+          cooldownUntil: a.cooldownUntil,
+          lastStep: latestEvent?.action ?? null,
+          lastStepAt: latestEvent?.createdAt ?? null,
+          lastError: latestEvent?.error ?? null,
+        };
+      });
+
+      res.status(200).json({ run, accounts });
     } catch (err) {
       next(err);
     }

@@ -29,6 +29,14 @@ MAILSAC_KEY = os.environ.get("MAILSAC_API_KEY", "")
 SHOTS = pathlib.Path(__file__).parent / "shots"
 SHOTS.mkdir(exist_ok=True)
 
+WORKER_BRIDGED = os.environ.get("WORKER_BRIDGED") == "1"
+
+
+def milestone(step, **kw):
+    """Print a machine-readable MILESTONE line for the orchestrator worker to parse."""
+    data = {"step": step, **kw}
+    print(f"MILESTONE {json.dumps(data)}", flush=True)
+
 
 def log(*a):
     print("[REG]", *a, flush=True)
@@ -193,6 +201,7 @@ async def main():
         out = {"email": email, "password": password, "phone": "998" + phone, "registered": False, "activated": False, "error": "form_not_rendered"}
         (SHOTS.parent / "register-out.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
         log("RESULT:", json.dumps(out))
+        milestone("failed", error="form_not_rendered", email=email)
         await asyncio.sleep(2); browser.stop(); return
 
     await fill(page, ['input[formcontrolname="emailid"]', 'input[name="emailid"]', 'input[type="email"]'], email, "email")
@@ -392,6 +401,7 @@ async def main():
                 elif re.search(r"activat(?:ed|ion successful)|verified|success", low) or "/login" in aurl:
                     # VFS redirects to the Sign-in page after a successful activation
                     activated = True
+                    milestone("activation_visited", email=email)
                 else:
                     activated = False
                 log(f"activation page (url=…/{aurl.rsplit('/', 1)[-1].split('?')[0]}):", txt.replace(chr(10), " ")[:120])
@@ -402,6 +412,10 @@ async def main():
 
     # registered is true if EITHER the in-page signal OR (authoritatively) the email arrived
     registered = bool(submitted or link)
+    if registered:
+        milestone("registered", email=email, password="***")
+    else:
+        milestone("failed", error="registration_not_confirmed", email=email)
     out = {"email": email, "password": password, "phone": "998" + phone, "registered": registered, "activated": activated}
     (SHOTS.parent / "register-out.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     log("RESULT:", json.dumps(out))
@@ -412,4 +426,8 @@ async def main():
 
 if __name__ == "__main__":
     import nodriver as uc
-    uc.loop().run_until_complete(main())
+    try:
+        uc.loop().run_until_complete(main())
+    except Exception as _e:
+        milestone("failed", error=str(_e))
+        raise

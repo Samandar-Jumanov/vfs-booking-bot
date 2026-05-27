@@ -72,6 +72,7 @@ interface ScenarioAccountItem {
 interface ScenarioResult {
   triggered: boolean;
   reason?: string;
+  runId?: string;
   registrationsQueued?: number;
   reconciliation?: {
     total: number;
@@ -87,6 +88,30 @@ interface ScenarioResult {
     spare: number;
     items: ScenarioAccountItem[];
   };
+}
+
+interface ScenarioStatusRun {
+  runId: string;
+  requestedAt: string;
+  status: string;
+}
+
+interface ScenarioStatusAccount {
+  id: string;
+  email: string;
+  status: string;
+  lifecycleState: string;
+  pollingRole: string;
+  lastAttemptAt: string | null;
+  cooldownUntil: string | null;
+  lastStep?: string;
+  lastStepAt?: string | null;
+  lastError?: string | null;
+}
+
+interface ScenarioStatusResponse {
+  run?: ScenarioStatusRun;
+  accounts: ScenarioStatusAccount[];
 }
 
 type WizardStep = 'explain' | 'open' | 'paste' | 'inject';
@@ -157,6 +182,14 @@ function validateCookieJson(text: string) {
   }
 }
 
+function lifecycleBadgeClass(state: string): string {
+  if (['WARM', 'ACTIVE'].includes(state)) return 'bg-green-500/20 text-green-300 border border-green-500/30';
+  if (['LOGGING_IN', 'MONITORING'].includes(state)) return 'bg-blue-500/20 text-blue-300 border border-blue-500/30';
+  if (['REGISTERING', 'ACTIVATING', 'PENDING_ACTIVATION'].includes(state)) return 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30';
+  if (['RESTRICTED', 'BLOCKED', 'REGISTER_FAILED'].includes(state)) return 'bg-red-500/20 text-red-300 border border-red-500/30';
+  return 'bg-zinc-500/20 text-zinc-300 border border-zinc-500/30';
+}
+
 function messageFor(entry: LogEntry) {
   return entry.message || entry.eventType;
 }
@@ -185,6 +218,7 @@ export default function DashboardPage() {
   const now = useTicker(1000);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [wizardDestination, setWizardDestination] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [slotToast, setSlotToast] = useState<{ destination?: string; date?: string; nonce: number } | null>(null);
   const [titleFlashActive, setTitleFlashActive] = useState(false);
@@ -234,6 +268,16 @@ export default function DashboardPage() {
       const response = await api.post<ScenarioResult>('/scenario/start', { poolMinSpare: 2 });
       return response.data;
     },
+    onSuccess: (data) => {
+      if (data.runId) setActiveRunId(data.runId);
+    },
+  });
+
+  const { data: scenarioStatus } = useQuery<ScenarioStatusResponse>({
+    queryKey: ['scenario-status', activeRunId],
+    queryFn: () => api.get<ScenarioStatusResponse>(`/scenario/status${activeRunId ? `?runId=${activeRunId}` : ''}`).then((r) => r.data),
+    refetchInterval: 4000,
+    enabled: activeRunId !== null,
   });
 
   const monitorCards = useMemo<MonitorCardModel[]>(() => {
@@ -408,59 +452,118 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {scenarioMutation.isSuccess && scenarioMutation.data && (
-              <>
-                {!scenarioMutation.data.triggered ? (
-                  <div className="rounded-lg border border-zinc-500/30 bg-zinc-500/10 p-3 text-sm text-zinc-400">
-                    Scenario disabled — set <code className="font-mono">SCENARIO_ENABLED=true</code> in the backend to enable it.
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
-                      Triggered: <strong>{scenarioMutation.data.registrationsQueued ?? 0}</strong> registration(s) queued,{' '}
-                      <strong>{scenarioMutation.data.reconciliation?.activated ?? 0}</strong> account(s) activated.
-                    </div>
+            {scenarioMutation.isSuccess && scenarioMutation.data && !scenarioMutation.data.triggered && scenarioMutation.data.reason === 'SCENARIO_DISABLED' && (
+              <div className="rounded-lg border border-zinc-500/30 bg-zinc-500/10 p-3 text-sm text-zinc-400">
+                Scenario disabled — set <code className="font-mono">SCENARIO_ENABLED=true</code> on the backend to enable.
+              </div>
+            )}
 
-                    {scenarioMutation.data.accounts && scenarioMutation.data.accounts.items.length > 0 && (
-                      <div className="overflow-x-auto rounded-lg border border-white/10">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="border-b border-white/10 bg-accent/40 text-left">
-                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Email</th>
-                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Status</th>
-                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Lifecycle</th>
-                              <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Role</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {scenarioMutation.data.accounts.items.map((item) => (
-                              <tr key={item.id} className="border-b border-white/5 last:border-0 hover:bg-accent/20">
-                                <td className="px-3 py-2 font-mono text-[11px]">
-                                  {item.email.length > 28 ? `${item.email.slice(0, 14)}…${item.email.slice(-10)}` : item.email}
-                                </td>
-                                <td className="px-3 py-2">
-                                  <span className={cn(
-                                    'rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest',
-                                    item.status === 'ACTIVE' && 'bg-green-500/15 text-green-400',
-                                    item.status === 'PENDING' && 'bg-amber-500/15 text-amber-400',
-                                    item.status === 'BLOCKED' && 'bg-red-500/15 text-red-400',
-                                    item.status === 'COOLDOWN' && 'bg-blue-500/15 text-blue-400',
-                                    !['ACTIVE','PENDING','BLOCKED','COOLDOWN'].includes(item.status) && 'bg-zinc-500/15 text-zinc-400',
-                                  )}>
-                                    {item.status}
-                                  </span>
-                                </td>
-                                <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.lifecycleState}</td>
-                                <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.pollingRole}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+            {activeRunId && scenarioStatus && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                  <span className="font-mono bg-accent/50 rounded px-2 py-0.5">Run ID: {scenarioStatus.run?.runId ?? activeRunId}</span>
+                  {scenarioStatus.run?.requestedAt && (
+                    <span>Started {relativeTime(scenarioStatus.run.requestedAt)}</span>
+                  )}
+                  {scenarioStatus.run?.status && (
+                    <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-blue-300 font-black uppercase tracking-widest">
+                      {scenarioStatus.run.status}
+                    </span>
+                  )}
+                </div>
+                {scenarioStatus.accounts.length > 0 && (
+                  <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-white/10 bg-accent/40 text-left">
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Email</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Status</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Lifecycle</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Role</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Last Step</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Updated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {scenarioStatus.accounts.map((item) => (
+                          <tr key={item.id} className="border-b border-white/5 last:border-0 hover:bg-accent/20">
+                            <td className="px-3 py-2 font-mono text-[11px]">
+                              {item.email.length > 28 ? `${item.email.slice(0, 14)}…${item.email.slice(-10)}` : item.email}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={cn(
+                                'rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest',
+                                item.status === 'ACTIVE' && 'bg-green-500/15 text-green-400',
+                                item.status === 'PENDING' && 'bg-amber-500/15 text-amber-400',
+                                item.status === 'BLOCKED' && 'bg-red-500/15 text-red-400',
+                                item.status === 'COOLDOWN' && 'bg-blue-500/15 text-blue-400',
+                                !['ACTIVE', 'PENDING', 'BLOCKED', 'COOLDOWN'].includes(item.status) && 'bg-zinc-500/15 text-zinc-400',
+                              )}>
+                                {item.status}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest', lifecycleBadgeClass(item.lifecycleState))}>
+                                {item.lifecycleState}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.pollingRole}</td>
+                            <td className="px-3 py-2 text-[11px] text-muted-foreground">{item.lastStep ?? '—'}</td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{relativeTime(item.lastStepAt)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
-              </>
+              </div>
+            )}
+
+            {scenarioMutation.isSuccess && scenarioMutation.data && scenarioMutation.data.triggered && !activeRunId && (
+              <div className="space-y-3">
+                <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-200">
+                  Triggered: <strong>{scenarioMutation.data.registrationsQueued ?? 0}</strong> registration(s) queued,{' '}
+                  <strong>{scenarioMutation.data.reconciliation?.activated ?? 0}</strong> account(s) activated.
+                </div>
+
+                {scenarioMutation.data.accounts && scenarioMutation.data.accounts.items.length > 0 && (
+                  <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-white/10 bg-accent/40 text-left">
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Email</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Status</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Lifecycle</th>
+                          <th className="px-3 py-2 font-black uppercase tracking-widest text-muted-foreground">Role</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {scenarioMutation.data.accounts.items.map((item) => (
+                          <tr key={item.id} className="border-b border-white/5 last:border-0 hover:bg-accent/20">
+                            <td className="px-3 py-2 font-mono text-[11px]">
+                              {item.email.length > 28 ? `${item.email.slice(0, 14)}…${item.email.slice(-10)}` : item.email}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={cn(
+                                'rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest',
+                                item.status === 'ACTIVE' && 'bg-green-500/15 text-green-400',
+                                item.status === 'PENDING' && 'bg-amber-500/15 text-amber-400',
+                                item.status === 'BLOCKED' && 'bg-red-500/15 text-red-400',
+                                item.status === 'COOLDOWN' && 'bg-blue-500/15 text-blue-400',
+                                !['ACTIVE','PENDING','BLOCKED','COOLDOWN'].includes(item.status) && 'bg-zinc-500/15 text-zinc-400',
+                              )}>
+                                {item.status}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.lifecycleState}</td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">{item.pollingRole}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             )}
           </motion.div>
         </section>

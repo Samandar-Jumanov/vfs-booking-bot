@@ -42,12 +42,22 @@ SUBCAT = re.compile(os.environ.get("SUBCAT", r"work\s*\(?\s*(?:visa\s*d|d\s*visa
 SHOTS = pathlib.Path(__file__).parent / "shots"
 SHOTS.mkdir(exist_ok=True)
 
+WORKER_BRIDGED = os.environ.get("WORKER_BRIDGED") == "1"
+
+
+def milestone(step, **kw):
+    """Print a machine-readable MILESTONE line for the orchestrator worker to parse."""
+    data = {"step": step, **kw}
+    print(f"MILESTONE {json.dumps(data)}", flush=True)
+
 
 def log(*a):
     print("[PIPE]", *a, flush=True)
 
 
 def telegram(msg):
+    if WORKER_BRIDGED:
+        log("(bridged, skipping telegram):", msg); return
     tok = os.environ.get("TELEGRAM_BOT_TOKEN"); chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not tok or not chat:
         log("(telegram not configured)", msg); return
@@ -356,12 +366,16 @@ async def main():
     page = await browser.get(LOGIN_URL)
 
     if not await do_login(browser, page):
-        log("RESULT: LOGIN FAILED"); await asyncio.sleep(5); browser.stop(); return
-    log("LOGIN OK ✅")
+        log("RESULT: LOGIN FAILED")
+        milestone("failed", email=EMAIL, error="login_failed")
+        await asyncio.sleep(5); browser.stop(); return
+    log("LOGIN OK")
+    milestone("logged_in", email=EMAIL)
     telegram(f"[bot] logged in {EMAIL}, monitoring Work D-visa slots…")
 
     await enter_wizard(page)
     await shot(page, "pipe_wizard")
+    milestone("monitoring", email=EMAIL)
 
     # Monitor loop
     attempt = 0
@@ -370,6 +384,7 @@ async def main():
         log(f"--- check #{attempt} ---")
         slot = await select_route(page)
         if slot:
+            milestone("slot_found", email=EMAIL, slotId=slot)
             telegram(f"[bot] SLOT FOUND for {EMAIL}: {slot}")
             if BOOK_DRY_RUN:
                 booked = await book(page, slot)
@@ -377,6 +392,10 @@ async def main():
                 break
             elif BOOK_ENABLED:
                 booked = await book(page, slot)
+                if booked:
+                    milestone("booked", email=EMAIL, slotId=slot)
+                else:
+                    milestone("failed", email=EMAIL, error="booking_failed", slotId=slot)
                 telegram(f"[bot] booking {'submitted' if booked else 'attempted'} for {EMAIL} ({slot})")
                 break
             else:
@@ -396,4 +415,8 @@ async def main():
 
 if __name__ == "__main__":
     import nodriver as uc
-    uc.loop().run_until_complete(main())
+    try:
+        uc.loop().run_until_complete(main())
+    except Exception as _e:
+        milestone("failed", error=str(_e))
+        raise
