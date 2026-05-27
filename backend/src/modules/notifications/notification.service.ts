@@ -233,7 +233,9 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
   await Promise.all([
     (async () => {
       try {
-        const enabled = await getSetting<boolean>('notifications.telegram.enabled');
+        // Default to false if the settings lookup throws (e.g. DB blip) so a
+        // transient DB error doesn't kill Telegram when a bot token is configured.
+        const enabled = await getSetting<boolean>('notifications.telegram.enabled').catch(() => false);
         if (enabled || env.TELEGRAM_BOT_TOKEN) {
           const msg = formatTelegramMessage(enriched);
           // Always send to operator (env.TELEGRAM_CHAT_ID).
