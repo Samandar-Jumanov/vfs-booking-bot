@@ -390,23 +390,30 @@ async def main():
         if link:
             log("activation link:", link[:70], "…")
             log("REGISTRATION CONFIRMED via activation email" + ("" if submitted else " (network capture had missed the POST)"))
-            try:
-                tab = await browser.get(link, new_tab=True)
-                await asyncio.sleep(8)
-                txt = await jeval(tab, "document.body.innerText.slice(0,300)") or ""
-                aurl = await jeval(tab, "location.href") or ""
-                low = txt.lower()
-                if re.search(r"invalid|expired|link has|not (?:been )?activat|error activat", low):
-                    activated = False  # explicit failure
-                elif re.search(r"activat(?:ed|ion successful)|verified|success", low) or "/login" in aurl:
-                    # VFS redirects to the Sign-in page after a successful activation
-                    activated = True
-                    milestone("activation_visited", email=email)
-                else:
-                    activated = False
-                log(f"activation page (url=…/{aurl.rsplit('/', 1)[-1].split('?')[0]}):", txt.replace(chr(10), " ")[:120])
-            except Exception as e:
-                log("activation visit err:", e)
+            if WORKER_BRIDGED:
+                # Do NOT visit the link here — the backend will activate it via the
+                # operator's Cloudflare-cleared extension. Visiting it in this fresh
+                # nodriver tab (a) usually fails (no clearance) and (b) consumes the
+                # one-time token → the backend's visit then gets "Token Invalid/Expired".
+                log("WORKER_BRIDGED: leaving activation to the backend/extension (not visiting link here)")
+            else:
+                try:
+                    tab = await browser.get(link, new_tab=True)
+                    await asyncio.sleep(8)
+                    txt = await jeval(tab, "document.body.innerText.slice(0,300)") or ""
+                    aurl = await jeval(tab, "location.href") or ""
+                    low = txt.lower()
+                    if re.search(r"invalid|expired|link has|not (?:been )?activat|error activat", low):
+                        activated = False  # explicit failure
+                    elif re.search(r"activat(?:ed|ion successful)|verified|success", low) or "/login" in aurl:
+                        # VFS redirects to the Sign-in page after a successful activation
+                        activated = True
+                        milestone("activation_visited", email=email)
+                    else:
+                        activated = False
+                    log(f"activation page (url=…/{aurl.rsplit('/', 1)[-1].split('?')[0]}):", txt.replace(chr(10), " ")[:120])
+                except Exception as e:
+                    log("activation visit err:", e)
         else:
             log("no activation email found in Mailsac (register may not have submitted)")
 

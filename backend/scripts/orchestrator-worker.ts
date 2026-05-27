@@ -19,6 +19,8 @@
  */
 
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 import { spawn, spawnSync } from 'child_process';
 import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
@@ -449,6 +451,29 @@ async function registerOne(runId: string): Promise<void> {
       toState: result.activated ? 'ACTIVE' : 'PENDING_ACTIVATION',
       status: 'ok',
     });
+
+    // Activate it via the backend+extension (the worker has no extension WS).
+    // On success the backend flips it to ACTIVE in the DB → the login phase
+    // below picks it up → create → activate → login flows in one run.
+    if (status === 'PENDING') {
+      try {
+        log(`requesting activation for ${result.email} via backend/extension…`);
+        const resp = await fetch(`${BACKEND_URL}/api/pipeline/reconcile`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(WORKER_TOKEN ? { Authorization: `Bearer ${WORKER_TOKEN}` } : {}) },
+          body: JSON.stringify({ email: result.email }),
+        });
+        const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; result?: string };
+        log(`activation result for ${result.email}: ${JSON.stringify(j)}`);
+        if (j.ok) {
+          await postMilestone({ runId, email: result.email, step: 'activation_visited', toState: 'ACTIVE', status: 'ok' });
+        } else {
+          await postMilestone({ runId, email: result.email, step: 'failed', toState: 'PENDING_ACTIVATION', status: 'fail', error: `activation_failed:${j.result ?? 'unknown'}` });
+        }
+      } catch (e) {
+        log(`activation request failed for ${result.email}:`, (e as Error).message);
+      }
+    }
   } catch (e) {
     log(`DB persist failed for ${result.email}:`, (e as Error).message);
   }
@@ -471,10 +496,12 @@ async function spareCount(): Promise<number> {
 async function driveRun(runId: string): Promise<void> {
   log(`driveRun start. runId=${runId} SIMULATE=${SIMULATE}`);
 
-  // 1. Pool top-up (skip in SIMULATE — no real registrations)
-  if (!SIMULATE) {
+  // 1. Pool top-up (skip in SIMULATE — no real registrations).
+  // POOL_MIN=0 disables registration entirely (e.g. real login+monitor demo on
+  // existing ACTIVE accounts, when the extension isn't up to activate new ones).
+  const poolMin = Number(process.env.POOL_MIN ?? 2);
+  if (!SIMULATE && poolMin > 0) {
     const spare = await spareCount();
-    const poolMin = 2;
     if (spare < poolMin) {
       const need = poolMin - spare;
       log(`pool top-up: spare=${spare} < min=${poolMin}, registering ${need} account(s)`);
@@ -499,8 +526,10 @@ async function driveRun(runId: string): Promise<void> {
   // RUN_LIMIT (alias SIMULATE_LIMIT) caps how many accounts a run drives — keeps
   // demo/real runs from touching the whole pool at once. 0/unset = no cap.
   const simulateLimit = Number(process.env.RUN_LIMIT ?? process.env.SIMULATE_LIMIT ?? 0);
+  // TARGET_EMAIL pins the run to one specific account (reliable demo runs).
+  const targetEmail = process.env.TARGET_EMAIL?.trim();
   const accounts = await prisma.vfsAccount.findMany({
-    where: { status: 'ACTIVE' },
+    where: targetEmail ? { status: 'ACTIVE', email: targetEmail } : { status: 'ACTIVE' },
     select: {
       id: true,
       email: true,
@@ -592,13 +621,44 @@ interface ScenarioRun {
   requestedAt: string;
   status: string;
   completedAt?: string;
+  claimedAt?: string; // when a worker marked it 'running' — used for stale reclaim
 }
+
+// A 'running' run whose claimedAt is older than this with no completion is
+// assumed orphaned (claimer crashed/killed) and is reclaimed by the next worker.
+const STALE_RUN_MS = 90_000;
 
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 
+// Single-instance lock — prevents multiple workers racing on the same run
+// (which orphaned runs into a stuck 'running' state). Returns false if another
+// live worker holds the lock.
+const LOCK_FILE = path.join(os.tmpdir(), 'vfs-orchestrator-worker.lock');
+function acquireSingleInstanceLock(): boolean {
+  try {
+    if (fs.existsSync(LOCK_FILE)) {
+      const otherPid = Number(fs.readFileSync(LOCK_FILE, 'utf-8').trim());
+      if (otherPid && otherPid !== process.pid) {
+        try { process.kill(otherPid, 0); return false; } // 0 = alive-check; no throw = alive
+        catch { /* stale lock — owner is dead, take it over */ }
+      }
+    }
+    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    const release = () => { try { if (fs.existsSync(LOCK_FILE) && Number(fs.readFileSync(LOCK_FILE, 'utf-8').trim()) === process.pid) fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ } };
+    process.on('exit', release);
+    return true;
+  } catch {
+    return true; // lock errors shouldn't block the worker
+  }
+}
+
 async function main(): Promise<void> {
+  if (!acquireSingleInstanceLock()) {
+    log('Another orchestrator worker is already running (single-instance lock held) — exiting.');
+    process.exit(0);
+  }
   log(`Orchestrator worker starting. SIMULATE=${SIMULATE} BACKEND_URL=${BACKEND_URL} POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC}`);
   if (SIMULATE) log('SIMULATE=1 — no VFS browser hits will occur');
   if (SIMULATE && SIMULATE_FAIL) log('SIMULATE_FAIL=1 — accounts will fail after monitoring step');
@@ -618,13 +678,18 @@ async function main(): Promise<void> {
       const row = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
       const run = row?.value as ScenarioRun | null;
 
-      if (run && run.status === 'requested') {
-        log(`Claiming run ${run.runId}`);
+      // Reclaim a stale 'running' run (claimer crashed/killed mid-drive).
+      const isStaleRunning =
+        run && run.status === 'running' &&
+        (!run.claimedAt || Date.now() - new Date(run.claimedAt).getTime() > STALE_RUN_MS);
 
-        // Mark as running
+      if (run && (run.status === 'requested' || isStaleRunning)) {
+        log(isStaleRunning ? `Reclaiming stale run ${run.runId} (orphaned ${run.claimedAt ?? 'never claimed'})` : `Claiming run ${run.runId}`);
+
+        // Mark as running + stamp claimedAt for stale detection
         await prisma.settings.update({
           where: { key: 'scenario_run' },
-          data: { value: { ...run, status: 'running' } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+          data: { value: { ...run, status: 'running', claimedAt: new Date().toISOString() } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
         });
 
         try {

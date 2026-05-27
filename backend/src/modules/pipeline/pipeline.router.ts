@@ -196,3 +196,28 @@ pipelineRouter.post(
     }
   },
 );
+
+// ── POST /api/pipeline/reconcile ────────────────────────────────────────────────
+// Worker-triggered activation. The worker (no extension WS) calls this so the
+// BACKEND (which holds the operator extension connection) activates a PENDING
+// account via the real Chrome. body.email → activate that one; else all PENDING.
+const reconcileSchema = z.object({ email: z.string().email().optional() });
+
+pipelineRouter.post('/reconcile', workerAuth, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { email } = reconcileSchema.parse(req.body ?? {});
+    const { reconcilePending, tryActivate } = await import('@modules/accounts/reconciliation.service');
+    if (email) {
+      const acct = await prisma.vfsAccount.findUnique({ where: { email }, select: { id: true, status: true } });
+      if (!acct) { res.status(404).json({ ok: false, reason: 'ACCOUNT_NOT_FOUND' }); return; }
+      if (acct.status === 'ACTIVE') { res.status(200).json({ ok: true, result: 'already_active' }); return; }
+      const result = await tryActivate(acct.id);
+      res.status(200).json({ ok: result === 'activated', result });
+      return;
+    }
+    const report = await reconcilePending(false);
+    res.status(200).json({ ok: true, report });
+  } catch (err) {
+    next(err);
+  }
+});
