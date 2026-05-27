@@ -73,7 +73,21 @@ async def main():
     log("starting nodriver (headed)…", "email=", EMAIL)
     import nodriver as uc
 
-    browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
+    start_kwargs = {"headless": False, "browser_args": ["--lang=en-US"]}
+    ext = os.environ.get("VFS_LOAD_EXTENSION")  # path to extension/dist for handoff
+    if ext:
+        start_kwargs["browser_args"] += [
+            f"--load-extension={ext}",
+            f"--disable-extensions-except={ext}",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-features=AutofillServerCommunication",
+        ]
+        log("loading extension:", ext)
+    prof = os.environ.get("VFS_PROFILE_DIR")  # persistent profile (keeps extension settings)
+    if prof:
+        start_kwargs["user_data_dir"] = prof
+        log("using profile:", prof)
+    browser = await uc.start(**start_kwargs)
     log("PHASE 1: browser started")
     page = await browser.get(LOGIN_URL)
     log("PHASE 2: navigated to", LOGIN_URL)
@@ -295,6 +309,13 @@ async def main():
         log("session tokens written to nodriver-spike/session.json (gitignored)")
     else:
         log("WARN: login succeeded but auth headers not captured (timing) — re-run")
+
+    # HANDOFF mode: keep Chrome alive so the loaded extension takes over
+    # (monitor + book in the now-logged-in session). The script idles.
+    if os.environ.get("VFS_KEEP_ALIVE") == "1":
+        log("HANDOFF: login done — keeping Chrome alive; extension now drives monitor+book. Ctrl+C to stop.")
+        while True:
+            await asyncio.sleep(60)
 
     log("done — leaving browser open 8s")
     await asyncio.sleep(8)
