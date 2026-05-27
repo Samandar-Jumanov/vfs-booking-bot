@@ -98,6 +98,23 @@ export default function AccountPoolPage() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['account-pool'] }),
   });
 
+  // nodriver registration queue — the reliable path. Dashboard just enqueues;
+  // the register-runner on the UZ machine drains it (passes Turnstile).
+  const [nodriverMsg, setNodriverMsg] = useState<string | null>(null);
+  const regQueue = useQuery({
+    queryKey: ['registration-queue'],
+    queryFn: () => api.get<{ pending: number; spareActive: number }>('/accounts/registration-queue').then((r) => r.data),
+    refetchInterval: 10000,
+  });
+  const nodriverRegisterMutation = useMutation({
+    mutationFn: () => api.post<{ pending: number; queued: number }>('/accounts/request-registration', { count: 1 }).then((r) => r.data),
+    onSuccess: (data) => {
+      setNodriverMsg(`Queued — ${data.pending} pending. The UZ register-runner will create it (paced).`);
+      regQueue.refetch();
+    },
+    onError: (err: any) => setNodriverMsg(`Failed: ${err?.response?.data?.error ?? err?.message ?? 'unknown'}`),
+  });
+
   const batchCreateMutation = useMutation({
     mutationFn: () =>
       api.post<BatchProgressPayload>('/accounts/auto-create-batch', {
@@ -332,7 +349,17 @@ export default function AccountPoolPage() {
           disabled={autoCreateMutation.isPending}
         >
           {autoCreateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-          {autoCreateMutation.isPending ? 'Auto-creating...' : 'Auto-create one'}
+          {autoCreateMutation.isPending ? 'Auto-creating...' : 'Auto-create one (extension)'}
+        </button>
+        <button
+          type="button"
+          className="btn-primary h-10 gap-2"
+          onClick={() => { setNodriverMsg(null); nodriverRegisterMutation.mutate(); }}
+          disabled={nodriverRegisterMutation.isPending}
+          title="Reliable nodriver register — queued for the UZ register-runner (passes Turnstile)"
+        >
+          {nodriverRegisterMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          Register (nodriver){regQueue.data?.pending ? ` · ${regQueue.data.pending} queued` : ''}
         </button>
         <button
           type="button"
@@ -378,6 +405,9 @@ export default function AccountPoolPage() {
         )}
         {autoCreateMsg && (
           <span className={`text-sm ${autoCreateMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{autoCreateMsg}</span>
+        )}
+        {nodriverMsg && (
+          <span className={`text-sm ${nodriverMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{nodriverMsg}</span>
         )}
         {batchMsg && (
           <span className={`text-sm ${batchMsg.startsWith('Failed') ? 'text-red-500' : 'text-green-500'}`}>{batchMsg}</span>
