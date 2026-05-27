@@ -28,6 +28,7 @@ process.env.NOTIFY_BOOKING_FAILURES = 'true';
 // Import after dotenv so env.ts sees the loaded vars
 import { dispatchNotification } from '../src/modules/notifications/notification.service';
 import { heartbeat } from '../src/modules/notifications/heartbeat';
+import { getLastTelegramDelivery, resetLastTelegramDelivery } from '../src/modules/notifications/telegram.bot';
 
 const EVENT = (process.argv[2] ?? 'slot_found').toLowerCase();
 
@@ -40,7 +41,16 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+    console.error('[test-telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — cannot send.');
+    process.exit(1);
+  }
+  if ((process.env.FRONTEND_URL ?? '').startsWith('http://localhost')) {
+    console.warn('[test-telegram] WARNING: FRONTEND_URL is localhost — alert buttons may be rejected by Telegram. Set FRONTEND_URL=https://… to test the real button path.');
+  }
+
   console.info(`[test-telegram] Firing "${EVENT}"…`);
+  resetLastTelegramDelivery(); // so we can detect a real, fresh delivery below
 
   switch (EVENT) {
     case 'slot_found':
@@ -81,7 +91,18 @@ async function main(): Promise<void> {
       break;
   }
 
-  console.info(`[test-telegram] Done — check Telegram for the "${EVENT}" message.`);
+  // Verify an actual delivery happened — dispatchNotification swallows send
+  // errors internally, so "no exception" does NOT mean delivered. The only proof
+  // is a fresh lastTelegramDelivery record set by sendTelegram on a real 200.
+  const delivery = getLastTelegramDelivery();
+  if (!delivery) {
+    console.error(`[test-telegram] FAILED — no message was delivered for "${EVENT}".`);
+    console.error('  The send was attempted but did not reach Telegram (the notifier swallowed the error).');
+    console.error('  Likely causes: invalid inline-button URL (FRONTEND_URL not https), bad token/chat, or network.');
+    console.error('  Check the backend logs / EventType for the swallowed "Telegram notification failed" entry.');
+    process.exit(1);
+  }
+  console.info(`[test-telegram] DELIVERED "${EVENT}" → chat ${delivery.chatId}, message_id ${delivery.messageId}.`);
   process.exit(0);
 }
 

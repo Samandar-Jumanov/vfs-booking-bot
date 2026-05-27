@@ -196,3 +196,8 @@ export async function sendTelegramTo(chatId: string | undefined | null, message:
   const sent = await getTelegramClient().telegram.sendMessage(target, message, { parse_mode: 'HTML', ...options });
   lastTelegramDelivery = { chatId: String(target), messageId: sent.message_id, text: message };
 }
+
+/** Clear the last-delivery record so a test can detect a fresh, real delivery. */
+export function resetLastTelegramDelivery(): void {
+  lastTelegramDelivery = null;
+}
