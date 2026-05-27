@@ -153,12 +153,14 @@ pipelineRouter.post(
         severity: body.status === 'fail' ? 'CRITICAL' : 'INFO',
       });
 
-      // Feed the heartbeat so its "last check" timestamp + state reflect REAL
-      // monitoring (the worker does the checks; the backend heartbeat only knew
-      // about them via this). Idle backend → no recordCheck → heartbeat stays silent.
-      if (body.step === 'monitoring' || body.step === 'slot_found') {
-        const { heartbeat } = await import('@modules/notifications/heartbeat');
-        heartbeat.recordCheck(body.step === 'slot_found');
+      // Per-check Telegram: the operator wants a message on EVERY slot check,
+      // including "no slots" — not a periodic summary. A monitoring milestone
+      // without a slotId is a completed check that found nothing.
+      if (body.step === 'monitoring' && !body.slotId) {
+        const { sendTelegram } = await import('@modules/notifications/telegram.bot');
+        const when = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const detail = body.detail ? ` · ${body.detail}` : '';
+        await sendTelegram(`🔍 No slots${detail} · ${account.email} · ${when}`).catch(() => {});
       }
 
       // ── Step 4: Fire Telegram notifications for key steps ────────────────────

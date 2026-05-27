@@ -120,6 +120,7 @@ interface MilestoneBody {
   slotId?: string;
   confirmation?: string;
   error?: string;
+  detail?: string;
 }
 
 async function postMilestone(body: MilestoneBody): Promise<void> {
@@ -194,6 +195,7 @@ function spawnAndWatch(
               slotId: ms['slotId'],
               confirmation: ms['confirmation'],
               error: ms['error'],
+              detail: ms['detail'],
             });
           } catch { /* ignore parse errors */ }
         }
@@ -238,42 +240,44 @@ async function simulateAccount(
   runId: string,
   account: { id: string; email: string; lifecycleState: string },
 ): Promise<void> {
-  const steps: Array<{ step: string; toState: string; delay: number }> = [
-    { step: 'logged_in',  toState: 'LOGGING_IN', delay: 2000 },
-    { step: 'monitoring', toState: 'WARM',        delay: 1500 },
-    { step: 'slot_found', toState: 'WARM',        delay: 1000 },
-    { step: 'booked',     toState: 'WARM',        delay: 1000 },
-  ];
+  // Always start with login.
+  await sleep(1500);
+  await postMilestone({ runId, email: account.email, accountId: account.id, step: 'logged_in', toState: 'LOGGING_IN', status: 'ok' });
+  log(`[SIMULATE] ${account.email}: logged_in`);
 
+  // SIMULATE_CHECKS>0 → demo the per-check "no slots" behaviour: emit N monitoring
+  // checks (each makes the backend send a "no slots" Telegram), then stop.
+  const checks = Number(process.env.SIMULATE_CHECKS ?? 0);
+  if (checks > 0) {
+    for (let i = 1; i <= checks; i++) {
+      await sleep(2500);
+      await postMilestone({
+        runId, email: account.email, accountId: account.id,
+        step: 'monitoring', toState: 'WARM', status: 'ok',
+        detail: `check #${i} - Work D-visa, no slots (sim)`,
+      });
+      log(`[SIMULATE] ${account.email}: monitoring check #${i} (no slot)`);
+    }
+    return;
+  }
+
+  // Default demo arc: monitoring -> slot_found -> booked (a satisfying success run).
+  const steps: Array<{ step: string; toState: string; delay: number }> = [
+    { step: 'monitoring', toState: 'WARM', delay: 1500 },
+    { step: 'slot_found', toState: 'WARM', delay: 1000 },
+    { step: 'booked',     toState: 'WARM', delay: 1000 },
+  ];
   for (const s of steps) {
     await sleep(s.delay);
-
-    // SIMULATE_FAIL: after monitoring, emit failure and stop
     if (SIMULATE_FAIL && s.step === 'slot_found') {
-      await postMilestone({
-        runId,
-        email: account.email,
-        accountId: account.id,
-        step: 'failed',
-        toState: s.toState,
-        status: 'fail',
-        error: 'simulated_failure',
-      });
+      await postMilestone({ runId, email: account.email, accountId: account.id, step: 'failed', toState: s.toState, status: 'fail', error: 'simulated_failure' });
       log(`[SIMULATE][FAIL] ${account.email}: forced failure after monitoring`);
       return;
     }
-
     await postMilestone({
-      runId,
-      email: account.email,
-      accountId: account.id,
-      step: s.step,
-      toState: s.toState,
-      status: 'ok',
-      slotId:
-        s.step === 'slot_found' || s.step === 'booked'
-          ? `sim-slot-${Date.now()}`
-          : undefined,
+      runId, email: account.email, accountId: account.id,
+      step: s.step, toState: s.toState, status: 'ok',
+      slotId: s.step === 'slot_found' || s.step === 'booked' ? `sim-slot-${Date.now()}` : undefined,
       confirmation: s.step === 'booked' ? `SIM-CONF-${Date.now()}` : undefined,
     });
     log(`[SIMULATE] ${account.email}: ${s.step} → ${s.toState}`);

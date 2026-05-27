@@ -402,6 +402,9 @@ async def main():
                 log("slot found but BOOK_ENABLED off — stopping for operator")
                 break
         log(f"no slot — re-checking in {MONITOR_INTERVAL}s")
+        # emit a per-check milestone so the backend sends a "no slots" Telegram
+        # on EVERY check (operator wants a message each time, not a summary).
+        milestone("monitoring", email=EMAIL, detail=f"check #{attempt} — Work D-visa, no slots")
         # go back to a clean Appointment Details state for the next check
         await asyncio.sleep(MONITOR_INTERVAL)
         await jeval(page, "location.reload()")
