@@ -31,6 +31,9 @@ const milestoneBodySchema = z.object({
     'logged_in',
     'monitoring',
     'slot_found',
+    'otp_requested',
+    'otp_filled',
+    'otp_timeout',
     'booking_submitted',
     'booked',
     'failed',
@@ -164,24 +167,51 @@ pipelineRouter.post(
       }
 
       // ── Step 4: Fire Telegram notifications for key steps ────────────────────
-      if (body.step === 'slot_found' || (body.step === 'monitoring' && body.slotId)) {
+      const { sendTelegram: tg } = await import('@modules/notifications/telegram.bot');
+      const em = account.email;
+
+      if (body.step === 'registered') {
+        await tg(`✅ Registered: ${em}`).catch(() => {});
+      } else if (body.step === 'activation_visited') {
+        await tg(`✅ Activated: ${em}`).catch(() => {});
+      } else if (body.step === 'logged_in') {
+        await tg(`🔐 Logged in: ${em}`).catch(() => {});
+      } else if (body.step === 'otp_requested') {
+        await tg(`📨 OTP requested — polling Mailsac: ${em}`).catch(() => {});
+      } else if (body.step === 'otp_filled') {
+        await tg(`✅ OTP filled: ${em}`).catch(() => {});
+      } else if (body.step === 'otp_timeout') {
+        await tg(`⏱ OTP timeout — check MAILSAC_API_KEY: ${em}`).catch(() => {});
+      } else if (body.step === 'slot_found' || (body.step === 'monitoring' && body.slotId)) {
         await dispatchNotification({
           event: 'SLOT_DETECTED',
           slotId: body.slotId,
-          accountEmail: account.email,
+          accountEmail: em,
         });
+      } else if (body.step === 'booking_submitted') {
+        if (body.detail === 'confirmed') {
+          await dispatchNotification({
+            event: 'BOOKING_SUCCESS',
+            confirmationNo: body.confirmation,
+            accountEmail: em,
+          });
+        } else if (body.detail === 'payment_wall') {
+          await tg(`⚠️ Reached payment wall for ${em} — manual payment needed. Appointment reserved.`).catch(() => {});
+        } else if (body.detail === 'dry_run') {
+          await tg(`📸 DRY-RUN complete for ${em} — review screenshot saved, not submitted`).catch(() => {});
+        }
       } else if (body.step === 'booked' && body.status === 'ok') {
         await dispatchNotification({
           event: 'BOOKING_SUCCESS',
           confirmationNo: body.confirmation,
-          accountEmail: account.email,
+          accountEmail: em,
         });
       } else if (body.step === 'failed' && body.status === 'fail') {
         // NOTIFY_BOOKING_FAILURES gate is already inside dispatchNotification.
         await dispatchNotification({
           event: 'BOOKING_FAILED',
           reason: body.error,
-          accountEmail: account.email,
+          accountEmail: em,
         });
       }
 

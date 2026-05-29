@@ -332,6 +332,10 @@ async function driveAccountReal(
     BOOK_ENABLED: bookEnabled,
     BOOK_DRY_RUN: process.env.BOOK_DRY_RUN ?? '',
     WORKER_BRIDGED: '1',
+    // Explicit pass-through so Python subprocess gets these even if process.env
+    // inheritance is somehow stripped (e.g. stripped-env shells, Docker).
+    MAILSAC_API_KEY: process.env.MAILSAC_API_KEY ?? '',
+    SUBCAT: process.env.SUBCAT ?? '',
   };
 
   if (profile) {
@@ -655,10 +659,11 @@ function acquireSingleInstanceLock(): boolean {
 }
 
 async function main(): Promise<void> {
-  if (!acquireSingleInstanceLock()) {
-    log('Another orchestrator worker is already running (single-instance lock held) — exiting.');
-    process.exit(0);
-  }
+  // NOTE: single-instance protection is handled by the stale-run reclaim (a
+  // crashed claimer's run is auto-reclaimed) + operational discipline (run one
+  // worker). The file-lock was removed: under `npx tsx` the process tree spawns
+  // sibling node procs that falsely tripped the lock on each other.
+  void acquireSingleInstanceLock; // retained for reference; intentionally not gating
   log(`Orchestrator worker starting. SIMULATE=${SIMULATE} BACKEND_URL=${BACKEND_URL} POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC}`);
   if (SIMULATE) log('SIMULATE=1 — no VFS browser hits will occur');
   if (SIMULATE && SIMULATE_FAIL) log('SIMULATE_FAIL=1 — accounts will fail after monitoring step');
