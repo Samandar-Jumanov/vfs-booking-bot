@@ -12,8 +12,7 @@
 #   MAILSAC_API_KEY=<mailsac key>   (only needed for real registration)
 #
 # RUN:
-#   .\launch-worker.ps1                              REAL mode, booking DRY-RUN (safe: no real submit)
-#   $env:WORKER_SIMULATE='1'; .\launch-worker.ps1    SIMULATE (no VFS hits) - demo
+#   .\launch-worker.ps1                    REAL mode, booking DRY-RUN (safe: no real submit)
 #   $env:WORKER_BOOK='1'; .\launch-worker.ps1        REAL + actually submit bookings (only when ready)
 #
 # Optional env: RUN_LIMIT, STAGGER_SEC, JITTER_SEC, POLL_INTERVAL_SEC
@@ -44,7 +43,6 @@ if (-not $env:STAGGER_SEC) { $env:STAGGER_SEC = '45' }
 if (-not $env:JITTER_SEC) { $env:JITTER_SEC = '20' }
 
 # --- mode toggles ---
-if ($env:WORKER_SIMULATE -eq '1') { $env:SIMULATE = '1' } else { $env:SIMULATE = '' }
 # Booking is DRY-RUN unless WORKER_BOOK=1 (a real run will NOT submit until you opt in)
 if ($env:WORKER_BOOK -eq '1') { $env:BOOK_ENABLED = '1'; $env:BOOK_DRY_RUN = '' } else { $env:BOOK_ENABLED = ''; $env:BOOK_DRY_RUN = '1' }
 $env:WORKER_BRIDGED = '1'   # doers report via the backend (no crude per-doer telegram)
@@ -61,8 +59,7 @@ if ($missing.Count -gt 0) {
   exit 1
 }
 
-if ($env:SIMULATE -eq '1') { $mode = 'SIMULATE (no VFS)' }
-elseif ($env:BOOK_ENABLED -eq '1') { $mode = 'REAL + BOOK (live submit!)' }
+if ($env:BOOK_ENABLED -eq '1') { $mode = 'REAL + BOOK (live submit!)' }
 else { $mode = 'REAL + booking DRY-RUN' }
 Write-Host ('Starting orchestrator worker - mode: ' + $mode) -ForegroundColor Cyan
 Write-Host ('Backend: ' + $env:BACKEND_URL + ' | poll ' + $env:POLL_INTERVAL_SEC + 's stagger ' + $env:STAGGER_SEC + 's') -ForegroundColor DarkGray

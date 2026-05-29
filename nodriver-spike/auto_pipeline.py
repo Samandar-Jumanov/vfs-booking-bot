@@ -17,7 +17,6 @@ Env:
                     BOOK_ENABLED are set, DRY_RUN takes precedence (no actual submit).
   SUBCAT            regex to pick sub-category (default: Work D-visa)
   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  optional alerts
-  PROFILE_*         applicant data for booking (firstName,lastName,nationality,passport,contact)
 """
 import asyncio
 import os
@@ -330,19 +329,8 @@ async def select_route(page):
 
 
 # ── BOOKING (Phase D) — ported from extension runBookingSteps ───────────────
-PROFILE = {
-    "firstName": os.environ.get("PROFILE_FIRSTNAME", "Test"),
-    "lastName": os.environ.get("PROFILE_LASTNAME", "User"),
-    "nationality": os.environ.get("PROFILE_NATIONALITY", "Uzbekistan"),
-    "passport": os.environ.get("PROFILE_PASSPORT", "AB1234567"),
-    "email": os.environ.get("PROFILE_EMAIL", EMAIL),
-    "contact": os.environ.get("PROFILE_CONTACT", "901234567"),
-}
-
-# VFS "Your Details" extracts applicant identity by OCR from an uploaded passport
-# BIO-page image (PNG/JPG/PDF ≤2MB) — there are NO name/passport text fields. The
-# operator/customer must supply a passport scan per applicant; default to a repo
-# test passport for dry-run validation.
+# Applicant identity is extracted by VFS OCR from the passport image — no text
+# fields to fill. Supply a real passport BIO-page scan (PNG/JPG/PDF ≤2MB).
 PASSPORT_IMAGE = os.environ.get(
     "PASSPORT_IMAGE",
     str((pathlib.Path(__file__).resolve().parent.parent / "passports" / "p1.png")),

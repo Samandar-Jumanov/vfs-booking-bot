@@ -1,8 +1,5 @@
-// Run on UZ machine:
+// Run on UZ machine (clean Tashkent residential IP, no VPN):
 //   BACKEND_URL=https://... WORKER_TOKEN=... DATABASE_URL=... PROFILE_ENCRYPTION_KEY=... \
-//   npx tsx scripts/orchestrator-worker.ts
-// Test with SIMULATE=1:
-//   SIMULATE=1 BACKEND_URL=... WORKER_TOKEN=... DATABASE_URL=... PROFILE_ENCRYPTION_KEY=... \
 //   npx tsx scripts/orchestrator-worker.ts
 
 /**
@@ -12,10 +9,6 @@
  * claims it, then drives accounts through register → activate → login → monitor → book.
  * Posts a MILESTONE to BACKEND_URL/api/pipeline/event after every step so the
  * backend can update DB state, fire Telegram alerts, and write PipelineEvent rows.
- *
- * SIMULATE=1 disables ALL VFS browser hits — walks accounts through the state
- * sequence with short delays and posts real milestones. Safe to run from any IP.
- * SIMULATE_FAIL=1 (only in SIMULATE=1 mode) forces a failure after the monitoring step.
  */
 
 import path from 'path';
@@ -39,8 +32,6 @@ const BACKEND_URL = (() => {
 })();
 
 const WORKER_TOKEN = process.env.WORKER_TOKEN ?? '';
-const SIMULATE = process.env.SIMULATE === '1';
-const SIMULATE_FAIL = process.env.SIMULATE_FAIL === '1';
 const POLL_INTERVAL_SEC = Number(process.env.POLL_INTERVAL_SEC ?? 15);
 const STAGGER_SEC = Number(process.env.STAGGER_SEC ?? 45);
 const JITTER_SEC = Number(process.env.JITTER_SEC ?? 20);
@@ -232,58 +223,6 @@ async function loadAccountTimings(): Promise<AccountTiming[]> {
     warmedAt: null,
     attemptCount: r.attemptCount,
   }));
-}
-
-// ---------------------------------------------------------------------------
-// SIMULATE mode — walk fake state sequence, post real milestones
-// ---------------------------------------------------------------------------
-
-async function simulateAccount(
-  runId: string,
-  account: { id: string; email: string; lifecycleState: string },
-): Promise<void> {
-  // Always start with login.
-  await sleep(1500);
-  await postMilestone({ runId, email: account.email, accountId: account.id, step: 'logged_in', toState: 'LOGGING_IN', status: 'ok' });
-  log(`[SIMULATE] ${account.email}: logged_in`);
-
-  // SIMULATE_CHECKS>0 → demo the per-check "no slots" behaviour: emit N monitoring
-  // checks (each makes the backend send a "no slots" Telegram), then stop.
-  const checks = Number(process.env.SIMULATE_CHECKS ?? 0);
-  if (checks > 0) {
-    for (let i = 1; i <= checks; i++) {
-      await sleep(2500);
-      await postMilestone({
-        runId, email: account.email, accountId: account.id,
-        step: 'monitoring', toState: 'WARM', status: 'ok',
-        detail: `check #${i} - Work D-visa, no slots (sim)`,
-      });
-      log(`[SIMULATE] ${account.email}: monitoring check #${i} (no slot)`);
-    }
-    return;
-  }
-
-  // Default demo arc: monitoring -> slot_found -> booked (a satisfying success run).
-  const steps: Array<{ step: string; toState: string; delay: number }> = [
-    { step: 'monitoring', toState: 'WARM', delay: 1500 },
-    { step: 'slot_found', toState: 'WARM', delay: 1000 },
-    { step: 'booked',     toState: 'WARM', delay: 1000 },
-  ];
-  for (const s of steps) {
-    await sleep(s.delay);
-    if (SIMULATE_FAIL && s.step === 'slot_found') {
-      await postMilestone({ runId, email: account.email, accountId: account.id, step: 'failed', toState: s.toState, status: 'fail', error: 'simulated_failure' });
-      log(`[SIMULATE][FAIL] ${account.email}: forced failure after monitoring`);
-      return;
-    }
-    await postMilestone({
-      runId, email: account.email, accountId: account.id,
-      step: s.step, toState: s.toState, status: 'ok',
-      slotId: s.step === 'slot_found' || s.step === 'booked' ? `sim-slot-${Date.now()}` : undefined,
-      confirmation: s.step === 'booked' ? `SIM-CONF-${Date.now()}` : undefined,
-    });
-    log(`[SIMULATE] ${account.email}: ${s.step} → ${s.toState}`);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -510,13 +449,12 @@ async function spareCount(): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function driveRun(runId: string): Promise<void> {
-  log(`driveRun start. runId=${runId} SIMULATE=${SIMULATE}`);
+  log(`driveRun start. runId=${runId}`);
 
-  // 1. Pool top-up (skip in SIMULATE — no real registrations).
-  // POOL_MIN=0 disables registration entirely (e.g. real login+monitor demo on
-  // existing ACTIVE accounts, when the extension isn't up to activate new ones).
+  // 1. Pool top-up. POOL_MIN=0 disables registration entirely (e.g. when the
+  // extension isn't up to activate new ones and only existing accounts are used).
   const poolMin = Number(process.env.POOL_MIN ?? 2);
-  if (!SIMULATE && poolMin > 0) {
+  if (poolMin > 0) {
     const spare = await spareCount();
     if (spare < poolMin) {
       const need = poolMin - spare;
@@ -539,10 +477,10 @@ async function driveRun(runId: string): Promise<void> {
   const now = Date.now();
 
   // 3. Load ACTIVE accounts for login → monitor → book
-  // RUN_LIMIT (alias SIMULATE_LIMIT) caps how many accounts a run drives — keeps
-  // demo/real runs from touching the whole pool at once. 0/unset = no cap.
-  const simulateLimit = Number(process.env.RUN_LIMIT ?? process.env.SIMULATE_LIMIT ?? 0);
-  // TARGET_EMAIL pins the run to one specific account (reliable demo runs).
+  // RUN_LIMIT caps how many accounts a run drives — prevents touching the whole
+  // pool at once. 0/unset = no cap.
+  const runLimit = Number(process.env.RUN_LIMIT ?? 0);
+  // TARGET_EMAIL pins the run to one specific account.
   const targetEmail = process.env.TARGET_EMAIL?.trim();
   const accounts = await prisma.vfsAccount.findMany({
     where: targetEmail ? { status: 'ACTIVE', email: targetEmail } : { status: 'ACTIVE' },
@@ -555,7 +493,7 @@ async function driveRun(runId: string): Promise<void> {
       pollingRole: true,
     },
     orderBy: { lastAttemptAt: 'asc' },
-    ...(simulateLimit > 0 ? { take: simulateLimit } : {}),
+    ...(runLimit > 0 ? { take: runLimit } : {}),
   });
 
   if (accounts.length === 0) {
@@ -598,18 +536,14 @@ async function driveRun(runId: string): Promise<void> {
     lastAction = Date.now();
     lastGlobalAction = Date.now();
 
-    if (SIMULATE) {
-      await simulateAccount(runId, { id: acct.id, email: acct.email, lifecycleState: acct.lifecycleState as string });
-    } else {
-      await driveAccountReal(runId, {
-        id: acct.id,
-        email: acct.email,
-        encryptedPassword: acct.encryptedPassword,
-        lifecycleState: acct.lifecycleState as string,
-        profileIds: acct.profileIds,
-        pollingRole: acct.pollingRole,
-      });
-    }
+    await driveAccountReal(runId, {
+      id: acct.id,
+      email: acct.email,
+      encryptedPassword: acct.encryptedPassword,
+      lifecycleState: acct.lifecycleState as string,
+      profileIds: acct.profileIds,
+      pollingRole: acct.pollingRole,
+    });
   }
 
   log(`driveRun complete. runId=${runId}`);
@@ -676,9 +610,7 @@ async function main(): Promise<void> {
   // worker). The file-lock was removed: under `npx tsx` the process tree spawns
   // sibling node procs that falsely tripped the lock on each other.
   void acquireSingleInstanceLock; // retained for reference; intentionally not gating
-  log(`Orchestrator worker starting. SIMULATE=${SIMULATE} BACKEND_URL=${BACKEND_URL} POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC}`);
-  if (SIMULATE) log('SIMULATE=1 — no VFS browser hits will occur');
-  if (SIMULATE && SIMULATE_FAIL) log('SIMULATE_FAIL=1 — accounts will fail after monitoring step');
+  log(`Orchestrator worker starting. BACKEND_URL=${BACKEND_URL} POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC}`);
 
   process.on('SIGINT', () => {
     log('SIGINT — shutting down');
