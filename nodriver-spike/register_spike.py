@@ -153,6 +153,7 @@ async def main():
         log("WARN: MAILSAC_API_KEY not set — will register but can't auto-activate")
     email, password, phone = gen_email(), gen_password(), gen_phone()
     log("registering", email, "phone +998", phone)
+    milestone("register_started", email=email)
     import nodriver as uc
     browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
     page = await browser.get(REGISTER_URL)
@@ -194,6 +195,8 @@ async def main():
             log(f"form not ready yet ({i}s): {st}")
         await asyncio.sleep(1)
     log("form ready:", form_ready)
+    if form_ready:
+        milestone("form_rendered", email=email)
     await asyncio.sleep(1)  # let last bindings settle
     if not form_ready:
         url = await jeval(page, "location.href") or ""
@@ -304,6 +307,8 @@ async def main():
     checked_vis = len([s for s in states if s.get("vis") and s.get("chk")])
     total_vis = len([s for s in states if s.get("vis")])
     log(f"consents checked: {checked_vis}/{total_vis}")
+    if total_vis > 0 and checked_vis == total_vis:
+        milestone("consents_ticked", email=email)
     await asyncio.sleep(1)
 
     # wait for Turnstile to auto-pass → Register button enables
@@ -373,6 +378,8 @@ async def main():
         submitted = True
     log("post-register url:", url, "| clicked:", clicked, "| submittedSignal:", submitted)
     log("NETWORK (register/user/lift-api calls):", net if net else "(NONE — click fired no API)")
+    if submitted:
+        milestone("register_submitted", email=email)
 
     # activation via Mailsac — the ARRIVAL of the VFS activation email is the
     # AUTHORITATIVE proof of registration. The in-page network capture / URL check

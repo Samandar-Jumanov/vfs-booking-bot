@@ -147,3 +147,84 @@ All screenshots are in `nodriver-spike/shots/` on the UZ machine.
 | `pipe_payment_wall.png` | Payment wall reached |
 | `pipe_submit_uncertain.png` | Submit outcome unknown — inspect manually |
 | `dry_review_<ts>.png` | Dry-run review screen (no submit) |
+
+---
+
+## 8. Start from scratch (zero state)
+
+Use this section when **no pool accounts exist** — the worker will register a fresh Mailsac account and drive it to book, completely hands-off.
+
+### Zero-state preconditions
+
+| # | Check |
+|---|---|
+| 1 | **No VPN** active (same as Section 1 #1) |
+| 2 | **Clean UZ residential IP** — verify at `ipinfo.io` |
+| 3 | `backend\.env.worker` present with `WORKER_TOKEN`, `DATABASE_URL`, `PROFILE_ENCRYPTION_KEY`, `MAILSAC_API_KEY` |
+| 4 | `MAILSAC_API_KEY` non-empty — activation email polling depends on it |
+| 5 | `passports\p1.png` present on the UZ machine (1.4 MB, included in repo) |
+| 6 | `NOTIFY_BOOKING_FAILURES=true` in `.env.worker` to receive failure Telegrams |
+| 7 | **Chrome extension running** and connected to the backend — required for activation (the backend calls the extension to visit the Mailsac activation link) |
+| 8 | **No pre-existing accounts needed** — the worker mints them |
+
+> **Extension check:** go to the dashboard → Extension Setup page. If the status shows "Online", the extension is live.
+
+### Zero-state launch command
+
+```powershell
+# Register exactly 1 fresh account and drive it to book.
+$env:POOL_MIN      = '1'     # register exactly 1 account (default is 2)
+$env:RUN_LIMIT     = '1'     # drive max 1 account per run (prevents driving old accounts)
+$env:SUBCAT        = 'ocma'  # sub-category with available slots
+$env:WORKER_BOOK   = '1'     # arm real booking submit
+$env:NOTIFY_BOOKING_FAILURES = 'true'
+.\launch-worker.ps1
+```
+
+Then trigger a run from the dashboard: **Start Scenario** button. The worker polls every 10s for a "requested" run.
+
+> **Why POOL_MIN=1?** The worker automatically registers accounts when spare ACTIVE pool count is below `POOL_MIN`. With `POOL_MIN=1` and an empty pool, it registers exactly 1 new Mailsac account before driving.
+
+> **Why RUN_LIMIT=1?** Prevents the worker from accidentally driving multiple accounts in the same cycle if any ACTIVE accounts already exist.
+
+### Expected Telegram sequence from zero
+
+Messages arrive roughly in this order. Gaps mean a step silently failed — see the abort criteria below.
+
+| # | Message | What it means |
+|---|---|---|
+| 1 | `🔄 Registering new Mailsac account...` | Worker is about to spawn register_spike.py (**REAL-TIME**) |
+| 2 | `🔄 Registering new Mailsac account: vfs-xxxxxx@mailsac.com` | form_rendered milestone relayed (arrives in batch after registration) |
+| 3 | `☑️ Consents ticked — waiting for Turnstile: vfs-...` | Turnstile pending |
+| 4 | `📤 Register submitted — waiting for activation email: vfs-...` | POST fired |
+| 5 | `✅ Registered: vfs-...@mailsac.com` | Account created in DB |
+| 6 | `✅ Activated: vfs-...@mailsac.com` | Activation link visited, account ACTIVE |
+| 7 | `🔐 Logged in: vfs-...@mailsac.com` | nodriver login succeeded |
+| 8 | `🔍 No slots · check #1 ...` | First slot check (repeats every `MONITOR_INTERVAL` seconds) |
+| 9 | SLOT_DETECTED Telegram | Slot found — booking begins |
+| 10 | `📨 OTP requested...` | OTP Generate clicked |
+| 11 | `✅ OTP filled: ...` | OTP received and entered |
+| 12a | `🎉 Booked — Conf: <REF>` | **SUCCESS** |
+| 12b | `⚠️ Reached payment wall...` | Manual payment needed |
+
+> **Messages 2–6 arrive as a batch** after registration completes (~2 minutes after message 1). That's expected — `register_spike.py` runs synchronously.
+
+### Registration throttle warning
+
+VFS limits new registrations per IP to approximately **5 attempts** before throttling (returns page-not-found / no form). If you see `❌ Registration failed: no RESULT line — throttled or failed`, **stop immediately**. Wait 30–60 minutes before retrying. Do NOT spam the Register endpoint — each failed attempt increases the cooldown window.
+
+Signs of throttle: form never renders, or `"ABORT: register form never rendered"` in logs.
+
+### Zero-state abort criteria
+
+| Situation | Action |
+|---|---|
+| `❌ Registration failed: no RESULT line` | Throttled or VFS page-not-found. Wait 30–60 min. |
+| `✅ Registered` but NO `✅ Activated` | Extension is offline. Check extension status on dashboard. |
+| `✅ Activated` but NO `🔐 Logged in` | Account activated but login failed. Check logs for Turnstile / IP issues. |
+| `register_spike CRASHED` | Python crash — check `nodriver` version / dependencies. |
+| Telegram stops after `🔄 Registering...` (no more messages for 5+ min) | Registration hung — check PowerShell window. Press Ctrl+C if stuck. |
+
+### Post-run cleanup (zero state)
+
+Same as Section 5 — cancel the test appointment after a successful booking on any test/demo account.

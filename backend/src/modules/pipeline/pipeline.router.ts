@@ -26,6 +26,10 @@ const milestoneBodySchema = z.object({
   accountId: z.string().uuid().optional(),
   email: z.string().email().optional(),
   step: z.enum([
+    'register_started',
+    'form_rendered',
+    'consents_ticked',
+    'register_submitted',
     'registered',
     'activation_visited',
     'logged_in',
@@ -170,7 +174,15 @@ pipelineRouter.post(
       const { sendTelegram: tg } = await import('@modules/notifications/telegram.bot');
       const em = account.email;
 
-      if (body.step === 'registered') {
+      if (body.step === 'register_started') {
+        await tg(`🔄 Registering new Mailsac account: ${em}`).catch(() => {});
+      } else if (body.step === 'form_rendered') {
+        await tg(`📋 Register form ready — filling fields: ${em}`).catch(() => {});
+      } else if (body.step === 'consents_ticked') {
+        await tg(`☑️ Consents ticked — waiting for Turnstile: ${em}`).catch(() => {});
+      } else if (body.step === 'register_submitted') {
+        await tg(`📤 Register submitted — waiting for activation email: ${em}`).catch(() => {});
+      } else if (body.step === 'registered') {
         await tg(`✅ Registered: ${em}`).catch(() => {});
       } else if (body.step === 'activation_visited') {
         await tg(`✅ Activated: ${em}`).catch(() => {});

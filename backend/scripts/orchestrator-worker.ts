@@ -387,6 +387,10 @@ async function registerOne(runId: string): Promise<void> {
     log('WARN MAILSAC_API_KEY not set — account will register but not auto-activate (status PENDING)');
   }
 
+  // Notify operator in real-time BEFORE the synchronous 5-minute blocking call.
+  const { sendTelegram: tg } = await import('../src/modules/notifications/telegram.bot');
+  await tg('🔄 Registering new Mailsac account...').catch(() => {});
+
   log('spawning register_spike.py…');
   const res = spawnSync('python', [REGISTER_SPIKE], {
     env: { ...process.env, PYTHONUTF8: '1', WORKER_BRIDGED: '1' },
@@ -397,28 +401,14 @@ async function registerOne(runId: string): Promise<void> {
   const out = `${res.stdout ?? ''}${res.stderr ?? ''}`;
   out.split(/\r?\n/).filter(Boolean).forEach((l) => console.log('  ' + l));
 
-  // Parse and forward MILESTONE lines from the spike output
-  for (const line of out.split(/\r?\n/)) {
-    const m = line.match(/^MILESTONE\s+(\{.*\})\s*$/);
-    if (m) {
-      try {
-        const ms = JSON.parse(m[1]) as Record<string, string>;
-        await postMilestone({
-          runId,
-          email: ms['email'],
-          step: ms['step'] ?? 'register',
-          status: ms['error'] ? 'fail' : 'ok',
-          error: ms['error'],
-        });
-      } catch { /* ignore */ }
-    }
-  }
-
-  // Parse [REG] RESULT: {...} line and persist to DB (same as register-runner.ts)
+  // Parse [REG] RESULT: {...} line and persist to DB FIRST — milestone forwarding
+  // must happen AFTER account creation so the pipeline endpoint can resolve the email.
   const crashed = /Traceback \(most recent call last\)|SyntaxError|ModuleNotFoundError/.test(out);
   const rm = out.match(/\[REG\]\s+RESULT:\s+(\{.*\})\s*$/m);
   if (!rm) {
-    log(crashed ? 'register_spike CRASHED' : 'no RESULT line from register_spike — throttled or failed');
+    const reason = crashed ? 'register_spike CRASHED' : 'no RESULT line — throttled or failed';
+    log(reason);
+    await tg(`❌ Registration failed: ${reason}`).catch(() => {});
     return;
   }
 
@@ -427,11 +417,13 @@ async function registerOne(runId: string): Promise<void> {
     result = JSON.parse(rm[1]) as RegResult;
   } catch (e) {
     log('could not parse RESULT json:', (e as Error).message);
+    await tg(`❌ Registration failed: RESULT parse error`).catch(() => {});
     return;
   }
 
   if (!result.registered) {
     log(`did NOT register. result=${JSON.stringify(result)}`);
+    await tg(`❌ Registration not confirmed: ${result.error ?? 'unknown'}`).catch(() => {});
     return;
   }
 
@@ -447,7 +439,27 @@ async function registerOne(runId: string): Promise<void> {
     });
     log(`persisted ${result.email} → status=${status} (activated=${result.activated})`);
 
-    // Post a register milestone for the newly created account
+    // Now that the account exists, forward progress milestones from the spike output.
+    // Skip 'registered' and 'activation_visited' — those are posted explicitly below
+    // (with toState for proper lifecycle state updates).
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/^MILESTONE\s+(\{.*\})\s*$/);
+      if (m) {
+        try {
+          const ms = JSON.parse(m[1]) as Record<string, string>;
+          if (ms['step'] === 'registered' || ms['step'] === 'activation_visited') continue;
+          await postMilestone({
+            runId,
+            email: ms['email'],
+            step: ms['step'] ?? 'register',
+            status: ms['error'] ? 'fail' : 'ok',
+            error: ms['error'],
+          });
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Post the authoritative registered milestone (with toState for lifecycle).
     await postMilestone({
       runId,
       email: result.email,
