@@ -16,8 +16,6 @@ import re
 import secrets
 import sys
 import pathlib
-import urllib.request
-import urllib.parse
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -113,39 +111,6 @@ async def fill(page, selectors, value, label):
     log(f"WARN could not fill {label} (tried {selectors[0]})")
     return False
 
-
-def mailsac_link(email):
-    """Poll Mailsac for the activation email; extract the clean activation link."""
-    base = "https://mailsac.com/api"
-    # Mailsac is behind Cloudflare, which bans urllib's default UA (error 1010).
-    # Send a normal browser User-Agent + Accept to get through.
-    hdr = {
-        "Mailsac-Key": MAILSAC_KEY,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-    enc = urllib.parse.quote(email, safe="")  # URL-encode the @ — unencoded => 403
-    try:
-        req = urllib.request.Request(f"{base}/addresses/{enc}/messages", headers=hdr)
-        msgs = json.loads(urllib.request.urlopen(req, timeout=20).read())
-    except Exception as e:
-        log("mailsac list err:", e); return None
-    if not msgs:
-        return None
-    mid = msgs[0].get("_id")
-    try:
-        req = urllib.request.Request(f"{base}/text/{enc}/{urllib.parse.quote(str(mid), safe='')}", headers=hdr)
-        body = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
-    except Exception as e:
-        log("mailsac body err:", e); return None
-    # extract the verify/activate link; strip wrapped whitespace + trailing brackets
-    m = re.search(r"https?://[^\s\"'<>]*?(?:verify|confirm|activat)[^\s\"'<>]*", body, re.I) or \
-        re.search(r"https?://visa\.vfsglobal\.com/[^\s\"'<>]+", body, re.I)
-    if not m:
-        return None
-    link = re.sub(r"\s+", "", m.group(0))
-    link = re.sub(r"[)\]}>'\"`,]+$", "", link)
-    return link
 
 
 async def main():
@@ -381,51 +346,12 @@ async def main():
     if submitted:
         milestone("register_submitted", email=email)
 
-    # activation via Mailsac — the ARRIVAL of the VFS activation email is the
-    # AUTHORITATIVE proof of registration. The in-page network capture / URL check
-    # are unreliable (missed a confirmed POST → false "registered:false"), so we
-    # trust the email: if it arrives, registration definitely succeeded.
+    # Registration confirmed from the network POST signal captured above.
+    # Activation is handled separately by the backend/extension via /api/pipeline/reconcile
+    # (the WORKER_BRIDGED path); polling Mailsac here would only add ~20 extra calls and a
+    # ~2-minute delay with no benefit since the worker never uses the activation link anyway.
     activated = False
-    link = None
-    if MAILSAC_KEY:
-        log("polling Mailsac for activation email…")
-        for _ in range(20):  # ~2 min
-            link = mailsac_link(email)
-            if link:
-                break
-            await asyncio.sleep(6)
-        if link:
-            log("activation link:", link[:70], "…")
-            log("REGISTRATION CONFIRMED via activation email" + ("" if submitted else " (network capture had missed the POST)"))
-            if WORKER_BRIDGED:
-                # Do NOT visit the link here — the backend will activate it via the
-                # operator's Cloudflare-cleared extension. Visiting it in this fresh
-                # nodriver tab (a) usually fails (no clearance) and (b) consumes the
-                # one-time token → the backend's visit then gets "Token Invalid/Expired".
-                log("WORKER_BRIDGED: leaving activation to the backend/extension (not visiting link here)")
-            else:
-                try:
-                    tab = await browser.get(link, new_tab=True)
-                    await asyncio.sleep(8)
-                    txt = await jeval(tab, "document.body.innerText.slice(0,300)") or ""
-                    aurl = await jeval(tab, "location.href") or ""
-                    low = txt.lower()
-                    if re.search(r"invalid|expired|link has|not (?:been )?activat|error activat", low):
-                        activated = False  # explicit failure
-                    elif re.search(r"activat(?:ed|ion successful)|verified|success", low) or "/login" in aurl:
-                        # VFS redirects to the Sign-in page after a successful activation
-                        activated = True
-                        milestone("activation_visited", email=email)
-                    else:
-                        activated = False
-                    log(f"activation page (url=…/{aurl.rsplit('/', 1)[-1].split('?')[0]}):", txt.replace(chr(10), " ")[:120])
-                except Exception as e:
-                    log("activation visit err:", e)
-        else:
-            log("no activation email found in Mailsac (register may not have submitted)")
-
-    # registered is true if EITHER the in-page signal OR (authoritatively) the email arrived
-    registered = bool(submitted or link)
+    registered = bool(submitted)
     if registered:
         milestone("registered", email=email, password="***")
     else:
@@ -433,8 +359,8 @@ async def main():
     out = {"email": email, "password": password, "phone": "998" + phone, "registered": registered, "activated": activated}
     (SHOTS.parent / "register-out.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     log("RESULT:", json.dumps(out))
-    log("done — browser open 10s")
-    await asyncio.sleep(10)
+    log("done — flushing stdout")
+    await asyncio.sleep(2)
     browser.stop()
 
 

@@ -130,30 +130,56 @@ export class MailsacService {
   // Private helpers
   // -------------------------------------------------------------------------
 
-  private async listMessages(address: string): Promise<MailsacMessage[]> {
-    const response = await axios.get<unknown>(
-      `${BASE_URL}/addresses/${encodeURIComponent(address)}/messages`,
-      { headers: this.authHeaders },
-    );
-    // Guard against unexpected API responses (e.g. error objects instead of arrays)
-    if (!Array.isArray(response.data)) {
-      throw new Error(
-        `Mailsac listMessages returned unexpected response type: ${typeof response.data}`,
-      );
+  /**
+   * Retry wrapper: on HTTP 429, honours Retry-After (or exponential backoff capped at 30s).
+   * Up to 4 attempts total; re-throws on any non-429 error or on final attempt.
+   */
+  private async withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    let delay = 2_000;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await fn();
+      } catch (err: unknown) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status !== 429 || attempt >= 3) throw err;
+        const ra = (err as { response?: { headers?: Record<string, string> } })?.response?.headers?.['retry-after'];
+        const wait = ra ? Math.min(Number(ra) * 1000, 30_000) : delay;
+        delay = Math.min(delay * 2, 30_000);
+        console.warn(`[mailsac] 429 on ${label} — waiting ${wait}ms (attempt ${attempt + 1}/4)`);
+        await sleep(wait);
+      }
     }
-    return response.data as MailsacMessage[];
+    throw new Error(`[mailsac] withRetry exhausted for ${label}`);
+  }
+
+  private async listMessages(address: string): Promise<MailsacMessage[]> {
+    return this.withRetry(async () => {
+      const response = await axios.get<unknown>(
+        `${BASE_URL}/addresses/${encodeURIComponent(address)}/messages`,
+        { headers: this.authHeaders },
+      );
+      // Guard against unexpected API responses (e.g. error objects instead of arrays)
+      if (!Array.isArray(response.data)) {
+        throw new Error(
+          `Mailsac listMessages returned unexpected response type: ${typeof response.data}`,
+        );
+      }
+      return response.data as MailsacMessage[];
+    }, 'listMessages');
   }
 
   private async fetchMessageText(address: string, messageId: string): Promise<string> {
-    const response = await axios.get<string>(
-      `${BASE_URL}/text/${encodeURIComponent(address)}/${encodeURIComponent(messageId)}`,
-      {
-        headers: this.authHeaders,
-        responseType: 'text',
-      },
-    );
-    // axios may parse the body automatically; coerce to string to be safe.
-    return String(response.data);
+    return this.withRetry(async () => {
+      const response = await axios.get<string>(
+        `${BASE_URL}/text/${encodeURIComponent(address)}/${encodeURIComponent(messageId)}`,
+        {
+          headers: this.authHeaders,
+          responseType: 'text',
+        },
+      );
+      // axios may parse the body automatically; coerce to string to be safe.
+      return String(response.data);
+    }, 'fetchMessageText');
   }
 
   private extractOtp(text: string): string | null {

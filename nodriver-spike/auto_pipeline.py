@@ -24,6 +24,7 @@ import re
 import sys
 import json
 import pathlib
+import urllib.error
 import urllib.request
 import urllib.parse
 
@@ -58,36 +59,59 @@ _MAILSAC_HDR = {
 
 
 def mailsac_list(email):
-    """Return Mailsac messages for an address (newest first), or [] on error."""
+    """Return Mailsac messages for an address (newest first), or [] on non-429 error.
+    Raises urllib.error.HTTPError on HTTP 429 so the caller can apply backoff."""
     if not MAILSAC_KEY:
         return []
     enc = urllib.parse.quote(email, safe="")
     try:
         req = urllib.request.Request(f"https://mailsac.com/api/addresses/{enc}/messages", headers=_MAILSAC_HDR)
         return json.loads(urllib.request.urlopen(req, timeout=20).read()) or []
+    except urllib.error.HTTPError:
+        raise  # propagate 429 (and other HTTP errors) to the caller
     except Exception as e:
         log("mailsac list err:", e); return []
 
 
 def mailsac_body(email, mid):
+    """Fetch message text. Raises urllib.error.HTTPError on HTTP 429."""
     enc = urllib.parse.quote(email, safe="")
     try:
         req = urllib.request.Request(f"https://mailsac.com/api/text/{enc}/{urllib.parse.quote(str(mid), safe='')}", headers=_MAILSAC_HDR)
         return urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+    except urllib.error.HTTPError:
+        raise
     except Exception as e:
         log("mailsac body err:", e); return ""
 
 
 async def mailsac_otp_code(email, exclude_ids, timeout=120):
-    """Poll Mailsac for a NEW message and extract its OTP code (4-8 digits)."""
+    """Poll Mailsac for a NEW message and extract its OTP code (4-8 digits).
+    Backs off on HTTP 429 (Retry-After header or exponential, capped at 30s)."""
     import time as _t
     deadline = _t.time() + timeout
+    _backoff = 2  # 429 exponential backoff state (seconds)
     while _t.time() < deadline:
-        for m in mailsac_list(email):
+        try:
+            msgs = mailsac_list(email)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                ra = exc.headers.get("Retry-After", "")
+                wait = min(int(ra) if ra.isdigit() else _backoff, 30)
+                log(f"OTP Mailsac 429 — backing off {wait}s")
+                await asyncio.sleep(min(wait, max(deadline - _t.time(), 0)))
+                _backoff = min(_backoff * 2, 30)
+                continue
+            msgs = []
+        for m in msgs:
             mid = m.get("_id")
             if mid in exclude_ids:
                 continue
-            text = (m.get("subject", "") or "") + " " + (mailsac_body(email, mid) or "")
+            try:
+                body = mailsac_body(email, mid) or ""
+            except urllib.error.HTTPError:
+                body = ""
+            text = (m.get("subject", "") or "") + " " + body
             mm = (re.search(r"(?:otp|one[\s-]?time|verification|verify|code|password)\D{0,30}(\d{4,8})", text, re.I)
                   or re.search(r"\b(\d{6})\b", text))
             if mm:
@@ -138,6 +162,24 @@ async def jeval(page, expr):
         log("jeval err:", str(e)[:80]); return None
 
 
+async def wait_until(page, js_predicate, timeout, interval=0.4):
+    """Poll js_predicate every interval seconds until truthy or timeout.
+    Returns True when ready, False on timeout. Max-timeout cap prevents hanging."""
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        try:
+            if await jeval(page, js_predicate):
+                return True
+        except Exception:
+            pass
+        remaining = deadline - _t.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(interval, remaining))
+    return False
+
+
 async def shot(page, name):
     try:
         await page.save_screenshot(str(SHOTS / f"{name}.png"))
@@ -157,7 +199,10 @@ async def sign_in_disabled(page):
 # ── LOGIN ──────────────────────────────────────────────────────────────────
 async def do_login(browser, page):
     log("LOGIN: navigating")
-    await asyncio.sleep(10)
+    # Wait until any login-form element appears (cap 10s; faster on good connections).
+    await wait_until(page,
+        "(()=>{return !!document.querySelector('#email,input[type=email],[formcontrolname=emailid]');})()",
+        timeout=10, interval=0.5)
     await dismiss_consent(page)
     # The first load is flaky (transient page-not-found / slow hydration). Wait for
     # the email field, reloading up to 2× before giving up.
@@ -436,12 +481,18 @@ async def book(page, subcat):
             log("BOOK: uploaded passport image:", PASSPORT_IMAGE)
         except Exception as e:
             log("BOOK: passport upload failed:", e)
-        await asyncio.sleep(8)  # VFS uploads the file
+        # Wait until upload is reflected (a "Continue" or processing button appears), cap 10s.
+        await wait_until(page,
+            "(()=>{const bs=[...document.querySelectorAll('button,a')].filter(b=>b.offsetParent&&/continue|process/i.test(b.innerText||'')); return bs.length>0;})()",
+            timeout=10, interval=0.5)
         await dump_state(page, "2a_after_upload")
         # The upload card shows a "Continue" link that PROCESSES/OCR-extracts the
         # doc — must be clicked BEFORE Save (Save alone is a no-op until processed).
         await click_button_text(page, ["continue"], timeout=15)
-        await asyncio.sleep(7)  # OCR extraction
+        # Wait until OCR is done (Save button enabled), cap 8s.
+        await wait_until(page,
+            "(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.offsetParent&&!b.disabled&&/save/i.test(b.innerText||'')); return !!b;})()",
+            timeout=8, interval=0.5)
         await dump_state(page, "2b_after_process")
     else:
         log("BOOK: no file input or passport image missing", "(inputs=%d, img=%s)" % (len(file_inputs), PASSPORT_IMAGE))
@@ -534,7 +585,10 @@ async def book(page, subcat):
         log(f"DRY-RUN: reached review screen — screenshot saved to shots/dry_review_{ts}.png — not submitting")
         return "dry_run", None
     ok = await click_button_text(page, ["submit", "confirm", "pay"], timeout=20)
-    await asyncio.sleep(5)  # let VFS redirect/render the outcome page
+    # Wait until outcome content appears (confirmation/payment/error), cap 6s.
+    await wait_until(page,
+        "(()=>{const t=document.body.innerText||''; return /confirmation|reference|payment|pay now|total amount|amount due|fee payable|error occurred|booking failed/i.test(t);})()",
+        timeout=6, interval=0.4)
     await shot(page, "pipe_after_submit")
     url = (await jeval(page, "location.href")) or ""
     body_raw = (await jeval(page, "(document.body.innerText||'')")) or ""
