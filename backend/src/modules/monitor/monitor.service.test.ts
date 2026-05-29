@@ -202,7 +202,13 @@ describe('monitor.service stored-account poll retry', () => {
       userAgent: 'ua-new',
       lastHttpStatus: 200,
     }));
-    expect(prisma.vfsAccount.update).not.toHaveBeenCalled();
+    // selectFreshWatcherAccount touches lastUsedAt on selection (round-robin pacing).
+    // It should NOT also write lastWarmedAt:null (that would only happen if the retry also 403d).
+    expect(prisma.vfsAccount.update).toHaveBeenCalledTimes(1);
+    expect(prisma.vfsAccount.update).toHaveBeenCalledWith({
+      where: { id: 'acc-1' },
+      data: { lastUsedAt: expect.any(Date) },
+    });
   });
 
   it('marks the stored VFS account stale and keeps 403 cooldown when retry also fails', async () => {

@@ -1,5 +1,7 @@
 # VFS Global Appointment Automation System
 
+> **⚠️ Reader note:** Sections above "Current State & Known Issues" describe the original Phase-1 vision (Angola→Brazil/Portugal, Playwright, full SPA). The actual build is UZ→Latvia D-visa, nodriver + Chrome extension. For what is built and working today, jump to **Current State & Known Issues** below.
+
 ## Project Overview
 
 You are an expert full-stack developer building an automated visa appointment booking system targeting **vfsglobal.com** for Angola → Brazil and Angola → Portugal routes. The system must monitor slots in real time, auto-fill applicant data, handle captchas and IP blocks, and book appointments within seconds of availability.
@@ -226,19 +228,32 @@ PUT    /api/settings/captcha
 
 ---
 
-## Current State & Known Issues (updated 2026-05-25)
+## Current State & Known Issues (updated 2026-05-29)
 
-Scope is now **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer pool accounts. Architecture: Node/TS backend on Railway + Next.js frontend on Railway + **Chrome MV3 extension** (runs on operator machine/VPS, drives VFS via `chrome.debugger` trusted clicks). Package manager is **npm** (not pnpm).
+Scope is **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer pool accounts. Architecture: Node/TS backend on Railway + Next.js frontend on Railway + **nodriver** Python spike (`nodriver-spike/auto_pipeline.py`) for hands-off login+booking on the operator's UZ machine. Chrome MV3 extension still runs the slot-monitor/auth-sniffer. Package manager is **npm** (not pnpm).
+
+**Build & test status (verified 2026-05-29):**
+- Backend TypeScript (`npm run build`) — **clean** (exit 0, zero errors).
+- Frontend Next.js build — **clean** (16 static routes, 4 minor lint warnings only).
+- Python spikes (`py_compile`) — **clean**.
+- Unit tests: **166/166 green**. The previously failing `monitor.service.test.ts` test was stale — `selectFreshWatcherAccount` now correctly stamps `lastUsedAt` on account selection (round-robin pacing); test expectation updated to match.
+- ESLint: 42 cosmetic errors (unused vars, empty blocks) — no runtime or logic impact.
+- **Known footgun: `npm run test:e2e:dry` and worker `SIMULATE=1` both require a live Railway `DATABASE_URL`** — they read/write the prod DB even in "dry/simulate" mode. No safe local integration-test path exists yet.
 
 **Working (proven):**
-- Auto-register + auto-activate — extension fills/​submits the VFS register form; backend polls **Mailsac** API for the activation email and visits the link. Automated only for **Mailsac** pool emails (no API access to customers' personal inboxes).
-- Slot monitoring + authenticated polling (lift-api auth captured via MAIN-world `lift-auth-sniffer`).
-- Booking **Step 1** (Appointment Details): bot auto-selects centre → visa category → sub-category. Dropdowns are selected by **position** (`selectMatOptionByIndex`), reading each select's own `aria-owns` panel; sub-category options load async so it retries / auto-picks the first with slots.
+- **nodriver hands-off login**: `auto_pipeline.py` auto-passes Cloudflare Turnstile without the extension or `chrome.debugger`. Login→dashboard fully automated on a clean IP + fresh profile.
+- **Auto-register + auto-activate**: `register_spike.py` registers hands-off; backend fetches Mailsac activation link and visits it via extension (clean UZ IP). Automated only for **Mailsac** pool emails (no API access to customers' personal inboxes).
+- Slot monitoring + authenticated polling. lift-api auth = `authorize` + `clientsource` custom headers (NOT `Authorization`); captured via `chrome.webRequest` in the extension service-worker.
+- Booking **Steps 1–5** coded in `auto_pipeline.py`:
+  - Step 2 = passport-image upload (VFS OCR-extracts applicant identity from the bio-page scan).
+  - **Step 3 = OTP gate: `mailsac_otp_code()` IS wired at `auto_pipeline.py:486`** — polls Mailsac and fills the OTP automatically. Blocker is **`MAILSAC_API_KEY`** not being set: if missing, `mailsac_otp_code()` times out after 120s and booking stalls at Step 3.
+  - Step 5 Submit is reachable and **`BOOK_DRY_RUN`-guarded** (set `BOOK_DRY_RUN=1` to screenshot the review screen without submitting). **Still unvalidated on a live slot.**
+- Full chain **create→activate→login→monitor** proven live (2026-05-28). Booking submit gated on a real slot appearing.
+- Orchestrator worker (`backend/scripts/orchestrator-worker.ts`) wires the Python spikes to the Railway backend via MILESTONE lines. `SIMULATE=1` disables VFS browser hits but still requires a live prod DB (see footgun above).
 
-**Active blocker — auto-login / auto-register gated by Cloudflare Turnstile:**
-- The VFS Sign-In / Register button stays **disabled until Turnstile passes**. The bot's `chrome.debugger` attachment ("started debugging this browser") is a detectable automation signal, and a profile **flagged by heavy testing** (poisoned `cf_clearance` cookies) will not pass — even manually.
-- **Key finding (2026-05-25):** a **fresh Chrome profile** on the same machine **passes Turnstile** (manually). So the wall is the **flagged profile**, not the IP or human-vs-bot. Mitigation = **profile rotation** + operator-assisted login (a human passes Turnstile once, bot does the rest). Fully hands-off login at scale likely needs a **stealth automation stack** (nodriver/patchright/camoufox) to replace `chrome.debugger` — deferred.
-- Booking Steps 2–5 are coded but **unvalidated** (gated on having slots + a logged-in session).
+**Active constraint — operator-assisted login for degraded accounts:**
+- The fully hands-off nodriver path works for fresh accounts/IPs. For accounts flagged by heavy testing (poisoned `cf_clearance`), the operator logs in manually in a plain Chrome tab; the bot takes over for monitoring/booking.
+- Fresh Chrome profile + clean UZ residential IP always passes Turnstile (manual or nodriver).
 
 **Gotcha that cost a full day:** the operator's **VPN** poisons the BrightData proxy source IP → BrightData returns `ip_blacklisted` → surfaces as VFS "Session Expired". **Check VPN + BrightData IP-allowlist BEFORE blaming Datadome/VFS.**
 
