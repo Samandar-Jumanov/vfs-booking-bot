@@ -84,7 +84,10 @@ interface ScenarioRunMeta {
   runId: string;
   requestedAt: string;
   poolMinSpare: number;
+  /** requested → running → stopping → stopped (terminal, not reclaimed)
+   *  OR requested → running → completed / failed */
   status: string;
+  stoppingAt?: string;
 }
 
 scenarioRouter.post(
@@ -281,6 +284,38 @@ scenarioRouter.get(
       });
 
       res.status(200).json({ run, accounts });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── POST /api/scenario/stop ───────────────────────────────────────────────────
+/**
+ * Sets the current run to 'stopping'. The orchestrator worker polls this status
+ * every ~9s while a Python child is running and kills it when it sees 'stopping'.
+ * The run ends as 'stopped' (terminal — never reclaimed by the worker).
+ */
+scenarioRouter.post(
+  '/stop',
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const runRow = await prisma.settings.findUnique({ where: { key: SCENARIO_RUN_KEY } });
+      const run = runRow ? (runRow.value as unknown as ScenarioRunMeta) : null;
+
+      if (!run || !['requested', 'running'].includes(run.status)) {
+        res.status(200).json({ ok: true, note: 'no active run to stop', run: run ?? null });
+        return;
+      }
+
+      const updated: ScenarioRunMeta = { ...run, status: 'stopping', stoppingAt: new Date().toISOString() };
+      await prisma.settings.update({
+        where: { key: SCENARIO_RUN_KEY },
+        data: { value: updated as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+      });
+
+      res.status(200).json({ ok: true, run: updated });
     } catch (err) {
       next(err);
     }

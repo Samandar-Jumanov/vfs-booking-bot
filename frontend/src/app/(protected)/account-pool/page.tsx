@@ -39,22 +39,7 @@ interface PoolResponse {
   items: PoolItem[];
 }
 
-interface LoginBatchJob {
-  jobId: string;
-  startedAt: string;
-  finishedAt: string | null;
-  state: 'running' | 'done' | 'cancelled';
-  items: Array<{
-    accountId: string;
-    email: string;
-    state: 'pending' | 'running' | 'success' | 'failed';
-    startedAt: string | null;
-    finishedAt: string | null;
-    error: string | null;
-  }>;
-}
 
-const STALE_LOGIN_MS = 6 * 60 * 60 * 1000;
 
 export default function AccountPoolPage() {
   const qc = useQueryClient();
@@ -64,8 +49,6 @@ export default function AccountPoolPage() {
   const [batchSpacingSeconds, setBatchSpacingSeconds] = useState(300);
   const [batchProgress, setBatchProgress] = useState<BatchProgressPayload | null>(null);
   const [batchMsg, setBatchMsg] = useState<string | null>(null);
-  const [loginBatchOpen, setLoginBatchOpen] = useState(false);
-  const [loginBatchJobId, setLoginBatchJobId] = useState<string | null>(null);
   const [roleMenuAccountId, setRoleMenuAccountId] = useState<string | null>(null);
 
   const poolQuery = useQuery<PoolResponse>({
@@ -143,27 +126,6 @@ export default function AccountPoolPage() {
     },
   });
 
-  const loginBatchQuery = useQuery<LoginBatchJob>({
-    queryKey: ['login-batch', loginBatchJobId],
-    queryFn: () => api.get<LoginBatchJob>(`/accounts/login-batch/${loginBatchJobId}`).then((r) => r.data),
-    enabled: Boolean(loginBatchJobId),
-    refetchInterval: (query) => query.state.data?.state === 'running' ? 2000 : false,
-  });
-
-  const startLoginBatchMutation = useMutation({
-    mutationFn: (accountIds: string[]) =>
-      api.post<{ jobId: string }>('/accounts/login-batch', { accountIds, spacingMs: 60000 }).then((r) => r.data),
-    onSuccess: (data) => {
-      setLoginBatchJobId(data.jobId);
-    },
-  });
-
-  const cancelLoginBatchMutation = useMutation({
-    mutationFn: (jobId: string) => api.post(`/accounts/login-batch/${jobId}/cancel`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['login-batch', loginBatchJobId] });
-    },
-  });
 
   const updateRoleMutation = useMutation({
     mutationFn: ({ accountId, role }: { accountId: string; role: NonNullable<PoolItem['pollingRole']> }) =>
@@ -270,16 +232,6 @@ export default function AccountPoolPage() {
   const items = useMemo(() => poolQuery.data?.items ?? [], [poolQuery.data?.items]);
 
   const staleAccounts = useMemo(() => items.filter((i) => i.status === 'ACTIVE' && !i.cookieFresh), [items]);
-  const staleLoginAccounts = useMemo(() => items.filter((i) => {
-    if (i.status !== 'ACTIVE') return false;
-    const stamp = i.cookiesUpdatedAt ?? i.lastWarmedAt;
-    return !stamp || Date.now() - new Date(stamp).getTime() > STALE_LOGIN_MS;
-  }), [items]);
-  const loginBatchJob = loginBatchQuery.data;
-  const loginBatchDone = loginBatchJob?.items.filter((item) => item.state === 'success' || item.state === 'failed').length ?? 0;
-  const loginBatchSuccess = loginBatchJob?.items.filter((item) => item.state === 'success').length ?? 0;
-  const loginBatchFailed = loginBatchJob?.items.filter((item) => item.state === 'failed').length ?? 0;
-  const loginBatchNeedsWarmTab = loginBatchJob?.items.some((item) => item.error === 'WARM_TAB_REQUIRED') ?? false;
 
   useEffect(() => {
     return addWebSocketListener<BatchProgressPayload>('BATCH_PROGRESS', (data) => {
@@ -290,11 +242,6 @@ export default function AccountPoolPage() {
     });
   }, [qc]);
 
-  useEffect(() => {
-    if (loginBatchJob?.state === 'done') {
-      qc.invalidateQueries({ queryKey: ['account-pool'] });
-    }
-  }, [loginBatchJob?.state, qc]);
 
   const revealPasswordMutation = useMutation({
     mutationFn: (account: PoolItem) =>
@@ -368,18 +315,6 @@ export default function AccountPoolPage() {
         >
           <Plus className="h-4 w-4" />
           Add existing account
-        </button>
-        <button
-          type="button"
-          className="btn-secondary h-10 gap-2"
-          onClick={() => {
-            setLoginBatchOpen(true);
-            setLoginBatchJobId(null);
-          }}
-          disabled={staleLoginAccounts.length === 0}
-        >
-          <RefreshCw className="h-4 w-4" />
-          Login All Stale ({staleLoginAccounts.length})
         </button>
         <button
           type="button"
@@ -570,135 +505,6 @@ export default function AccountPoolPage() {
         </div>
       )}
 
-      {loginBatchOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[86vh] w-full max-w-2xl overflow-auto rounded-lg border border-border bg-card p-5 shadow-xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-base font-bold">Login all stale accounts</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {loginBatchJobId ? `${loginBatchDone} of ${loginBatchJob?.items.length ?? staleLoginAccounts.length} done` : `Estimated time: ${staleLoginAccounts.length * 60}s`}
-                </p>
-              </div>
-              <button
-                type="button"
-                className="btn-secondary h-8 w-8 p-0"
-                onClick={() => {
-                  setLoginBatchOpen(false);
-                  setLoginBatchJobId(null);
-                }}
-                aria-label="Close"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            {!loginBatchJobId ? (
-              <>
-                <div className="mt-4 rounded-lg border">
-                  <table className="w-full text-sm">
-                    <thead className="bg-muted/40 text-muted-foreground">
-                      <tr>
-                        <th className="px-3 py-2 text-left text-[10px] font-black uppercase tracking-widest">Email</th>
-                        <th className="px-3 py-2 text-left text-[10px] font-black uppercase tracking-widest">Last login</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {staleLoginAccounts.map((account) => (
-                        <tr key={account.id} className="border-t">
-                          <td className="px-3 py-2 font-semibold">{account.email}</td>
-                          <td className="px-3 py-2 text-muted-foreground">{formatLoginAge(account.cookiesUpdatedAt ?? account.lastWarmedAt)}</td>
-                        </tr>
-                      ))}
-                      {staleLoginAccounts.length === 0 && (
-                        <tr>
-                          <td colSpan={2} className="px-3 py-6 text-center text-muted-foreground">No stale active accounts.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="mt-5 flex justify-end gap-2">
-                  <button type="button" className="btn-secondary h-9" onClick={() => setLoginBatchOpen(false)}>
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-primary h-9 gap-2"
-                    disabled={staleLoginAccounts.length === 0 || startLoginBatchMutation.isPending}
-                    onClick={() => startLoginBatchMutation.mutate(staleLoginAccounts.map((account) => account.id))}
-                  >
-                    {startLoginBatchMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                    Start batch
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                {loginBatchNeedsWarmTab && (
-                  <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm font-semibold text-amber-500">
-                    Open bot Chrome and navigate to any VFS page before running the batch. The bot reuses your warm tab to avoid Datadome.
-                  </div>
-                )}
-                <div className="mt-4 rounded-lg border">
-                  <table className="w-full text-sm">
-                    <thead className="bg-muted/40 text-muted-foreground">
-                      <tr>
-                        <th className="px-3 py-2 text-left text-[10px] font-black uppercase tracking-widest">Email</th>
-                        <th className="px-3 py-2 text-left text-[10px] font-black uppercase tracking-widest">State</th>
-                        <th className="px-3 py-2 text-left text-[10px] font-black uppercase tracking-widest">Error</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(loginBatchJob?.items ?? []).map((item) => {
-                        const isActivation = item.error?.startsWith('ACTIVATION_FAILED:');
-                        const errorText = isActivation
-                          ? `Activation: ${item.error!.slice('ACTIVATION_FAILED:'.length)}`
-                          : item.error;
-                        return (
-                          <tr key={item.accountId} className="border-t">
-                            <td className="px-3 py-2 font-semibold">{item.email}</td>
-                            <td className="px-3 py-2"><LoginBatchStatePill state={item.state} /></td>
-                            <td className={`px-3 py-2 text-xs ${isActivation ? 'text-amber-500' : 'text-red-500'}`}>{errorText}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                {loginBatchJob?.state === 'done' && (
-                  <p className="mt-3 text-sm font-semibold text-muted-foreground">
-                    {loginBatchSuccess} succeeded, {loginBatchFailed} failed.
-                  </p>
-                )}
-                <div className="mt-5 flex justify-end gap-2">
-                  {loginBatchJob?.state === 'running' ? (
-                    <button
-                      type="button"
-                      className="btn-danger h-9"
-                      disabled={cancelLoginBatchMutation.isPending}
-                      onClick={() => loginBatchJobId && cancelLoginBatchMutation.mutate(loginBatchJobId)}
-                    >
-                      Cancel job
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn-primary h-9"
-                      onClick={() => {
-                        setLoginBatchOpen(false);
-                        setLoginBatchJobId(null);
-                      }}
-                    >
-                      Close
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
 
       {revealed && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -935,15 +741,6 @@ function BatchStatusBadge({ status }: { status: BatchProgressPayload['status'] }
   return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', map[status])}>{status}</span>;
 }
 
-function LoginBatchStatePill({ state }: { state: LoginBatchJob['items'][number]['state'] }) {
-  const map = {
-    pending: 'bg-zinc-500/15 text-zinc-400',
-    running: 'bg-amber-500/15 text-amber-500 animate-pulse',
-    success: 'bg-green-500/15 text-green-500',
-    failed: 'bg-red-500/15 text-red-500',
-  } as const;
-  return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', map[state])}>{state}</span>;
-}
 
 function formatLoginAge(value?: string | null) {
   if (!value) return 'never';

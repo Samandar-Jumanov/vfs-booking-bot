@@ -273,6 +273,17 @@ export default function DashboardPage() {
     },
   });
 
+  const stopScenarioMutation = useMutation<{ ok: boolean; note?: string }, Error, void>({
+    mutationFn: async () => {
+      const response = await api.post<{ ok: boolean; note?: string }>('/scenario/stop');
+      return response.data;
+    },
+    onSuccess: () => {
+      // Status poll will reflect 'stopping' → 'stopped' within seconds.
+      queryClient.invalidateQueries({ queryKey: ['scenario-status'] });
+    },
+  });
+
   // Always poll status (not gated on activeRunId) so the run + per-account
   // progress are restored on page load / reload — the server holds the latest
   // run in scenario_run, so a reload re-attaches to an in-flight run instead of
@@ -442,17 +453,30 @@ export default function DashboardPage() {
                   Checks the spare account pool, queues registrations if needed, and activates PENDING accounts via Mailsac.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => scenarioMutation.mutate()}
-                disabled={scenarioMutation.isPending}
-                className="btn-primary h-11 gap-2 shrink-0"
-              >
-                {scenarioMutation.isPending
-                  ? <RefreshCcw className="h-4 w-4 animate-spin" />
-                  : <Play className="h-4 w-4" />}
-                {scenarioMutation.isPending ? 'Running...' : 'Start Scenario'}
-              </button>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => scenarioMutation.mutate()}
+                  disabled={scenarioMutation.isPending || ['requested', 'running', 'stopping'].includes(scenarioStatus?.run?.status ?? '')}
+                  className="btn-primary h-11 gap-2"
+                >
+                  {scenarioMutation.isPending
+                    ? <RefreshCcw className="h-4 w-4 animate-spin" />
+                    : <Play className="h-4 w-4" />}
+                  {scenarioMutation.isPending ? 'Running...' : 'Start Scenario'}
+                </button>
+                {['requested', 'running', 'stopping'].includes(scenarioStatus?.run?.status ?? '') && (
+                  <button
+                    type="button"
+                    onClick={() => stopScenarioMutation.mutate()}
+                    disabled={stopScenarioMutation.isPending || scenarioStatus?.run?.status === 'stopping'}
+                    className="btn-secondary h-11 gap-2 border-red-500/40 text-red-400 hover:bg-red-500/10"
+                  >
+                    <StopCircle className="h-4 w-4" />
+                    {scenarioStatus?.run?.status === 'stopping' ? 'Stopping…' : 'Stop Scenario'}
+                  </button>
+                )}
+              </div>
             </div>
 
             {scenarioMutation.isError && (

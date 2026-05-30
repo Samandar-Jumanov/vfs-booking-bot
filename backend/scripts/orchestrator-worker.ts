@@ -196,7 +196,25 @@ function spawnAndWatch(
     });
 
     child.stderr.on('data', (chunk: string) => process.stderr.write(String(chunk)));
-    child.on('close', (code) => resolve(code === 0 ? 'ok' : 'failed'));
+
+    // Poll DB every 9s for a 'stopping' signal from the operator; kill the child when found.
+    const stopPoller = setInterval(() => {
+      prisma.settings.findUnique({ where: { key: 'scenario_run' } }).then((row) => {
+        const r = row?.value as ScenarioRun | null;
+        if (r && (r.status === 'stopping' || r.status === 'stopped')) {
+          log(`[stop] signal for run ${ctx.runId} — sending SIGTERM to Python child`);
+          clearInterval(stopPoller);
+          child.kill('SIGTERM');
+          // Grace: SIGKILL after 3s if still running
+          setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 3_000);
+        }
+      }).catch(() => { /* DB blip — keep polling */ });
+    }, 9_000);
+
+    child.on('close', (code) => {
+      clearInterval(stopPoller);
+      resolve(code === 0 ? 'ok' : 'failed');
+    });
   });
 }
 
@@ -321,7 +339,8 @@ function encryptField(plaintext: string): string {
   return Buffer.concat([iv, authTag, encrypted]).toString('base64');
 }
 
-async function registerOne(runId: string): Promise<void> {
+/** Returns { email, status } on success, null if registration failed or DB persist failed. */
+async function registerOne(runId: string): Promise<{ email: string; status: string } | null> {
   if (!process.env.MAILSAC_API_KEY) {
     log('WARN MAILSAC_API_KEY not set — account will register but not auto-activate (status PENDING)');
   }
@@ -348,7 +367,7 @@ async function registerOne(runId: string): Promise<void> {
     const reason = crashed ? 'register_spike CRASHED' : 'no RESULT line — throttled or failed';
     log(reason);
     await tg(`❌ Registration failed: ${reason}`).catch(() => {});
-    return;
+    return null;
   }
 
   let result: RegResult;
@@ -357,16 +376,17 @@ async function registerOne(runId: string): Promise<void> {
   } catch (e) {
     log('could not parse RESULT json:', (e as Error).message);
     await tg(`❌ Registration failed: RESULT parse error`).catch(() => {});
-    return;
+    return null;
   }
 
   if (!result.registered) {
     log(`did NOT register. result=${JSON.stringify(result)}`);
     await tg(`❌ Registration not confirmed: ${result.error ?? 'unknown'}`).catch(() => {});
-    return;
+    return null;
   }
 
   const status = result.activated ? 'ACTIVE' : 'PENDING';
+  let outcome: { email: string; status: string } | null = null;
   try {
     await prisma.vfsAccount.create({
       data: {
@@ -377,6 +397,7 @@ async function registerOne(runId: string): Promise<void> {
       },
     });
     log(`persisted ${result.email} → status=${status} (activated=${result.activated})`);
+    outcome = { email: result.email, status };
 
     // Now that the account exists, forward progress milestones from the spike output.
     // Skip 'registered' and 'activation_visited' — those are posted explicitly below
@@ -431,7 +452,9 @@ async function registerOne(runId: string): Promise<void> {
     }
   } catch (e) {
     log(`DB persist failed for ${result.email}:`, (e as Error).message);
+    outcome = null;
   }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -454,13 +477,15 @@ async function driveRun(runId: string): Promise<void> {
   // 1. Pool top-up. POOL_MIN=0 disables registration entirely (e.g. when the
   // extension isn't up to activate new ones and only existing accounts are used).
   const poolMin = Number(process.env.POOL_MIN ?? 2);
+  const registered: Array<{ email: string; status: string }> = [];
   if (poolMin > 0) {
     const spare = await spareCount();
     if (spare < poolMin) {
       const need = poolMin - spare;
       log(`pool top-up: spare=${spare} < min=${poolMin}, registering ${need} account(s)`);
       for (let i = 0; i < need; i++) {
-        await registerOne(runId);
+        const reg = await registerOne(runId);
+        if (reg) registered.push(reg);
         if (i < need - 1) {
           const jitter = Math.floor(Math.random() * 30);
           log(`register stagger: waiting ${REGISTER_STAGGER_SEC + jitter}s`);
@@ -469,6 +494,50 @@ async function driveRun(runId: string): Promise<void> {
       }
     } else {
       log(`pool ok: spare=${spare} ACTIVE+unlinked accounts`);
+    }
+  }
+
+  // 1b. Wait for any just-registered PENDING accounts to flip ACTIVE (up to 3 min).
+  //     This makes a single "Start Scenario" click drive register→activate→login→book
+  //     in one run without a second click. The wait is bounded so it never hangs.
+  const pendingRegistered = registered.filter((r) => r.status === 'PENDING');
+  if (pendingRegistered.length > 0) {
+    const WAIT_CAP_MS = 3 * 60 * 1000; // 3-minute cap
+    const POLL_MS = 12_000;             // poll every 12s
+    const deadline = Date.now() + WAIT_CAP_MS;
+    log(`waiting up to ${WAIT_CAP_MS / 1000}s for ${pendingRegistered.length} PENDING account(s) to activate…`);
+    const stillPending = new Set(pendingRegistered.map((r) => r.email));
+
+    while (stillPending.size > 0 && Date.now() < deadline) {
+      // Respect stop signal — abort if operator clicked Stop.
+      const stopRow = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
+      const stopRun = stopRow?.value as ScenarioRun | null;
+      if (stopRun && (stopRun.status === 'stopping' || stopRun.status === 'stopped')) {
+        log('stop requested during activation wait — aborting');
+        return;
+      }
+
+      await sleep(POLL_MS);
+
+      for (const email of [...stillPending]) {
+        const row = await prisma.vfsAccount.findUnique({ where: { email }, select: { status: true } });
+        if (row?.status === 'ACTIVE') {
+          log(`${email} activated ✓`);
+          stillPending.delete(email);
+        } else {
+          log(`${email} still ${row?.status ?? 'unknown'} (${Math.ceil((deadline - Date.now()) / 1000)}s remaining)`);
+        }
+      }
+    }
+
+    // Emit a clear warning for any account that didn't activate in time.
+    if (stillPending.size > 0) {
+      const { sendTelegram: tg } = await import('../src/modules/notifications/telegram.bot');
+      for (const email of stillPending) {
+        log(`activation did not complete in time for ${email} — proceeding without it`);
+        await postMilestone({ runId, email, step: 'failed', status: 'fail', error: 'activation_timeout' });
+        await tg(`⏱ Activation timed out for ${email} — not driving this account in the current run`).catch(() => {});
+      }
     }
   }
 
@@ -536,6 +605,16 @@ async function driveRun(runId: string): Promise<void> {
     lastAction = Date.now();
     lastGlobalAction = Date.now();
 
+    // Check stop signal before driving each account (catches stop between accounts).
+    {
+      const stopRow = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
+      const stopRun = stopRow?.value as ScenarioRun | null;
+      if (stopRun && (stopRun.status === 'stopping' || stopRun.status === 'stopped')) {
+        log(`stop requested — aborting run before driving ${acct.email}`);
+        return;
+      }
+    }
+
     await driveAccountReal(runId, {
       id: acct.id,
       email: acct.email,
@@ -569,9 +648,12 @@ function logNextDue(timings: AccountTiming[]): void {
 interface ScenarioRun {
   runId: string;
   requestedAt: string;
+  /** requested → running → stopping → stopped (terminal)
+   *  OR requested → running → completed / failed */
   status: string;
   completedAt?: string;
   claimedAt?: string; // when a worker marked it 'running' — used for stale reclaim
+  stoppingAt?: string;
 }
 
 // A 'running' run whose claimedAt is older than this with no completion is
@@ -644,18 +726,35 @@ async function main(): Promise<void> {
         try {
           await driveRun(run.runId);
 
-          // Mark complete
-          await prisma.settings.update({
-            where: { key: 'scenario_run' },
-            data: {
-              value: {
-                ...run,
-                status: 'completed',
-                completedAt: new Date().toISOString(),
-              } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'],
-            },
-          });
-          log(`Run ${run.runId} complete`);
+          // Re-read status: operator may have requested a stop during the run.
+          const finalRow = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
+          const finalRun = finalRow?.value as ScenarioRun | null;
+          if (finalRun && (finalRun.status === 'stopping' || finalRun.status === 'stopped')) {
+            await prisma.settings.update({
+              where: { key: 'scenario_run' },
+              data: {
+                value: {
+                  ...run,
+                  status: 'stopped',
+                  completedAt: new Date().toISOString(),
+                } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'],
+              },
+            });
+            log(`Run ${run.runId} stopped by operator`);
+          } else {
+            // Mark complete
+            await prisma.settings.update({
+              where: { key: 'scenario_run' },
+              data: {
+                value: {
+                  ...run,
+                  status: 'completed',
+                  completedAt: new Date().toISOString(),
+                } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'],
+              },
+            });
+            log(`Run ${run.runId} complete`);
+          }
         } catch (runErr) {
           log(`Run ${run.runId} failed:`, (runErr as Error).message);
           // Mark as failed so the operator can re-request
@@ -672,7 +771,9 @@ async function main(): Promise<void> {
           });
         }
       } else if (run && run.status === 'running') {
-        // Another worker instance or a crash-restart — log and wait
+        // Another worker instance or a crash-restart — log and wait.
+        // If this instance sees 'stopping' in the 'running' branch (shouldn't happen,
+        // but defensively): the claiming worker's stop-poller handles it; just poll.
         log(`Run ${run.runId} is already running (by another process or from before crash) — polling`);
 
         // Log which accounts are due (diagnostic only)
