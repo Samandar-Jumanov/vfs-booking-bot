@@ -94,6 +94,7 @@ interface ScenarioStatusRun {
   runId: string;
   requestedAt: string;
   status: string;
+  stoppingAt?: string;
 }
 
 interface ScenarioStatusAccount {
@@ -112,7 +113,12 @@ interface ScenarioStatusAccount {
 interface ScenarioStatusResponse {
   run?: ScenarioStatusRun;
   accounts: ScenarioStatusAccount[];
+  engineOnline?: boolean;
 }
+
+// Countdown shown inside the Stop button — a bit above the worker's ~9s kill
+// window so the number reaches "finalizing" only if something is genuinely slow.
+const STOP_COUNTDOWN_SECONDS = 12;
 
 type WizardStep = 'explain' | 'open' | 'paste' | 'inject';
 type InjectState = 'idle' | 'saving' | 'success' | 'error';
@@ -300,6 +306,23 @@ export default function DashboardPage() {
     if (serverRunId && serverRunId !== activeRunId) setActiveRunId(serverRunId);
   }, [scenarioStatus?.run?.runId, activeRunId]);
 
+  // ── Engine online + Stop countdown (Tasks 1 & 3) ───────────────────────────
+  const engineOnline = scenarioStatus?.engineOnline ?? false;
+  const runStatus = scenarioStatus?.run?.status ?? '';
+  const isRunActive = ['requested', 'running', 'stopping'].includes(runStatus);
+  const isStopping = runStatus === 'stopping';
+  // Seconds left in the Stop countdown, derived from the server stoppingAt + now.
+  const stopSecondsLeft = (() => {
+    if (!isStopping) return STOP_COUNTDOWN_SECONDS;
+    const stoppingAt = scenarioStatus?.run?.stoppingAt;
+    if (!stoppingAt) return STOP_COUNTDOWN_SECONDS;
+    const elapsed = Math.floor((now - new Date(stoppingAt).getTime()) / 1000);
+    return Math.max(0, STOP_COUNTDOWN_SECONDS - elapsed);
+  })();
+  const stopButtonLabel = isStopping
+    ? (stopSecondsLeft > 0 ? `Stopping… ${stopSecondsLeft}s` : 'Stopping… (finalizing)')
+    : 'Stop Scenario';
+
   const monitorCards = useMemo<MonitorCardModel[]>(() => {
     const source = status.length ? status : monitors;
     return source.map((monitor) => {
@@ -441,6 +464,18 @@ export default function DashboardPage() {
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-black uppercase tracking-widest text-foreground">Scenario</h2>
+            <span
+              title={engineOnline ? 'The booking engine is running' : 'The booking engine is NOT running'}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold',
+                engineOnline
+                  ? 'border-green-500/30 bg-green-500/10 text-green-400'
+                  : 'border-red-500/30 bg-red-500/10 text-red-400',
+              )}
+            >
+              <span className={cn('h-2 w-2 rounded-full', engineOnline ? 'bg-green-400' : 'bg-red-400')} />
+              Engine: {engineOnline ? '🟢 Online' : '🔴 Offline'}
+            </span>
           </div>
           <motion.div
             layout
@@ -457,7 +492,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => scenarioMutation.mutate()}
-                  disabled={scenarioMutation.isPending || ['requested', 'running', 'stopping'].includes(scenarioStatus?.run?.status ?? '')}
+                  disabled={scenarioMutation.isPending || isRunActive}
                   className="btn-primary h-11 gap-2"
                 >
                   {scenarioMutation.isPending
@@ -465,15 +500,17 @@ export default function DashboardPage() {
                     : <Play className="h-4 w-4" />}
                   {scenarioMutation.isPending ? 'Running...' : 'Start Scenario'}
                 </button>
-                {['requested', 'running', 'stopping'].includes(scenarioStatus?.run?.status ?? '') && (
+                {isRunActive && (
                   <button
                     type="button"
                     onClick={() => stopScenarioMutation.mutate()}
-                    disabled={stopScenarioMutation.isPending || scenarioStatus?.run?.status === 'stopping'}
-                    className="btn-secondary h-11 gap-2 border-red-500/40 text-red-400 hover:bg-red-500/10"
+                    disabled={stopScenarioMutation.isPending || isStopping}
+                    className="btn-secondary h-11 gap-2 border-red-500/40 text-red-400 hover:bg-red-500/10 tabular-nums"
                   >
-                    <StopCircle className="h-4 w-4" />
-                    {scenarioStatus?.run?.status === 'stopping' ? 'Stopping…' : 'Stop Scenario'}
+                    {isStopping
+                      ? <RefreshCcw className="h-4 w-4 animate-spin" />
+                      : <StopCircle className="h-4 w-4" />}
+                    {stopButtonLabel}
                   </button>
                 )}
               </div>

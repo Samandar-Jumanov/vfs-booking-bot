@@ -686,6 +686,32 @@ function acquireSingleInstanceLock(): boolean {
   }
 }
 
+// On worker (re)start, finalize a stuck run left by a dead/old worker:
+//  - a 'stopping' run that no live worker will ever finalize → mark 'stopped'.
+//  - a stale 'running' run (claimedAt older than STALE_RUN_MS) is left for the
+//    normal reclaim path below; we only hard-clear 'stopping' here.
+async function clearOrphanedRunOnStartup(): Promise<void> {
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
+    const run = row?.value as ScenarioRun | null;
+    if (run && run.status === 'stopping') {
+      log(`startup: found orphaned 'stopping' run ${run.runId} — finalizing to 'stopped'`);
+      await prisma.settings.update({
+        where: { key: 'scenario_run' },
+        data: {
+          value: {
+            ...run,
+            status: 'stopped',
+            completedAt: new Date().toISOString(),
+          } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'],
+        },
+      });
+    }
+  } catch (e) {
+    log('startup orphan-clear failed (non-fatal):', (e as Error).message);
+  }
+}
+
 async function main(): Promise<void> {
   // NOTE: single-instance protection is handled by the stale-run reclaim (a
   // crashed claimer's run is auto-reclaimed) + operational discipline (run one
@@ -703,6 +729,24 @@ async function main(): Promise<void> {
     void prisma.$disconnect().then(() => process.exit(0));
   });
 
+  // Heartbeat: prove the engine is alive so the dashboard can show Engine 🟢/🔴.
+  // Runs on its OWN interval (not in the poll loop) because the loop blocks inside
+  // driveRun for long stretches during monitoring — a loop-driven heartbeat would
+  // go stale (engine wrongly shows offline) for the whole active run. (Task 1.)
+  const writeHeartbeat = () => prisma.settings.upsert({
+    where: { key: 'worker_heartbeat' },
+    update: { value: { at: new Date().toISOString() } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+    create: { key: 'worker_heartbeat', value: { at: new Date().toISOString() } as unknown as Parameters<typeof prisma.settings.create>[0]['data']['value'] },
+  }).catch(() => { /* heartbeat write must never crash the worker */ });
+  await writeHeartbeat();
+  const heartbeatTimer = setInterval(() => { void writeHeartbeat(); }, POLL_INTERVAL_SEC * 1000);
+  process.on('exit', () => clearInterval(heartbeatTimer));
+
+  // On startup, clear any orphaned 'stopping' run or stale 'running' run left
+  // behind by a previously-killed/old worker — so a (re)started worker never
+  // ignores a stuck stop. (Task 2: self-clearing stop.)
+  await clearOrphanedRunOnStartup();
+
   for (;;) {
     try {
       // Poll Settings for scenario_run
@@ -713,6 +757,25 @@ async function main(): Promise<void> {
       const isStaleRunning =
         run && run.status === 'running' &&
         (!run.claimedAt || Date.now() - new Date(run.claimedAt).getTime() > STALE_RUN_MS);
+
+      // Orphaned 'stopping' run reaching the poll loop means no driveRun is
+      // actively finalizing it in THIS worker (an active drive would be blocked
+      // inside driveRun and never reach this line). Finalize it so the UI clears.
+      if (run && run.status === 'stopping') {
+        log(`poll: orphaned 'stopping' run ${run.runId} — finalizing to 'stopped'`);
+        await prisma.settings.update({
+          where: { key: 'scenario_run' },
+          data: {
+            value: {
+              ...run,
+              status: 'stopped',
+              completedAt: new Date().toISOString(),
+            } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'],
+          },
+        });
+        await sleep(POLL_INTERVAL_SEC * 1000);
+        continue;
+      }
 
       if (run && (run.status === 'requested' || isStaleRunning)) {
         log(isStaleRunning ? `Reclaiming stale run ${run.runId} (orphaned ${run.claimedAt ?? 'never claimed'})` : `Claiming run ${run.runId}`);

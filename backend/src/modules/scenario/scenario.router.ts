@@ -220,6 +220,28 @@ interface ScenarioStatusAccountItem {
 interface ScenarioStatusResponse {
   run: ScenarioRunMeta | null;
   accounts: ScenarioStatusAccountItem[];
+  /** true when the worker wrote a heartbeat within the last 30s. */
+  engineOnline: boolean;
+}
+
+const WORKER_HEARTBEAT_KEY = 'worker_heartbeat';
+// The worker upserts worker_heartbeat each poll (~10s). Consider the engine
+// online if the last heartbeat is within this window.
+const ENGINE_ONLINE_WINDOW_MS = 30_000;
+// A run stuck in 'stopping' this long with no live worker to finalize it is
+// self-cleared to 'stopped' so the dashboard never hangs on "Stopping…".
+const STOPPING_SELF_CLEAR_MS = 25_000;
+
+/** Reads worker_heartbeat and returns whether the engine is online (< 30s). */
+async function readEngineOnline(): Promise<boolean> {
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: WORKER_HEARTBEAT_KEY } });
+    const v = row?.value as { at?: string } | null;
+    if (!v?.at) return false;
+    return Date.now() - new Date(v.at).getTime() < ENGINE_ONLINE_WINDOW_MS;
+  } catch {
+    return false;
+  }
 }
 
 scenarioRouter.get(
@@ -227,9 +249,29 @@ scenarioRouter.get(
   requireAuth,
   async (req: Request, res: Response<ScenarioStatusResponse>, next: NextFunction): Promise<void> => {
     try {
-      // ── Read run metadata ──────────────────────────────────────────────────
+      // ── Read run metadata + engine heartbeat ───────────────────────────────
       const runRow = await prisma.settings.findUnique({ where: { key: SCENARIO_RUN_KEY } });
-      const run = runRow ? (runRow.value as unknown as ScenarioRunMeta) : null;
+      let run = runRow ? (runRow.value as unknown as ScenarioRunMeta) : null;
+      const engineOnline = await readEngineOnline();
+
+      // ── Self-clearing stop ─────────────────────────────────────────────────
+      // If a run is stuck 'stopping' for > STOPPING_SELF_CLEAR_MS AND no worker is
+      // online to finalize it, finalize it to 'stopped' here so the UI never hangs.
+      if (
+        run &&
+        run.status === 'stopping' &&
+        !engineOnline &&
+        run.stoppingAt &&
+        Date.now() - new Date(run.stoppingAt).getTime() > STOPPING_SELF_CLEAR_MS
+      ) {
+        const stopped: ScenarioRunMeta = { ...run, status: 'stopped' };
+        await prisma.settings.update({
+          where: { key: SCENARIO_RUN_KEY },
+          data: { value: stopped as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+        });
+        run = stopped;
+        console.log(`[scenario] self-cleared stuck 'stopping' run ${run.runId} → 'stopped' (no live worker)`);
+      }
 
       // ── Read all accounts ──────────────────────────────────────────────────
       const accountRows = await prisma.vfsAccount.findMany({
@@ -283,7 +325,7 @@ scenarioRouter.get(
         };
       });
 
-      res.status(200).json({ run, accounts });
+      res.status(200).json({ run, accounts, engineOnline });
     } catch (err) {
       next(err);
     }
