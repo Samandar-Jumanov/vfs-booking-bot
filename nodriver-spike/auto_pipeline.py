@@ -146,6 +146,99 @@ def telegram(msg):
         log("telegram failed:", e)
 
 
+def _telegram_text_raw(tok, chat, msg):
+    """Send a plain Telegram message directly (NOT gated by WORKER_BRIDGED).
+    Used as a fallback when a screenshot file is missing for telegram_photo()."""
+    try:
+        data = json.dumps({"chat_id": chat, "text": msg}).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage", data=data,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        log("telegram text fallback failed:", e)
+
+
+def telegram_photo(path, caption):
+    """Send a screenshot to Telegram as a captioned PHOTO (Telegram sendPhoto).
+
+    Works even in WORKER_BRIDGED mode — block alerts must reach the operator
+    instantly, and photos bypass the milestone bridge (the Python on the VPS has
+    the screenshot file locally). Guarded: missing TELEGRAM_* env or a missing
+    file degrades to a text alert / log and NEVER crashes the booking run.
+    """
+    tok = os.environ.get("TELEGRAM_BOT_TOKEN"); chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not tok or not chat:
+        log("(telegram photo not configured)", caption); return
+    try:
+        p = pathlib.Path(path)
+        if not p.exists():
+            log("telegram photo: file missing, sending text instead:", str(p))
+            _telegram_text_raw(tok, chat, caption + " (screenshot unavailable)")
+            return
+        img = p.read_bytes()
+        boundary = "----vfsbot" + str(os.getpid())
+
+        def _field(name, value):
+            return (("--" + boundary + "\r\n"
+                     "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n"
+                     + str(value) + "\r\n").encode("utf-8"))
+
+        body = b""
+        body += _field("chat_id", chat)
+        body += _field("caption", caption)
+        body += (("--" + boundary + "\r\n"
+                  "Content-Disposition: form-data; name=\"photo\"; filename=\"" + p.name + "\"\r\n"
+                  "Content-Type: image/png\r\n\r\n").encode("utf-8"))
+        body += img + b"\r\n"
+        body += ("--" + boundary + "--\r\n").encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{tok}/sendPhoto",
+            data=body,
+            headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
+        )
+        urllib.request.urlopen(req, timeout=30)
+        log("telegram photo sent:", caption)
+    except Exception as e:
+        log("telegram photo failed:", e)
+        # last-resort text so the alert still goes out
+        _telegram_text_raw(tok, chat, caption + " (photo send failed)")
+
+
+def shot_path(name):
+    """Absolute path to a screenshot taken by shot(name)."""
+    return str(SHOTS / f"{name}.png")
+
+
+def classify_block(url, body):
+    """Map a terminal/block page to a SPECIFIC reason code so the operator's
+    alert names the cause instead of a generic 'failed'. Checked most-specific
+    first. Returns one of:
+      rate_limit_429202 | rate_limit_429001 | session_expired | datadome_block
+      | turnstile_wall | payment_wall | submit_uncertain
+    """
+    u = (url or "").lower()
+    b = (body or "").lower()
+    # 429 sub-codes are the most actionable — branch on the exact code first.
+    if "429202" in b:
+        return "rate_limit_429202"
+    if "429001" in b:
+        return "rate_limit_429001"
+    if "session expired" in b or "session-expired" in u or "your session has expired" in b:
+        return "session_expired"
+    if "page-not-found" in u or "page not found" in b or "access denied" in b or "datadome" in b:
+        return "datadome_block"
+    # generic 429 with no readable sub-code → assume IP/session (429202 class)
+    if "429" in b or "too many requests" in b or "rate limit" in b:
+        return "rate_limit_429202"
+    if "access restricted" in b:
+        return "rate_limit_429001"
+    if "verify you are human" in b or "turnstile" in b or "are you a robot" in b or "captcha" in b:
+        return "turnstile_wall"
+    if any(k in b for k in ["payment", "pay now", "total amount", "amount due", "fee payable"]):
+        return "payment_wall"
+    return "submit_uncertain"
+
+
 def _unwrap(v):
     # nodriver sometimes returns JS arrays as [{'type':'string','value':...}, ...]
     if isinstance(v, dict) and "value" in v and set(v.keys()) <= {"type", "value", "className", "subtype"}:
@@ -565,6 +658,7 @@ async def book(page, subcat):
             log("OTP: no code from Mailsac within timeout — cannot pass the OTP gate")
             milestone("otp_timeout", email=EMAIL, error="otp_timeout")
             await dump_state(page, "3b_after_otp")
+            telegram_photo(shot_path("book_3b_after_otp"), f"⏱ OTP timeout (check MAILSAC_API_KEY) — {EMAIL}")
     # Step 3 — Book Appointment (type → date → slot → continue)
     await asyncio.sleep(2)
     await dump_state(page, "3_book_appointment")
@@ -611,11 +705,13 @@ async def book(page, subcat):
         await shot(page, "pipe_payment_wall")
         return "payment_wall", None
     else:
+        # Classify the block with a SPECIFIC reason code (429202/429001, session
+        # expired, datadome, turnstile, …) so the alert is actionable, not "failed".
+        reason_code = classify_block(url, body_lower)
         err_text = await jeval(page, """(()=>{return [...document.querySelectorAll('mat-error,.mat-error,[class*="error" i],[class*="alert" i]')].filter(e=>e.offsetParent).map(e=>(e.innerText||'').trim().slice(0,80)).filter(Boolean).slice(0,3).join('; ');})()""") or ""
-        reason = (err_text or body_raw[:120]).strip()
-        log("BOOK: submit outcome uncertain, ok=%s, reason=%s" % (ok, reason[:80]))
+        log("BOOK: submit blocked, ok=%s, reason=%s, detail=%s" % (ok, reason_code, (err_text or body_raw[:80])[:80]))
         await shot(page, "pipe_submit_uncertain")
-        return "failed", reason[:120]
+        return "failed", reason_code
 
 
 # ── MAIN ───────────────────────────────────────────────────────────────────
@@ -631,8 +727,17 @@ async def main():
     page = await browser.get(LOGIN_URL)
 
     if not await do_login(browser, page):
-        log("RESULT: LOGIN FAILED")
-        milestone("failed", email=EMAIL, error="login_failed")
+        # Classify WHY login failed (datadome page-not-found, session expired,
+        # turnstile wall, 429…) so the operator's alert is specific, not "failed".
+        lf_url = (await jeval(page, "location.href")) or ""
+        lf_body = (await jeval(page, "(document.body.innerText||'')")) or ""
+        reason_code = classify_block(lf_url, lf_body.lower())
+        if reason_code == "submit_uncertain":
+            reason_code = "login_failed"  # nothing block-specific matched
+        log("RESULT: LOGIN FAILED —", reason_code, "url:", lf_url)
+        await shot(page, "pipe_login_failed")
+        milestone("failed", email=EMAIL, error=reason_code)
+        telegram_photo(shot_path("pipe_login_failed"), f"❌ Login blocked: {reason_code} — {EMAIL}")
         await asyncio.sleep(5); browser.stop(); return
     log("LOGIN OK")
     milestone("logged_in", email=EMAIL)
@@ -656,14 +761,20 @@ async def main():
                 milestone("booking_submitted", email=EMAIL, slotId=slot, detail="dry_run")
                 break
             elif BOOK_ENABLED:
-                outcome, confirmation = await book(page, slot)
+                # book() returns (outcome, detail) where detail is the confirmation
+                # number (confirmed) or a specific reason code (failed).
+                outcome, detail = await book(page, slot)
                 if outcome == "confirmed":
-                    milestone("booked", email=EMAIL, slotId=slot, confirmation=confirmation)
+                    milestone("booked", email=EMAIL, slotId=slot, confirmation=detail)
+                    telegram_photo(shot_path("pipe_confirmed"), f"🎉 Booked: {detail} — {EMAIL} ({slot})")
                 elif outcome == "payment_wall":
                     # Slot reserved; payment is manual — emit booking_submitted not booked
                     milestone("booking_submitted", email=EMAIL, slotId=slot, detail="payment_wall")
+                    telegram_photo(shot_path("pipe_payment_wall"), f"⚠️ Payment wall — manual payment needed — {EMAIL} ({slot})")
                 else:
-                    milestone("failed", email=EMAIL, error=f"booking_{outcome}: {confirmation or ''}", slotId=slot)
+                    # detail is a specific reason code from classify_block().
+                    milestone("failed", email=EMAIL, error=detail, slotId=slot)
+                    telegram_photo(shot_path("pipe_submit_uncertain"), f"❌ Booking blocked: {detail} — {EMAIL} ({slot})")
                 break
             else:
                 log("slot found but BOOK_ENABLED off — stopping for operator")

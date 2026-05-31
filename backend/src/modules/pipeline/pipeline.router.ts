@@ -219,6 +219,25 @@ pipelineRouter.post(
           accountEmail: em,
         });
       } else if (body.step === 'failed' && body.status === 'fail') {
+        // Map the specific reason code from the spike's classify_block() to a
+        // clear, human-readable coded alert so the operator knows the cause at a
+        // glance. The Python side ALSO sends the matching screenshot as a photo
+        // (block-alert hardening). Unknown codes fall through to the raw reason.
+        const REASON_LABELS: Record<string, string> = {
+          rate_limit_429202: '⛔ Rate limited (429202 — IP/session). Cool down ~2h, then retry.',
+          rate_limit_429001: '⛔ Rate limited (429001 — account/User-ID). Quarantine + rotate account.',
+          session_expired: '🔁 Session expired — re-login needed (check VPN/proxy + cookies).',
+          datadome_block: '🚧 Datadome block (page-not-found/access-denied) — IP may be flagged.',
+          turnstile_wall: '🧩 Turnstile wall — captcha not passing (try fresh profile).',
+          otp_timeout: '⏱ OTP timeout — check MAILSAC_API_KEY.',
+          payment_wall: '⚠️ Payment wall — manual payment needed (slot reserved).',
+          submit_uncertain: '❓ Submit outcome uncertain — see screenshot.',
+          login_failed: '❌ Login failed — see screenshot.',
+        };
+        const label = body.error ? REASON_LABELS[body.error] : undefined;
+        if (label) {
+          await tg(`${label}\nAccount: ${em}`).catch(() => {});
+        }
         // NOTIFY_BOOKING_FAILURES gate is already inside dispatchNotification.
         await dispatchNotification({
           event: 'BOOKING_FAILED',
