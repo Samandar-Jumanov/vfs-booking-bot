@@ -169,7 +169,7 @@ export async function createOnboardProfile(dto: OnboardProfileDto) {
 }
 
 export function buildProfileCreateData(dto: CreateProfileDto) {
-  const { passportNumber, dob, vfsPassword, ...rest } = dto;
+  const { passportNumber, dob, vfsPassword, passportImageBase64, ...rest } = dto;
   const { passportNumberEnc, dobEnc } = encryptProfile({ passportNumber, dob });
 
   return {
@@ -181,6 +181,7 @@ export function buildProfileCreateData(dto: CreateProfileDto) {
     passportNumberEnc,
     dobEnc,
     ...(vfsPassword ? { vfsPasswordEnc: encrypt(vfsPassword) } : {}),
+    ...(passportImageBase64 ? { passportImageEnc: encrypt(passportImageBase64) } : {}),
   };
 }
 
@@ -284,7 +285,9 @@ export async function getProfileById(id: string) {
   const profile = await prisma.profile.findUnique({ where: { id } });
   if (!profile) throw new AppError(404, 'Profile not found', 'NOT_FOUND');
   const accountMap = await getLinkedAccountsByProfile([id]);
-  return { ...profile, ...decryptProfile(profile), linkedAccounts: accountMap.get(id) ?? [] };
+  // Strip passportImageEnc — it's large and sensitive; the worker accesses it via getProfileForBooking
+  const { passportImageEnc: _img, ...profileWithoutImage } = profile;
+  return { ...profileWithoutImage, ...decryptProfile(profile), linkedAccounts: accountMap.get(id) ?? [] };
 }
 
 export async function updateProfile(id: string, dto: UpdateProfileDto) {
@@ -313,6 +316,10 @@ export async function updateProfile(id: string, dto: UpdateProfileDto) {
     updates.vfsPasswordEnc = encrypt(dto.vfsPassword);
     delete updates.vfsPassword;
   }
+  if (dto.passportImageBase64) {
+    updates.passportImageEnc = encrypt(dto.passportImageBase64);
+    delete updates.passportImageBase64;
+  }
 
   const updated = await prisma.profile.update({ where: { id }, data: updates });
   // Onboard (public) profiles start inactive (pending payment) and get NO
@@ -340,6 +347,7 @@ export async function getProfileForBooking(id: string) {
     passportNumber: decrypt(profile.passportNumberEnc),
     dob: decrypt(profile.dobEnc),
     vfsPassword: profile.vfsPasswordEnc ? decrypt(profile.vfsPasswordEnc) : '',
+    passportImageBase64: profile.passportImageEnc ? decrypt(profile.passportImageEnc) : null,
   };
 }
 

@@ -11,6 +11,8 @@ backend/.browser-profiles/
 
 # Sensitive applicant data — never commit passport scans
 passports/
+# Decrypted passport images the worker writes per-booking — never commit
+backend/.passport-cache/
 
 # Logs (runtime artifact dirs only — NOT the src/modules/logs source module)
 *.log

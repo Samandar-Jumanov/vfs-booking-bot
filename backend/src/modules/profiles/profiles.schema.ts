@@ -11,6 +11,7 @@ export const createProfileSchema = z.object({
   gender: z.enum(['MALE', 'FEMALE', 'OTHER']).default('MALE'),
   passportIssueDate: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).optional(),
   vfsPassword: z.string().min(1).optional(),
+  passportImageBase64: z.string().max(10_485_760).optional(), // base64 of BIO-page scan, max ~7.5 MB raw
   telegramChatId: z.string().optional(),
   priority: z.enum(['HIGH', 'NORMAL']).default('NORMAL'),
 });

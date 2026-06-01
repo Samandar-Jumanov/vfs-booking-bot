@@ -73,6 +73,7 @@ export default function ProfilesPage() {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<Profile | null>(null);
   const [passportPrefill, setPassportPrefill] = useState<PassportExtraction['data'] | null>(null);
+  const [passportImageBase64, setPassportImageBase64] = useState<string | null>(null);
   const [passportResult, setPassportResult] = useState<PassportExtraction | null>(null);
   const [passportError, setPassportError] = useState('');
   const [passportUploading, setPassportUploading] = useState(false);
@@ -99,13 +100,30 @@ export default function ProfilesPage() {
     maxSize: 10 * 1024 * 1024,
     onDrop: async (files) => {
       if (!files[0]) return;
+      const file = files[0];
+      // Read base64 in parallel with the OCR upload so we can persist the image
+      const imageBase64Promise = new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          // Strip the data-URI prefix (data:image/png;base64,<actual base64>)
+          const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+          resolve(b64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
       const fd = new FormData();
-      fd.append('file', files[0]);
+      fd.append('file', file);
       setPassportUploading(true);
       setPassportError('');
       setPassportResult(null);
       try {
-        const res = await api.post('/profiles/extract-passport', fd);
+        const [res, imageBase64] = await Promise.all([
+          api.post('/profiles/extract-passport', fd),
+          imageBase64Promise,
+        ]);
+        setPassportImageBase64(imageBase64);
         const result = res.data as PassportExtraction;
         setPassportResult(result);
         if (result.extracted && result.data) {
@@ -118,6 +136,7 @@ export default function ProfilesPage() {
       } catch (err: any) {
         setPassportError(err?.response?.data?.error || 'Passport scan failed');
         setPassportPrefill(null);
+        setPassportImageBase64(null);
       } finally {
         setPassportUploading(false);
       }
@@ -386,6 +405,7 @@ export default function ProfilesPage() {
         <ProfileModal
           profile={editing}
           initialValues={editing ? null : passportPrefill}
+          passportImageBase64={editing ? null : passportImageBase64}
           onClose={() => setShowModal(false)}
         />
       )}
@@ -393,7 +413,7 @@ export default function ProfilesPage() {
   );
 }
 
-function ProfileModal({ profile, initialValues, onClose }: { profile: Profile | null; initialValues?: PassportExtraction['data'] | null; onClose: () => void }) {
+function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: { profile: Profile | null; initialValues?: PassportExtraction['data'] | null; passportImageBase64?: string | null; onClose: () => void }) {
   const qc = useQueryClient();
   interface FormState {
     fullName: string;
@@ -449,7 +469,12 @@ function ProfileModal({ profile, initialValues, onClose }: { profile: Profile | 
       if (!payload.passportExpiry) delete payload.passportExpiry;
       const accountIds = form.accountIds;
       delete payload.accountIds;
-      
+
+      // Include the passport BIO-page image (base64, no data-URI prefix) if captured via OCR drop
+      if (passportImageBase64) {
+        payload.passportImageBase64 = passportImageBase64;
+      }
+
       // On update, only send passportNumber/vfsPassword if they were changed (not empty)
       if (profile) {
         if (!form.passportNumber) delete payload.passportNumber;

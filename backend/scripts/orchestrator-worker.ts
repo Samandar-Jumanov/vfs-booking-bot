@@ -310,6 +310,22 @@ async function driveAccountReal(
     spawnEnv['PROFILE_PASSPORT'] = passportPlain;
     spawnEnv['PROFILE_EMAIL'] = profile.email;
     spawnEnv['PROFILE_CONTACT'] = profile.phone;
+
+    // Write decrypted passport BIO-page image to a temp file so Python uploads the correct scan.
+    if (profile.passportImageEnc) {
+      try {
+        const imageBase64 = decryptField(profile.passportImageEnc);
+        const cacheDir = path.join(__dirname, '..', '.passport-cache');
+        if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+        const imagePath = path.join(cacheDir, `${profile.id}.png`);
+        fs.writeFileSync(imagePath, Buffer.from(imageBase64, 'base64'));
+        spawnEnv['PASSPORT_IMAGE'] = imagePath;
+        log(`passport image written to ${imagePath}`);
+      } catch (imgErr) {
+        log(`WARN: failed to write passport image for profile ${profile.id}: ${(imgErr as Error).message}`);
+        // PASSPORT_IMAGE left unset — Python falls back to its default hardcoded path
+      }
+    }
   }
 
   log(`driving ${acct.email} (role=${acct.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, book=${bookEnabled === '1'})`);
