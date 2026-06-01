@@ -23,6 +23,7 @@ except Exception:
     pass
 
 REGISTER_URL = os.environ.get("VFS_REGISTER_URL", "https://visa.vfsglobal.com/uzb/en/lva/register")
+LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
 MAILSAC_KEY = os.environ.get("MAILSAC_API_KEY", "")
 SHOTS = pathlib.Path(__file__).parent / "shots"
 SHOTS.mkdir(exist_ok=True)
@@ -111,6 +112,67 @@ async def fill(page, selectors, value, label):
     log(f"WARN could not fill {label} (tried {selectors[0]})")
     return False
 
+
+
+async def trigger_activation_email(browser, email, password):
+    """VFS does NOT send the activation email at registration time — it sends it
+    when you ATTEMPT TO LOGIN with the still-inactive account (the page then shows
+    'This account is currently inactive. Please click here to resend the activation
+    email'). So after registering we attempt a login here to TRIGGER that email,
+    then the backend Mailsac-poll can actually find a link to visit. Best-effort:
+    any failure here is non-fatal (the account is still registered)."""
+    try:
+        log("trigger: opening login to make VFS send the activation email")
+        page = await browser.get(LOGIN_URL)
+        await asyncio.sleep(3)
+        await dismiss_consent(page)
+        # wait for the login form (email + password) to render
+        ready = False
+        for i in range(30):
+            st = await jeval(page, """(()=>{const vis=e=>e&&e.offsetParent!==null;
+                const ov=[...document.querySelectorAll('.ngx-overlay,[class*="loading-foreground"]')].some(vis);
+                const e=document.querySelector('input#email,input[formcontrolname="username"],input[type="email"]');
+                const p=document.querySelector('input[formcontrolname="password"],input[type="password"]');
+                return JSON.stringify({overlay:ov, email:!!e, pwd:!!p});})()""")
+            d = json.loads(st) if st else {}
+            if d.get("email") and d.get("pwd") and not d.get("overlay"):
+                ready = True; break
+            await asyncio.sleep(1)
+        if not ready:
+            url = await jeval(page, "location.href") or ""
+            log("trigger: login form did not render — skipping (url:", url, ")")
+            return
+        await fill(page, ['input#email', 'input[formcontrolname="username"]', 'input[type="email"]'], email, "login-email")
+        await fill(page, ['input[formcontrolname="password"]', 'input[type="password"]'], password, "login-password")
+        # wait for Turnstile auto-pass → Sign In enables
+        for i in range(30):
+            st = await jeval(page, """(()=>{const b=[...document.querySelectorAll('button')].find(x=>/sign\\s*in|log\\s*in/i.test(x.innerText||'')&&x.offsetParent);
+                const f=document.querySelector('[name="cf-turnstile-response"]');
+                return JSON.stringify({dis:b?!!b.disabled:'no-btn', cf:f&&f.value?f.value.length:0});})()""")
+            d = json.loads(st) if st else {}
+            if d.get("dis") is False:
+                break
+            await asyncio.sleep(1)
+        # click Sign In (trusted, then JS fallback)
+        clicked = False
+        for b in await page.select_all("button"):
+            if re.search(r"sign\s*in|log\s*in", (b.text or ""), re.I):
+                if await safe_click(page, b):
+                    clicked = True
+                break
+        if not clicked:
+            await jeval(page, "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/sign\\s*in|log\\s*in/i.test(x.innerText||'')&&!x.disabled&&x.offsetParent); if(b){b.click();}})()")
+        await asyncio.sleep(4)
+        body = (await jeval(page, "document.body.innerText") or "").lower()
+        if "inactive" in body or "resend" in body or "activation" in body:
+            log("trigger: 'account inactive' shown — VFS is sending the activation email")
+            # click the 'click here to resend the activation email' link to be sure
+            await jeval(page, "(()=>{const a=[...document.querySelectorAll('a,button,span')].find(x=>/resend|click here/i.test(x.innerText||'')&&x.offsetParent); if(a){a.click();return 1;} return 0;})()")
+            milestone("activation_email_triggered", email=email)
+        else:
+            log("trigger: no inactive message seen (login response unclear) — email may still have been sent")
+    except Exception as e:
+        log("trigger: non-fatal error:", str(e))
 
 
 async def main():
@@ -354,6 +416,9 @@ async def main():
     registered = bool(submitted)
     if registered:
         milestone("registered", email=email, password="***")
+        # VFS sends the activation email on a LOGIN ATTEMPT, not at registration —
+        # so trigger it now while we still have a browser session.
+        await trigger_activation_email(browser, email, password)
     else:
         milestone("failed", error="registration_not_confirmed", email=email)
     out = {"email": email, "password": password, "phone": "998" + phone, "registered": registered, "activated": activated}
