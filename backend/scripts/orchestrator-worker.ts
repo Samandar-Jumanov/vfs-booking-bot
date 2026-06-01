@@ -20,6 +20,17 @@ import { PrismaClient } from '@prisma/client';
 import { isDue, permitsGlobalAction, pickNextDue } from '../src/modules/lifecycle/pacer';
 import type { AccountTiming, PacerConfig } from '../src/modules/lifecycle/types';
 import type { LifecycleState } from '../src/modules/lifecycle/types';
+// throttleGuard: turn a register attempt's signals into a throttle classification,
+// derive exponential backoff, and enforce a hard daily registration cap so a
+// throttled run cools off instead of hammering VFS/Datadome (which deepens the block).
+import {
+  classifyThrottle,
+  isThrottled,
+  nextBackoffMs,
+  canRegisterNow,
+  recordRegistration,
+  type DailyRegState,
+} from '../src/modules/lifecycle/throttleGuard';
 
 // ---------------------------------------------------------------------------
 // Env — worker reads its own minimal set (NOT the full backend env schema)
@@ -36,6 +47,9 @@ const POLL_INTERVAL_SEC = Number(process.env.POLL_INTERVAL_SEC ?? 15);
 const STAGGER_SEC = Number(process.env.STAGGER_SEC ?? 45);
 const JITTER_SEC = Number(process.env.JITTER_SEC ?? 20);
 const REGISTER_STAGGER_SEC = Number(process.env.REGISTER_STAGGER_SEC ?? 120);
+// throttleGuard: hard cap on registrations per UTC day. Once hit, the worker
+// stops registering for the rest of the day (resets at 00:00 UTC).
+const MAX_REG_PER_DAY = Number(process.env.MAX_REG_PER_DAY ?? 8);
 const PROFILE_ENCRYPTION_KEY = (() => {
   const v = process.env.PROFILE_ENCRYPTION_KEY;
   if (!v) { console.error('[WORKER] PROFILE_ENCRYPTION_KEY is required'); process.exit(1); }
@@ -365,8 +379,16 @@ function encryptField(plaintext: string): string {
   return Buffer.concat([iv, authTag, encrypted]).toString('base64');
 }
 
-/** Returns { email, status } on success, null if registration failed or DB persist failed. */
-async function registerOne(runId: string): Promise<{ email: string; status: string } | null> {
+// throttleGuard: registerOne's outcome. `ok` carries the created account; on
+// failure it carries the raw signals (final URL / body / error) so the caller
+// can classify the throttle and back off accordingly.
+interface RegisterOutcome {
+  ok: { email: string; status: string } | null;
+  signals: { url?: string; bodyText?: string; error?: string };
+}
+
+/** Returns the created account (ok) on success plus the raw throttle signals for the caller to classify. */
+async function registerOne(runId: string): Promise<RegisterOutcome> {
   if (!process.env.MAILSAC_API_KEY) {
     log('WARN MAILSAC_API_KEY not set — account will register but not auto-activate (status PENDING)');
   }
@@ -393,7 +415,9 @@ async function registerOne(runId: string): Promise<{ email: string; status: stri
     const reason = crashed ? 'register_spike CRASHED' : 'no RESULT line — throttled or failed';
     log(reason);
     await tg(`❌ Registration failed: ${reason}`).catch(() => {});
-    return null;
+    // throttleGuard: a missing RESULT line usually means a page-not-found bounce
+    // or throttle — pass the raw spike output as bodyText so the caller can classify.
+    return { ok: null, signals: { bodyText: out } };
   }
 
   let result: RegResult;
@@ -402,13 +426,14 @@ async function registerOne(runId: string): Promise<{ email: string; status: stri
   } catch (e) {
     log('could not parse RESULT json:', (e as Error).message);
     await tg(`❌ Registration failed: RESULT parse error`).catch(() => {});
-    return null;
+    return { ok: null, signals: { error: 'result_parse_error' } };
   }
 
   if (!result.registered) {
     log(`did NOT register. result=${JSON.stringify(result)}`);
     await tg(`❌ Registration not confirmed: ${result.error ?? 'unknown'}`).catch(() => {});
-    return null;
+    // throttleGuard: surface the spike's error (e.g. "form_not_rendered") for classification.
+    return { ok: null, signals: { error: result.error, bodyText: out } };
   }
 
   const status = result.activated ? 'ACTIVE' : 'PENDING';
@@ -480,7 +505,8 @@ async function registerOne(runId: string): Promise<{ email: string; status: stri
     log(`DB persist failed for ${result.email}:`, (e as Error).message);
     outcome = null;
   }
-  return outcome;
+  // throttleGuard: persist/DB failure is NOT a throttle — return ok with no signals.
+  return { ok: outcome, signals: {} };
 }
 
 // ---------------------------------------------------------------------------
@@ -509,9 +535,39 @@ async function driveRun(runId: string): Promise<void> {
     if (spare < poolMin) {
       const need = poolMin - spare;
       log(`pool top-up: spare=${spare} < min=${poolMin}, registering ${need} account(s)`);
+
+      // throttleGuard: in-run daily-cap + backoff state. dailyReg persists only
+      // for the life of this run (good enough — runs are short and the cap mainly
+      // protects a single hammering loop). consecutiveThrottles drives backoff.
+      let dailyReg: DailyRegState = { dayKey: new Date().toISOString().slice(0, 10), count: 0 };
+      let consecutiveThrottles = 0;
+
       for (let i = 0; i < need; i++) {
+        // throttleGuard: stop registering once the daily cap is hit.
+        if (!canRegisterNow(dailyReg, MAX_REG_PER_DAY, new Date())) {
+          log(`register: daily cap ${MAX_REG_PER_DAY} reached (count=${dailyReg.count}) — skipping remaining ${need - i} registration(s)`);
+          break;
+        }
+
         const reg = await registerOne(runId);
-        if (reg) registered.push(reg);
+        if (reg.ok) {
+          registered.push(reg.ok);
+          dailyReg = recordRegistration(dailyReg, new Date());
+          consecutiveThrottles = 0; // success resets the backoff ramp
+        }
+
+        // throttleGuard: classify the attempt's signals. On a throttle, back off
+        // exponentially (instead of the fixed stagger) so we stop deepening the block.
+        const kind = classifyThrottle(reg.signals);
+        if (isThrottled(kind)) {
+          consecutiveThrottles += 1;
+          const backoff = nextBackoffMs(consecutiveThrottles - 1, 60_000, 3_600_000, 0.2, Math.random);
+          log(`register: THROTTLED (${kind}, streak=${consecutiveThrottles}) — backing off ${Math.ceil(backoff / 1000)}s before next attempt`);
+          await sleep(backoff);
+          continue; // skip the fixed stagger; backoff already waited
+        }
+
+        // Normal (non-throttled) stagger between registrations.
         if (i < need - 1) {
           const jitter = Math.floor(Math.random() * 30);
           log(`register stagger: waiting ${REGISTER_STAGGER_SEC + jitter}s`);

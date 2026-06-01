@@ -403,54 +403,42 @@ async def close_overlay(page):
 
 SUBCAT_LIST_RE = re.compile(r"work|cargo|ocma|seasonal|students", re.I)
 
+# ── Route-walk cache ─────────────────────────────────────────────────────────
+# After the first successful select_route, remember the dropdown geometry so
+# subsequent monitor checks skip the (slow) full SCAN of every mat-select. The
+# subcat dropdown index isn't guaranteed stable across reloads, so we verify the
+# cached index still exposes a subcat-shaped option list before trusting it and
+# fall back to a full re-scan (once) if it doesn't.
+_ROUTE_CACHE = {"sub_idx": None, "subcat_texts": None}
 
-async def select_route(page):
-    """Pick centre + category + a Work-D-visa subcat that has slots. Robust to
-    VFS's dependent (API-loaded) dropdowns. Returns the chosen subcat if a slot
-    is available (Continue enabled), else None."""
-    # wait for the form to render at least one dropdown
-    for _ in range(20):
-        if await page.select_all("mat-select"):
-            break
-        await asyncio.sleep(1)
 
-    # centre (index 0): retry until it opens with options, pick first
-    for _ in range(4):
-        opts = await open_select(page, 0, "centre")
-        if opts:
-            await pick_option(opts, lambda t: True, "centre")
-            break
-        await asyncio.sleep(2)
-    await asyncio.sleep(2)
+async def _option_texts(page, index, label, polls=5):
+    """Open dropdown #index, return stripped option texts, and close the overlay."""
+    opts = await open_select(page, index, label, polls=polls)
+    ot = [(o.text or "").strip() for o in opts]
+    await close_overlay(page)
+    return ot
 
-    # category (index 1): pick "Long Stay/Visa D"
-    opts = await open_select(page, 1, "category")
-    if opts:
-        await pick_option(opts, lambda t: re.search("long stay", t, re.I), "category")
 
-    # sub-category: the index isn't stable AND VFS loads it via API after the
-    # category pick, so SCAN every dropdown for the one whose options contain
-    # work/cargo/ocma (the real sub-cat list), polling until it appears.
-    sub_idx = None
-    texts = []
+async def _scan_for_subcat(page):
+    """SCAN every dropdown for the one whose options look like the subcat list
+    (work/cargo/ocma…). Returns (sub_idx, texts) or (None, []). Slow path."""
     for it in range(10):
         selects = await page.select_all("mat-select")
         log(f"scan iter {it}: {len(selects)} dropdowns")
         for i in range(len(selects)):
-            opts = await open_select(page, i, f"scan[{i}]", polls=5)
-            ot = [(o.text or "").strip() for o in opts]
-            await close_overlay(page)
+            ot = await _option_texts(page, i, f"scan[{i}]")
             log(f"  scan[{i}] sample:", ot[:3])
             if any(SUBCAT_LIST_RE.search(t) for t in ot):
-                sub_idx, texts = i, ot
-                break
-        if sub_idx is not None:
-            break
+                return i, ot
         await asyncio.sleep(2.5)
-    if sub_idx is None:
-        log("subcat dropdown not found (still loading?)"); return None
-    log(f"subcat at index {sub_idx}; options:", texts)
+    return None, []
 
+
+async def _try_subcat(page, sub_idx, texts):
+    """Given the subcat dropdown index + its option texts, pick each Work-D-visa
+    option and check whether a slot is available (Continue enabled). Returns the
+    chosen subcat text on a hit, else None."""
     work = [t for t in texts if SUBCAT.search(t)]
     if not work:
         log("no Work-D-visa sub-category in list"); return None
@@ -459,11 +447,75 @@ async def select_route(page):
         picked = await pick_option(opts, lambda t, wt=wt: t == wt, "sub:" + wt[:18])
         if not picked:
             continue
-        await asyncio.sleep(2.5)  # VFS evaluates availability → enables Continue
-        if await continue_enabled(page):
+        # VFS evaluates availability → enables Continue. Poll (≤3s) instead of a
+        # blind sleep so the happy path is fast but slow evaluations still pass.
+        if await wait_until(page,
+                "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/continue/i.test(x.innerText||'')&&x.offsetParent); return b?!b.disabled:false;})()",
+                timeout=3, interval=0.3):
             log("SLOT AVAILABLE in:", wt); return wt
         log("no slot in:", wt)
     return None
+
+
+async def select_route(page):
+    """Pick centre + category + a Work-D-visa subcat that has slots. Robust to
+    VFS's dependent (API-loaded) dropdowns. Returns the chosen subcat if a slot
+    is available (Continue enabled), else None.
+
+    Fast path: once the subcat dropdown index is cached, skip the full SCAN and
+    go straight to it; re-scan only if the cached index no longer matches."""
+    # wait for the form to render at least one dropdown
+    for _ in range(20):
+        if await page.select_all("mat-select"):
+            break
+        await asyncio.sleep(1)
+
+    # centre (index 0): retry until it opens with options, pick first. Poll for
+    # the selection to register instead of a fixed 2s tail-sleep.
+    for _ in range(4):
+        opts = await open_select(page, 0, "centre")
+        if opts:
+            await pick_option(opts, lambda t: True, "centre")
+            break
+        await asyncio.sleep(2)
+    # category dropdown (index 1) becomes populated after centre is chosen; wait
+    # for it to expose options (≤4s) rather than sleeping a flat 2s.
+    await wait_until(page,
+        "(()=>{const s=document.querySelectorAll('mat-select'); return s.length>1;})()",
+        timeout=4, interval=0.3)
+
+    # category (index 1): pick "Long Stay/Visa D"
+    opts = await open_select(page, 1, "category")
+    if opts:
+        await pick_option(opts, lambda t: re.search("long stay", t, re.I), "category")
+
+    # ── FAST PATH: trust the cached subcat dropdown index ─────────────────────
+    cached_idx = _ROUTE_CACHE["sub_idx"]
+    if cached_idx is not None:
+        selects = await page.select_all("mat-select")
+        if cached_idx < len(selects):
+            # Wait briefly for the (API-loaded) subcat dropdown to populate at the
+            # cached index, then verify its options still look like the subcat list.
+            texts = []
+            for _ in range(6):  # ≤~3s
+                texts = await _option_texts(page, cached_idx, "subcat(cached)")
+                if any(SUBCAT_LIST_RE.search(t) for t in texts):
+                    break
+                await asyncio.sleep(0.5)
+            if any(SUBCAT_LIST_RE.search(t) for t in texts):
+                log(f"subcat fast-path: cached index {cached_idx}; options:", texts)
+                _ROUTE_CACHE["subcat_texts"] = texts
+                return await _try_subcat(page, cached_idx, texts)
+        log("subcat fast-path: cached index no longer matches — re-scanning")
+
+    # ── SLOW PATH: scan every dropdown for the subcat list, then cache it ──────
+    sub_idx, texts = await _scan_for_subcat(page)
+    if sub_idx is None:
+        log("subcat dropdown not found (still loading?)"); return None
+    log(f"subcat at index {sub_idx}; options:", texts)
+    _ROUTE_CACHE["sub_idx"] = sub_idx
+    _ROUTE_CACHE["subcat_texts"] = texts
+    return await _try_subcat(page, sub_idx, texts)
 
 
 # ── BOOKING (Phase D) — ported from extension runBookingSteps ───────────────
@@ -783,10 +835,15 @@ async def main():
         # emit a per-check milestone so the backend sends a "no slots" Telegram
         # on EVERY check (operator wants a message each time, not a summary).
         milestone("monitoring", email=EMAIL, detail=f"check #{attempt} — Work D-visa, no slots")
-        # go back to a clean Appointment Details state for the next check
+        # go back to a clean Appointment Details state for the next check. The
+        # reload forces VFS to re-evaluate availability (required for a fresh
+        # read); after it, wait for the wizard form to re-render (≤8s) instead of
+        # a flat 8s sleep so a fast reload starts the next check sooner.
         await asyncio.sleep(MONITOR_INTERVAL)
         await jeval(page, "location.reload()")
-        await asyncio.sleep(8)
+        await wait_until(page,
+            "(()=>{return !!document.querySelector('mat-select') || /start new booking|book appointment|new booking/i.test(document.body.innerText||'');})()",
+            timeout=8, interval=0.4)
         await enter_wizard(page)
 
     log("done — keeping browser open 15s")
