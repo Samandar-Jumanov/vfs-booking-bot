@@ -7,8 +7,15 @@
 # tick "Remember" so it doesn't ask again.
 
 $chromeExe = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-$extPath   = "C:\Users\saman\OneDrive\Documents\vfs-booking-bot-main\extension\dist"
-$profile   = "C:\Users\saman\vfs-bot-chrome-profile"
+$repoRoot  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$extPath   = Join-Path $repoRoot "extension\dist"
+# Profile: set $env:VFS_FRESH_PROFILE='true' to use a brand-new profile (clean
+# Cloudflare cookies — defeats a flagged profile). Otherwise reuse the standard one.
+if ($env:VFS_FRESH_PROFILE -eq 'true') {
+  $profile = "C:\vfs-chrome-profile-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+} else {
+  $profile = "C:\vfs-chrome-profile"
+}
 $dashboard = "https://frontend-production-840c.up.railway.app/account-pool"
 
 # BrightData proxy config — only VFS traffic gets routed through this.
