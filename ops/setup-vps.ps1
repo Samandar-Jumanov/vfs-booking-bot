@@ -1,4 +1,4 @@
-# setup-vps.ps1 — ONE-SHOT, idempotent installer for the VFS booking engine on a
+﻿# setup-vps.ps1 - ONE-SHOT, idempotent installer for the VFS booking engine on a
 # fresh Windows VPS (Tashkent / native UZ IP). Run it over RDP from an ELEVATED
 # PowerShell. Safe to re-run: every step checks before it installs.
 #
@@ -16,7 +16,7 @@
 #   2. Clones the repo to -InstallDir (or `git pull` if already there).
 #   3. Installs deps: backend npm, extension npm + build, Python `nodriver`.
 #   4. Verifies tool versions and prints next steps.
-# It does NOT write secrets — you create backend\.env.worker yourself (Step 5).
+# It does NOT write secrets - you create backend\.env.worker yourself (Step 5).
 
 [CmdletBinding()]
 param(
@@ -77,7 +77,7 @@ Refresh-Path
 Info '== Step B: repository =='
 $repo = $InstallDir
 if (Test-Path (Join-Path $repo '.git')) {
-  Info ('Repo exists at ' + $repo + ' — git pull…')
+  Info ('Repo exists at ' + $repo + ' - git pull…')
   Push-Location $repo
   git pull --ff-only
   Pop-Location
@@ -114,7 +114,7 @@ if (Test-Path (Join-Path $extDir 'package.json')) {
   Pop-Location
   Ok 'extension built (extension\dist)'
 } else {
-  Warn 'extension\package.json not found — skipping extension build'
+  Warn 'extension\package.json not found - skipping extension build'
 }
 
 Info '== Step E: Python pipeline deps =='

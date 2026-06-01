@@ -1,16 +1,16 @@
-# Launches a dedicated Chrome instance with the VFS Booking Bot extension
+﻿# Launches a dedicated Chrome instance with the VFS Booking Bot extension
 # pre-loaded AND BrightData UZ proxy routing ONLY VFS traffic. Uses a
 # persistent profile so cookies/sessions survive between runs.
 #
 # Edit $brightDataUser / $brightDataPass below with your zone credentials.
-# Chrome will prompt for proxy auth on first VFS visit — paste creds and
+# Chrome will prompt for proxy auth on first VFS visit - paste creds and
 # tick "Remember" so it doesn't ask again.
 
 $chromeExe = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 $repoRoot  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $extPath   = Join-Path $repoRoot "extension\dist"
 # Profile: set $env:VFS_FRESH_PROFILE='true' to use a brand-new profile (clean
-# Cloudflare cookies — defeats a flagged profile). Otherwise reuse the standard one.
+# Cloudflare cookies - defeats a flagged profile). Otherwise reuse the standard one.
 if ($env:VFS_FRESH_PROFILE -eq 'true') {
   $profile = "C:\vfs-chrome-profile-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
 } else {
@@ -18,7 +18,7 @@ if ($env:VFS_FRESH_PROFILE -eq 'true') {
 }
 $dashboard = "https://frontend-production-840c.up.railway.app/account-pool"
 
-# BrightData proxy config — only VFS traffic gets routed through this.
+# BrightData proxy config - only VFS traffic gets routed through this.
 $brightDataHost = "brd.superproxy.io"
 $brightDataPort = 33335
 # Username can include -country-uz-session-XYZ for sticky UZ exit.
@@ -114,7 +114,7 @@ Write-Host "  Password: <your BrightData password>" -ForegroundColor Yellow
 Write-Host "  Tick 'Remember my credentials'" -ForegroundColor Yellow
 
 # Set $UseProxy = $true only if this machine is NOT in Uzbekistan. If you're
-# already on a UZ residential IP (check ipinfo.io), leave it $false — VFS loads
+# already on a UZ residential IP (check ipinfo.io), leave it $false - VFS loads
 # directly on your clean IP and you avoid all BrightData proxy issues
 # (allowlist, KYC, auth hangs). Override with env VFS_USE_PROXY=true.
 $UseProxy = ($env:VFS_USE_PROXY -eq 'true')

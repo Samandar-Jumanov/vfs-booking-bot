@@ -1,10 +1,10 @@
-# uninstall-autostart.ps1 — remove the VFS booking engine auto-start tasks.
+﻿# uninstall-autostart.ps1 - remove the VFS booking engine auto-start tasks.
 #
 # RUN (elevated PowerShell):
 #   .\ops\uninstall-autostart.ps1
 #
 # Stops and removes both scheduled tasks registered by install-autostart.ps1.
-# Does NOT touch the repo, .env.worker, or any data — only the auto-start tasks.
+# Does NOT touch the repo, .env.worker, or any data - only the auto-start tasks.
 
 $ErrorActionPreference = 'Stop'
 
