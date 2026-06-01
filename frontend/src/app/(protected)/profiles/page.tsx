@@ -3,21 +3,17 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import { api } from '@/lib/api';
-import { 
-  Plus, 
-  Upload, 
-  Trash2, 
-  Edit2, 
-  User, 
-  ShieldCheck, 
-  Search, 
+import {
+  Plus,
+  Upload,
+  Trash2,
+  Edit2,
+  User,
+  ShieldCheck,
+  Search,
   X,
   FileText,
-  AlertCircle,
   Link2,
-  MoreVertical,
-  ScanLine,
-  CheckCircle2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { CustomSelect } from '@/components/ui/CustomSelect';
@@ -54,29 +50,10 @@ interface VfsAccount {
   status: 'PENDING' | 'ACTIVE' | 'BLOCKED' | 'COOLDOWN';
 }
 
-interface PassportExtraction {
-  extracted: boolean;
-  confidence?: number;
-  mrz?: string[];
-  data?: Partial<{
-    fullName: string;
-    passportNumber: string;
-    dob: string;
-    passportExpiry: string;
-    nationality: string;
-    gender: 'MALE' | 'FEMALE' | 'OTHER';
-  }>;
-}
-
 export default function ProfilesPage() {
   const qc = useQueryClient();
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<Profile | null>(null);
-  const [passportPrefill, setPassportPrefill] = useState<PassportExtraction['data'] | null>(null);
-  const [passportImageBase64, setPassportImageBase64] = useState<string | null>(null);
-  const [passportResult, setPassportResult] = useState<PassportExtraction | null>(null);
-  const [passportError, setPassportError] = useState('');
-  const [passportUploading, setPassportUploading] = useState(false);
   const [importResults, setImportResults] = useState<{ succeeded: number; failed: number; results: { row: number; success: boolean; error?: string }[] } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -88,59 +65,6 @@ export default function ProfilesPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/profiles/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
-  });
-
-  const {
-    getRootProps: getPassportRootProps,
-    getInputProps: getPassportInputProps,
-    isDragActive: isPassportDragActive,
-  } = useDropzone({
-    accept: { 'image/jpeg': ['.jpg', '.jpeg'], 'image/png': ['.png'] },
-    maxFiles: 1,
-    maxSize: 10 * 1024 * 1024,
-    onDrop: async (files) => {
-      if (!files[0]) return;
-      const file = files[0];
-      // Read base64 in parallel with the OCR upload so we can persist the image
-      const imageBase64Promise = new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = reader.result as string;
-          // Strip the data-URI prefix (data:image/png;base64,<actual base64>)
-          const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-          resolve(b64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      const fd = new FormData();
-      fd.append('file', file);
-      setPassportUploading(true);
-      setPassportError('');
-      setPassportResult(null);
-      try {
-        const [res, imageBase64] = await Promise.all([
-          api.post('/profiles/extract-passport', fd),
-          imageBase64Promise,
-        ]);
-        setPassportImageBase64(imageBase64);
-        const result = res.data as PassportExtraction;
-        setPassportResult(result);
-        if (result.extracted && result.data) {
-          setEditing(null);
-          setPassportPrefill(result.data);
-          setShowModal(true);
-        } else {
-          setPassportPrefill(null);
-        }
-      } catch (err: any) {
-        setPassportError(err?.response?.data?.error || 'Passport scan failed');
-        setPassportPrefill(null);
-        setPassportImageBase64(null);
-      } finally {
-        setPassportUploading(false);
-      }
-    },
   });
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -161,92 +85,22 @@ export default function ProfilesPage() {
   });
 
   const profiles: Profile[] = data?.items || [];
-  const filteredProfiles = profiles.filter(p => 
+  const filteredProfiles = profiles.filter(p =>
     p.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
     p.passportNumberMasked.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
-    <DashboardShell 
-      title="Applicants" 
+    <DashboardShell
+      title="Applicants"
       description="Manage profiles and personal records for automated booking."
     >
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-        {/* Passport OCR Upload */}
-        <div
-          {...getPassportRootProps()}
-          className={cn(
-            "group border rounded-xl p-5 cursor-pointer transition-all duration-300 bg-card/50",
-            isPassportDragActive
-              ? "border-primary bg-primary/5 scale-[0.99]"
-              : "border-border hover:border-primary/50 hover:bg-accent/20"
-          )}
-        >
-          <input {...getPassportInputProps()} />
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className="w-11 h-11 rounded-lg bg-primary/10 text-primary flex items-center justify-center group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
-                {passportUploading ? (
-                  <div className="w-5 h-5 border-2 border-current border-t-transparent animate-spin rounded-full" />
-                ) : passportResult?.extracted ? (
-                  <CheckCircle2 className="w-5 h-5" />
-                ) : (
-                  <ScanLine className="w-5 h-5" />
-                )}
-              </div>
-              <div>
-                <h4 className="text-sm font-semibold">Passport OCR Prefill</h4>
-                <p className="text-xs text-muted-foreground">
-                  Drop a JPG or PNG passport scan to read the MRZ and prefill a new applicant.
-                </p>
-              </div>
-            </div>
-            <button type="button" className="h-9 px-4 rounded-md bg-accent text-xs font-bold text-foreground group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
-              Choose image
-            </button>
-          </div>
-
-          {(passportResult || passportError) && (
-            <div className={cn(
-              "mt-4 rounded-lg border p-3 text-xs",
-              passportResult?.extracted ? "border-green-500/20 bg-green-500/5" : "border-destructive/20 bg-destructive/5"
-            )}>
-              {passportError ? (
-                <div className="flex items-center gap-2 text-destructive">
-                  <AlertCircle className="w-4 h-4" />
-                  <span>{passportError}</span>
-                </div>
-              ) : passportResult?.extracted ? (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-semibold text-green-600 dark:text-green-400">
-                      Extracted {passportResult.data?.passportNumber || 'passport data'}
-                    </span>
-                    {passportResult.confidence !== undefined && (
-                      <span className="font-mono text-muted-foreground">{passportResult.confidence}% confidence</span>
-                    )}
-                  </div>
-                  {passportResult.mrz && (
-                    <pre className="overflow-x-auto rounded-md bg-background/70 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                      {passportResult.mrz.join('\n')}
-                    </pre>
-                  )}
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 text-destructive">
-                  <AlertCircle className="w-4 h-4" />
-                  <span>No valid passport MRZ found. The applicant form was left empty.</span>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-        
         {/* Actions Bar */}
         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
           <div className="relative w-full md:w-96">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <input 
+            <input
               type="text"
               placeholder="Filter by name or passport..."
               value={searchQuery}
@@ -255,8 +109,8 @@ export default function ProfilesPage() {
             />
           </div>
           <div className="flex items-center gap-3 w-full md:w-auto">
-            <button 
-              onClick={() => { setEditing(null); setPassportPrefill(null); setShowModal(true); }}
+            <button
+              onClick={() => { setEditing(null); setShowModal(true); }}
               className="flex-1 md:flex-none btn-primary gap-2 h-11 px-6 shadow-lg shadow-primary/20"
             >
               <Plus className="w-4 h-4" /> New Applicant
@@ -270,8 +124,8 @@ export default function ProfilesPage() {
             {...getRootProps()}
             className={cn(
               "group border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all duration-300",
-              isDragActive 
-                ? "border-primary bg-primary/5 scale-[0.99]" 
+              isDragActive
+                ? "border-primary bg-primary/5 scale-[0.99]"
                 : "border-muted hover:border-primary/50 hover:bg-accent/30"
             )}
           >
@@ -288,7 +142,7 @@ export default function ProfilesPage() {
 
         {/* Import Feedback */}
         {importResults && (
-           <motion.div 
+           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             className="card p-4 border-primary/20 bg-primary/5 flex items-center justify-between"
@@ -300,7 +154,7 @@ export default function ProfilesPage() {
               <div>
                 <p className="text-sm font-bold">Import Summary</p>
                 <p className="text-xs text-muted-foreground">
-                  <span className="text-green-500 font-bold">{importResults.succeeded} Success</span> • 
+                  <span className="text-green-500 font-bold">{importResults.succeeded} Success</span> •
                   <span className="text-destructive font-bold ml-1">{importResults.failed} Failed</span>
                 </p>
               </div>
@@ -315,7 +169,7 @@ export default function ProfilesPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           <AnimatePresence mode="popLayout">
             {filteredProfiles.map((p) => (
-              <motion.div 
+              <motion.div
                 layout
                 key={p.id}
                 initial={{ opacity: 0, scale: 0.95 }}
@@ -325,7 +179,7 @@ export default function ProfilesPage() {
               >
                 {/* Visual Accent */}
                 <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 -mr-16 -mt-16 rounded-full blur-3xl opacity-0 group-hover:opacity-100 transition-opacity" />
-                
+
                 <div className="flex items-start justify-between relative z-10 mb-6 font-mono">
                   <div className="h-12 w-12 rounded-2xl bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center group-hover:bg-primary group-hover:text-primary-foreground transition-all duration-300 shadow-sm">
                     <User className="w-6 h-6" />
@@ -370,13 +224,13 @@ export default function ProfilesPage() {
 
                   {/* Actions Overlay */}
                   <div className="flex gap-2 pt-2 translate-y-2 opacity-0 group-hover:translate-y-0 group-hover:opacity-100 transition-all duration-300">
-                    <button 
+                    <button
                       onClick={() => { setEditing(p); setShowModal(true); }}
                       className="flex-1 h-9 rounded-lg bg-accent hover:bg-primary hover:text-primary-foreground text-xs font-bold transition-all flex items-center justify-center gap-2"
                     >
                       <Edit2 className="w-3 h-3" /> Edit Profile
                     </button>
-                    <button 
+                    <button
                       onClick={() => { if (confirm('Delete applicant?')) deleteMutation.mutate(p.id); }}
                       className="w-9 h-9 flex items-center justify-center rounded-lg border border-destructive/20 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-all"
                     >
@@ -404,8 +258,6 @@ export default function ProfilesPage() {
       {showModal && (
         <ProfileModal
           profile={editing}
-          initialValues={editing ? null : passportPrefill}
-          passportImageBase64={editing ? null : passportImageBase64}
           onClose={() => setShowModal(false)}
         />
       )}
@@ -413,7 +265,7 @@ export default function ProfilesPage() {
   );
 }
 
-function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: { profile: Profile | null; initialValues?: PassportExtraction['data'] | null; passportImageBase64?: string | null; onClose: () => void }) {
+function ProfileModal({ profile, onClose }: { profile: Profile | null; onClose: () => void }) {
   const qc = useQueryClient();
   interface FormState {
     fullName: string;
@@ -431,19 +283,21 @@ function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: 
   }
 
   const [form, setForm] = useState<FormState>({
-    fullName: profile?.fullName ?? initialValues?.fullName ?? '',
-    passportNumber: initialValues?.passportNumber ?? '',
-    dob: profile?.dob ?? initialValues?.dob ?? '',
-    passportExpiry: profile?.passportExpiry ?? initialValues?.passportExpiry ?? '',
+    fullName: profile?.fullName ?? '',
+    passportNumber: '',
+    dob: profile?.dob ?? '',
+    passportExpiry: profile?.passportExpiry ?? '',
     passportIssueDate: profile?.passportIssueDate ?? '',
-    nationality: profile?.nationality ?? initialValues?.nationality ?? '',
+    nationality: profile?.nationality ?? '',
     email: profile?.email ?? '',
     phone: profile?.phone ?? '',
-    gender: profile?.gender ?? initialValues?.gender ?? 'MALE',
+    gender: profile?.gender ?? 'MALE',
     priority: profile?.priority ?? 'NORMAL',
     vfsPassword: '',
     accountIds: profile?.linkedAccounts?.map((account) => account.id) ?? [],
   });
+  const [passportImageBase64, setPassportImageBase64] = useState<string | null>(null);
+  const [passportImageName, setPassportImageName] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -451,6 +305,20 @@ function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: 
     queryKey: ['accounts'],
     queryFn: () => api.get<VfsAccount[]>('/accounts').then((r) => r.data),
   });
+
+  function handlePassportImageChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPassportImageName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      // Strip the data-URI prefix (data:image/png;base64,<actual base64>)
+      const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      setPassportImageBase64(b64);
+    };
+    reader.readAsDataURL(file);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -470,7 +338,7 @@ function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: 
       const accountIds = form.accountIds;
       delete payload.accountIds;
 
-      // Include the passport BIO-page image (base64, no data-URI prefix) if captured via OCR drop
+      // Include passport BIO-page image only when the user selected a new file
       if (passportImageBase64) {
         payload.passportImageBase64 = passportImageBase64;
       }
@@ -564,6 +432,26 @@ function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: 
                 <label className="text-xs font-medium text-muted-foreground">VFS portal password</label>
                 <input type="password" className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm focus:border-primary outline-none" required={!profile} {...field('vfsPassword')} placeholder={profile ? '••••••••' : 'Enter portal password'} />
               </div>
+              <div className="md:col-span-2 space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  Passport BIO-page image
+                </label>
+                <label className="flex items-center gap-3 w-full h-10 px-3 rounded-md border border-border bg-background text-sm text-muted-foreground cursor-pointer hover:border-primary transition-colors">
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg"
+                    className="sr-only"
+                    onChange={handlePassportImageChange}
+                  />
+                  <Upload className="w-4 h-4 shrink-0" />
+                  <span className="truncate">
+                    {passportImageName ?? (profile ? 'Leave empty to keep existing' : 'Choose PNG or JPG')}
+                  </span>
+                </label>
+                <p className="text-[11px] text-muted-foreground">
+                  Passport BIO-page (PNG/JPG) — uploaded to VFS at booking
+                </p>
+              </div>
               <div className="md:col-span-2">
                 <CustomSelect
                   label="Priority"
@@ -611,6 +499,9 @@ function ProfileModal({ profile, initialValues, passportImageBase64, onClose }: 
                 </div>
               </div>
             </div>
+            {error && (
+              <p className="text-xs text-destructive">{error}</p>
+            )}
           </form>
         </div>
 
