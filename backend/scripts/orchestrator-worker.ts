@@ -72,6 +72,8 @@ const prisma = new PrismaClient({
 // Pacer config
 // ---------------------------------------------------------------------------
 
+const PYTHON_BIN = process.env.PYTHON_BIN ?? 'python';
+
 const PACER_CFG: PacerConfig = {
   globalMinGapMs: (STAGGER_SEC + JITTER_SEC) * 1000,
   perAccountMinIntervalMs: 30_000,
@@ -309,7 +311,7 @@ async function driveAccountReal(
 
   log(`driving ${acct.email} (role=${acct.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, book=${bookEnabled === '1'})`);
 
-  await spawnAndWatch('python', [PIPELINE_SPIKE], spawnEnv, {
+  await spawnAndWatch(PYTHON_BIN, [PIPELINE_SPIKE], spawnEnv, {
     runId,
     email: acct.email,
     accountId: acct.id,
@@ -350,7 +352,7 @@ async function registerOne(runId: string): Promise<{ email: string; status: stri
   await tg('🔄 Registering new Mailsac account...').catch(() => {});
 
   log('spawning register_spike.py…');
-  const res = spawnSync('python', [REGISTER_SPIKE], {
+  const res = spawnSync(PYTHON_BIN, [REGISTER_SPIKE], {
     env: { ...process.env, PYTHONUTF8: '1', WORKER_BRIDGED: '1' },
     encoding: 'utf-8',
     timeout: 5 * 60 * 1000,
