@@ -1,4 +1,4 @@
-# install-autostart.ps1 — ONE-TIME setup (run by a technical person, NOT the client).
+﻿# install-autostart.ps1 - ONE-TIME setup (run by a technical person, NOT the client).
 #
 # Registers a Windows Scheduled Task that auto-starts the VFS booking engine at
 # logon and keeps it alive, so the client never has to open a terminal again.
@@ -38,7 +38,7 @@ $workerScript = Join-Path $repo 'launch-worker.ps1'
 $chromeScript = Join-Path $repo 'launch-bot-chrome.ps1'
 
 if (-not (Test-Path $workerScript)) {
-  Write-Host ("Cannot find " + $workerScript + " — run this from the cloned repo.") -ForegroundColor Red
+  Write-Host ("Cannot find " + $workerScript + " - run this from the cloned repo.") -ForegroundColor Red
   exit 1
 }
 
@@ -86,7 +86,7 @@ function Register-EngineTask {
   Write-Host ("Registered scheduled task: " + $Name) -ForegroundColor Green
 }
 
-# Worker task — optionally arm real booking submit.
+# Worker task - optionally arm real booking submit.
 $workerEnv = @{}
 if ($WorkerBook) { $workerEnv['WORKER_BOOK'] = '1' }
 Register-EngineTask -Name 'VFS-Booking-Worker' -Script $workerScript -EnvVars $workerEnv
@@ -95,7 +95,7 @@ if ($WithChrome) {
   if (Test-Path $chromeScript) {
     Register-EngineTask -Name 'VFS-Booking-Chrome' -Script $chromeScript -EnvVars @{}
   } else {
-    Write-Host ("Skipping Chrome task — " + $chromeScript + " not found.") -ForegroundColor Yellow
+    Write-Host ("Skipping Chrome task - " + $chromeScript + " not found.") -ForegroundColor Yellow
   }
 }
 
