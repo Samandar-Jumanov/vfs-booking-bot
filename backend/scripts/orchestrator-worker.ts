@@ -297,8 +297,13 @@ async function driveAccountReal(
     // Explicit pass-through so Python subprocess gets these even if process.env
     // inheritance is somehow stripped (e.g. stripped-env shells, Docker).
     MAILSAC_API_KEY: process.env.MAILSAC_API_KEY ?? '',
-    SUBCAT: process.env.SUBCAT ?? '',
   };
+
+  // Only pass SUBCAT when explicitly set — an empty value makes Python's
+  // re.compile('') match EVERY subcategory. Unset = Python's Work-D default.
+  if (process.env.SUBCAT && process.env.SUBCAT.trim()) {
+    spawnEnv['SUBCAT'] = process.env.SUBCAT.trim();
+  }
 
   if (profile) {
     const [firstName, ...rest] = (profile.fullName ?? 'Test User').trim().split(/\s+/);
