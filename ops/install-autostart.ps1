@@ -56,7 +56,7 @@ function Register-EngineTask {
   # Build a command that sets any env vars then launches the keep-alive script.
   $prefix = ''
   if ($EnvVars) {
-    foreach ($k in $EnvVars.Keys) { $prefix += ("$env:" + $k + "='" + $EnvVars[$k] + "'; ") }
+    foreach ($k in $EnvVars.Keys) { $prefix += ('$env:' + $k + "='" + $EnvVars[$k] + "'; ") }
   }
   $command = $prefix + "& '" + $Script + "'"
 
