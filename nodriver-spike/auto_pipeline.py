@@ -46,6 +46,16 @@ PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
 DASHBOARD_URL = os.environ.get("VFS_DASHBOARD_URL", LOGIN_URL.replace("/login", "/dashboard"))
 MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "120"))
+# DIRECT_POLL=1 → monitor by calling CheckIsSlotAvailable as a DIRECT (cookieless,
+# no-browser) HTTP request replaying the captured token — the proven pattern from
+# working VFS monitors (khanrn/vfs-slots-api-monitor): the rate limit bites the
+# LOGIN flow, not the cheap API poll, so this lets one IP poll often AND lets us
+# rotate IPs (PROXY_LIST) without re-logging-in. Default OFF = current in-browser
+# fetch (safe). Flip ON only after replay_probe confirms HTTP 200 (token replays).
+DIRECT_POLL = os.environ.get("DIRECT_POLL") == "1"
+# Optional comma-separated proxy URLs; in DIRECT_POLL mode each cycle rotates to
+# the next one so no single IP exceeds the per-IP limit. Empty = direct VPS IP.
+PROXY_LIST = [p.strip() for p in os.environ.get("PROXY_LIST", "").split(",") if p.strip()]
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
 SUBCAT = re.compile(os.environ.get("SUBCAT", r"work\s*\(?\s*(?:visa\s*d|d\s*visa)"), re.I)
@@ -651,6 +661,89 @@ async def replay_probe(page):
     log(f"REPLAY-PROBE [{where}]: status={status} → {verdict}")
     log(f"REPLAY-PROBE body: {snippet}")
     telegram(f"🧪 Token-replay probe [{where}]: HTTP {status} — {verdict}")
+
+
+def _lift_headers():
+    h = {
+        "authorize": _LIFT_AUTH.get("authorize") or "",
+        "clientsource": _LIFT_AUTH.get("clientsource") or "",
+        "content-type": "application/json;charset=UTF-8",
+        "accept": "application/json, text/plain, */*",
+        "user-agent": BROWSER_UA,
+        "origin": "https://visa.vfsglobal.com",
+        "referer": "https://visa.vfsglobal.com/",
+    }
+    if _LIFT_AUTH.get("route"):
+        h["route"] = _LIFT_AUTH["route"]
+    return h
+
+
+def _lift_body():
+    return {
+        "countryCode": _LIFT_BODY.get("countryCode") or VFS_COUNTRY,
+        "missionCode": _LIFT_BODY.get("missionCode") or VFS_MISSION,
+        "vacCode": _LIFT_BODY.get("vacCode") or VFS_VAC,
+        "visaCategoryCode": _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT,
+        "roleName": "Individual",
+        "loginUser": EMAIL,
+        "payCode": "",
+    }
+
+
+def _next_proxy(n):
+    """Round-robin the proxy pool (DIRECT_POLL mode). None = direct VPS IP."""
+    if not PROXY_LIST:
+        return None
+    return PROXY_LIST[n % len(PROXY_LIST)]
+
+
+async def api_check_direct(proxy=None):
+    """DIRECT (cookieless, no-browser) CheckIsSlotAvailable — same return shape as
+    api_check_availability ({earliestDate, earliestSlotLists, error, _status}).
+    This is the proven 24/7 pattern: replay the captured token as a plain header,
+    optionally through a rotating proxy, so the cheap poll never depends on the
+    heavy browser session and the per-IP limit can be spread across many IPs."""
+    if not auth_captured():
+        return None
+    headers = _lift_headers()
+    body_bytes = json.dumps(_lift_body()).encode()
+
+    def _do():
+        opener = (urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            if proxy else urllib.request.build_opener())
+        req = urllib.request.Request(LIFT_API_URL, data=body_bytes, headers=headers, method="POST")
+        try:
+            r = opener.open(req, timeout=25)
+            return r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, e.read().decode("utf-8", "replace")
+            except Exception:
+                return e.code, ""
+        except Exception as e:
+            return 0, str(e)[:160]
+
+    try:
+        status, raw = await asyncio.to_thread(_do)
+    except Exception as e:
+        log("DIRECT: call failed:", str(e)[:100])
+        return None
+    if status == 0:
+        log("DIRECT: transport error:", str(raw)[:100])
+        return None
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {}
+    if status != 200:
+        log(f"DIRECT: HTTP {status}", str(data)[:120])
+    return {
+        "earliestDate": (data or {}).get("earliestDate"),
+        "earliestSlotLists": (data or {}).get("earliestSlotLists") or [],
+        "error": (data or {}).get("error"),
+        "_status": status,
+    }
 
 
 # ── LOGIN ──────────────────────────────────────────────────────────────────
@@ -1393,7 +1486,16 @@ async def main():
         # it triggers VFS's request → _install_auth_capture stores the real codes →
         # codes_confirmed() flips → subsequent cycles use the fast API path.
         if auth_captured() and codes_confirmed():
-            api = await api_check_availability(page)
+            # DIRECT_POLL: poll the API as a direct cookieless HTTP call (proven
+            # 24/7 pattern), rotating the proxy pool each cycle. Else use the
+            # in-browser fetch (default, reuses the live session/cookies).
+            if DIRECT_POLL:
+                proxy = _next_proxy(attempt)
+                if proxy:
+                    log(f"DIRECT poll via {proxy.split('@')[-1]}")
+                api = await api_check_direct(proxy)
+            else:
+                api = await api_check_availability(page)
             if api is not None:
                 status = api.get("_status", 0)
                 err = api.get("error")
