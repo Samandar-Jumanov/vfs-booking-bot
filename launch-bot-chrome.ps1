@@ -121,10 +121,12 @@ $UseProxy = ($env:VFS_USE_PROXY -eq 'true')
 
 $chromeArgs = @(
     "--load-extension=$extPath",
+    # Chrome 137+ blocks --load-extension for security; this feature flag re-enables it.
+    "--disable-extensions-except=$extPath",
     "--user-data-dir=$profile",
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-features=AutofillServerCommunication,PasswordManagerOnboarding,AutofillEnableAccountWalletStorage",
+    "--disable-features=DisableLoadExtensionCommandLineSwitch,AutofillServerCommunication,PasswordManagerOnboarding,AutofillEnableAccountWalletStorage",
     "--disable-save-password-bubble"
 )
 if ($UseProxy) {
