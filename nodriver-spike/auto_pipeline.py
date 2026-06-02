@@ -1301,7 +1301,13 @@ async def main():
         # slot but we still need the UI to navigate to bookable state — select_route
         # both confirms availability AND leaves the wizard ready for book().
         if not used_api or slot:
-            ui_slot = await select_route(page)
+            try:
+                ui_slot = await select_route(page)
+            except Exception as _se:
+                # A transient DOM/nav error in the route walk must NOT kill a
+                # multi-hour monitor. Log, treat as "no slot this cycle", keep looping.
+                log("select_route errored (continuing loop):", str(_se)[:160])
+                ui_slot = None
             if slot:
                 # API flagged a slot; prefer the concrete subcat select_route lands on
                 # (book() needs the wizard in the picked state). If the UI couldn't
