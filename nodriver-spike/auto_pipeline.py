@@ -601,9 +601,39 @@ async def _reenter_wizard_fresh(page):
     await enter_wizard(page)
 
 
-async def open_select(page, index, label, polls=6):
-    """Open mat-select #index, return its option elements (nodriver elements).
-    polls*0.4s is the max wait for options to render (keep small when scanning)."""
+# JS that scopes option-reading to the CURRENTLY-OPEN CDK overlay panel only.
+# Angular Material renders the open mat-select's options in a `.cdk-overlay-pane`
+# (containing `.mat-mdc-select-panel` / `[role=listbox]`) appended to <body> —
+# NOT inside the <mat-select>. Reading every `mat-option` on the page therefore
+# mixes in STALE options from panels that didn't fully tear down, which is why the
+# subcat scan read the CATEGORY options. This tags ONLY the live panel's options
+# with data-uc-opt so page.select_all('[data-uc-opt]') returns the right ones.
+_TAG_OPEN_PANEL_OPTS_JS = r"""(()=>{
+    const vis=e=>e&&e.offsetParent!==null&&e.getAttribute('aria-hidden')!=='true';
+    // Live select panels = overlay panes that are visible and not collapsing.
+    const panes=[...document.querySelectorAll('.cdk-overlay-pane')].filter(p=>{
+        if(!vis(p))return false;
+        const st=getComputedStyle(p);
+        if(st.display==='none'||st.visibility==='hidden')return false;
+        return !!p.querySelector('.mat-mdc-select-panel,[role=listbox],mat-option,.mat-mdc-option');
+    });
+    if(!panes.length){return 0;}
+    // Prefer the LAST opened pane (top of the overlay stack = the one we just opened).
+    const pane=panes[panes.length-1];
+    document.querySelectorAll('[data-uc-opt]').forEach(e=>e.removeAttribute('data-uc-opt'));
+    const opts=[...pane.querySelectorAll('mat-option,.mat-mdc-option,[role=option]')]
+        .filter(o=>vis(o)&&((o.innerText||'').trim()));
+    opts.forEach(o=>o.setAttribute('data-uc-opt','1'));
+    return opts.length;})()"""
+
+
+async def open_select(page, index, label, polls=12):
+    """Open mat-select #index and return ONLY the option elements that belong to
+    the panel that just opened (scoped to the live CDK overlay pane, not every
+    mat-option on the page). polls*0.4s is the max wait for that panel to render."""
+    # Close any previously-open overlay first so its (stale) options can't be read
+    # as if they were ours — the root cause of the subcat misread.
+    await close_overlay(page)
     triggers = await page.select_all("mat-select")
     if index >= len(triggers):
         return []
@@ -611,11 +641,14 @@ async def open_select(page, index, label, polls=6):
         await triggers[index].mouse_click()
     except Exception:
         return []
+    # Poll until the OPEN panel renders its options, then read only those.
     for _ in range(polls):
-        opts = await page.select_all("mat-option, .mat-mdc-option")
-        opts = [o for o in opts if ((o.text or "").strip())]
-        if opts:
-            return opts
+        n = await jeval(page, _TAG_OPEN_PANEL_OPTS_JS)
+        if isinstance(n, (int, float)) and n > 0:
+            opts = await page.select_all('[data-uc-opt]')
+            opts = [o for o in opts if ((o.text or "").strip())]
+            if opts:
+                return opts
         await asyncio.sleep(0.4)
     return []
 
@@ -641,7 +674,14 @@ async def continue_enabled(page):
 
 
 async def close_overlay(page):
-    await jeval(page, "(()=>{const b=document.querySelector('.cdk-overlay-backdrop'); if(b)b.click();})()")
+    """Tear down any open CDK overlay panel so its options can't be misread as the
+    next dropdown's. Click the backdrop AND dispatch Escape (some mat-select panels
+    open without a backdrop), then drop any leftover option tags."""
+    await jeval(page, """(()=>{
+        const b=document.querySelector('.cdk-overlay-backdrop'); if(b)b.click();
+        document.querySelectorAll('[data-uc-opt]').forEach(e=>e.removeAttribute('data-uc-opt'));
+        ['keydown','keyup'].forEach(t=>document.dispatchEvent(new KeyboardEvent(t,{key:'Escape',keyCode:27,which:27,bubbles:true})));
+    })()""")
     await asyncio.sleep(0.4)
 
 
@@ -664,12 +704,51 @@ async def _option_texts(page, index, label, polls=5):
     return ot
 
 
+# Match the sub-category dropdown by the human-visible label/placeholder near it
+# ("Choose your sub-category" / "Select your sub-category"), independent of order.
+SUBCAT_LABEL_RE = re.compile(r"sub[\s-]*category", re.I)
+
+
+async def _subcat_index_by_label(page):
+    """Return the index (within document.querySelectorAll('mat-select')) of the
+    dropdown whose surrounding label/placeholder text mentions 'sub-category'.
+    This is far more robust than a positional index across reloads. -1 if none."""
+    idx = await jeval(page, r"""(()=>{
+        const sels=[...document.querySelectorAll('mat-select')];
+        const re=/sub[\s-]*category/i;
+        for(let i=0;i<sels.length;i++){
+            const s=sels[i];
+            // gather candidate label sources: aria-label, the select's own text
+            // (placeholder), and the enclosing mat-form-field's label.
+            const parts=[s.getAttribute('aria-label')||'',(s.innerText||'')];
+            const ff=s.closest('mat-form-field,.mat-mdc-form-field,.mat-form-field');
+            if(ff){
+                const lbl=ff.querySelector('mat-label,label,.mat-mdc-floating-label,.mat-form-field-label');
+                if(lbl)parts.push(lbl.innerText||'');
+                parts.push(ff.innerText||'');
+            }
+            if(parts.some(t=>re.test(t)))return i;
+        }
+        return -1;})()""")
+    return int(idx) if isinstance(idx, (int, float)) else -1
+
+
 async def _scan_for_subcat(page):
-    """SCAN every dropdown for the one whose options look like the subcat list
-    (work/cargo/ocma…). Returns (sub_idx, texts) or (None, []). Slow path."""
+    """Find the sub-category dropdown. PREFER matching by its visible label
+    ('sub-category'); fall back to scanning every dropdown for one whose OPEN
+    panel exposes the subcat list (work/cargo/ocma…). Returns (sub_idx, texts)
+    or (None, []). Slow path."""
     for it in range(10):
         selects = await page.select_all("mat-select")
         log(f"scan iter {it}: {len(selects)} dropdowns")
+        # 1) Label-based identification (robust to positional index changes).
+        lbl_idx = await _subcat_index_by_label(page)
+        if 0 <= lbl_idx < len(selects):
+            ot = await _option_texts(page, lbl_idx, f"subcat(label[{lbl_idx}])")
+            log(f"  subcat label match at [{lbl_idx}] sample:", ot[:3])
+            if any(SUBCAT_LIST_RE.search(t) for t in ot):
+                return lbl_idx, ot
+        # 2) Fallback: open each dropdown and inspect its OWN (scoped) options.
         for i in range(len(selects)):
             ot = await _option_texts(page, i, f"scan[{i}]")
             log(f"  scan[{i}] sample:", ot[:3])
@@ -733,24 +812,29 @@ async def select_route(page):
     if opts:
         await pick_option(opts, lambda t: re.search("long stay", t, re.I), "category")
 
-    # ── FAST PATH: trust the cached subcat dropdown index ─────────────────────
-    cached_idx = _ROUTE_CACHE["sub_idx"]
-    if cached_idx is not None:
+    # ── FAST PATH: prefer the LABEL-identified subcat dropdown, else the cached
+    # index. Either way we VALIDATE against the open panel before trusting it. ──
+    fast_idx = await _subcat_index_by_label(page)
+    if not (0 <= fast_idx < len(await page.select_all("mat-select"))):
+        fast_idx = _ROUTE_CACHE["sub_idx"]
+    if fast_idx is not None:
         selects = await page.select_all("mat-select")
-        if cached_idx < len(selects):
-            # Wait briefly for the (API-loaded) subcat dropdown to populate at the
-            # cached index, then verify its options still look like the subcat list.
+        if fast_idx < len(selects):
+            # The subcat dropdown is dependent (loads after category) — wait briefly
+            # for it to populate, then verify its OWN (scoped) options look like the
+            # subcat list before trusting the index.
             texts = []
-            for _ in range(6):  # ≤~3s
-                texts = await _option_texts(page, cached_idx, "subcat(cached)")
+            for _ in range(8):  # ≤~4s
+                texts = await _option_texts(page, fast_idx, "subcat(fast)")
                 if any(SUBCAT_LIST_RE.search(t) for t in texts):
                     break
                 await asyncio.sleep(0.5)
             if any(SUBCAT_LIST_RE.search(t) for t in texts):
-                log(f"subcat fast-path: cached index {cached_idx}; options:", texts)
+                log(f"subcat fast-path: index {fast_idx}; options:", texts)
+                _ROUTE_CACHE["sub_idx"] = fast_idx
                 _ROUTE_CACHE["subcat_texts"] = texts
-                return await _try_subcat(page, cached_idx, texts)
-        log("subcat fast-path: cached index no longer matches — re-scanning")
+                return await _try_subcat(page, fast_idx, texts)
+        log("subcat fast-path: index didn't expose subcat options — re-scanning")
 
     # ── SLOW PATH: scan every dropdown for the subcat list, then cache it ──────
     sub_idx, texts = await _scan_for_subcat(page)
