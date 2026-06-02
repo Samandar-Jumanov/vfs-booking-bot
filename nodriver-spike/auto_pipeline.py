@@ -69,6 +69,24 @@ VFS_VISACAT = os.environ.get("VFS_VISACAT", "WDVUZ")   # visa category (Work D-v
 # capture succeeds → monitor falls back to the UI select_route() path (current
 # behaviour), so nothing breaks if capture never fires.
 _LIFT_AUTH = {"authorize": None, "clientsource": None, "route": None}
+# The REAL availability-request body the browser POSTs when the wizard fires its
+# OWN CheckIsSlotAvailable (captured off request.post_data). The env defaults
+# (VFS_VAC/VFS_VISACAT etc.) are GUESSES — if wrong, the API returns
+# earliestDate:null = a silent false "no slots". Capturing the wizard's real body
+# gives us the authoritative codes. Empty until the UI walk triggers the request.
+_LIFT_BODY = {
+    "countryCode": None,
+    "missionCode": None,
+    "vacCode": None,
+    "visaCategoryCode": None,
+}
+# True once _LIFT_BODY holds both the vacCode + visaCategoryCode the wizard used.
+# Until then we MUST drive the UI walk (select_route) first so VFS fires its own
+# CheckIsSlotAvailable and we sniff the correct codes — only then is the fast API
+# poll path trustworthy.
+_CODES_CONFIRMED = False
+# Logged once so the operator can see which code source the first API call used.
+_API_SOURCE_LOGGED = False
 
 
 # ── Mailsac (booking OTP) ────────────────────────────────────────────────────
@@ -338,6 +356,39 @@ async def _install_auth_capture(page):
                         if _LIFT_AUTH.get(lk) != v:
                             _LIFT_AUTH[lk] = v
                             log(f"AUTH-CAPTURE: {lk}={str(v)[:24]}…")
+                # Also sniff the REAL request body of the wizard's OWN
+                # CheckIsSlotAvailable POST → authoritative vac/visacat/country/
+                # mission codes (the env defaults are guesses). CDP exposes the body
+                # as request.post_data (nodriver attr) / "postData" (raw dict). Parse
+                # the JSON and stash the four codes in _LIFT_BODY.
+                if "checkisslotavailable" in u.lower():
+                    pd = getattr(evt.request, "post_data", None)
+                    if pd is None:
+                        try:
+                            pd = (evt.request.to_json() or {}).get("postData")
+                        except Exception:
+                            pd = None
+                    if pd:
+                        try:
+                            j = json.loads(pd)
+                        except Exception:
+                            j = None
+                        if isinstance(j, dict):
+                            changed = False
+                            for key in ("countryCode", "missionCode",
+                                        "vacCode", "visaCategoryCode"):
+                                val = j.get(key)
+                                if val and _LIFT_BODY.get(key) != val:
+                                    _LIFT_BODY[key] = val
+                                    changed = True
+                            if changed:
+                                _maybe_confirm_codes()
+                                log("API: captured real codes — vac=%s visacat=%s country=%s mission=%s" % (
+                                    _LIFT_BODY.get("vacCode"),
+                                    _LIFT_BODY.get("visaCategoryCode"),
+                                    _LIFT_BODY.get("countryCode"),
+                                    _LIFT_BODY.get("missionCode"),
+                                ))
             except Exception:
                 pass
 
@@ -355,6 +406,23 @@ def auth_captured():
     return bool(_LIFT_AUTH.get("authorize") and _LIFT_AUTH.get("clientsource"))
 
 
+def _maybe_confirm_codes():
+    """Flip _CODES_CONFIRMED once the wizard's real vac + visacat codes are in
+    _LIFT_BODY. After this, api_check_availability() can be trusted with the
+    correct body and the monitor can switch from the UI walk to fast API polling."""
+    global _CODES_CONFIRMED
+    if (not _CODES_CONFIRMED
+            and _LIFT_BODY.get("vacCode")
+            and _LIFT_BODY.get("visaCategoryCode")):
+        _CODES_CONFIRMED = True
+        log("API: codes CONFIRMED from wizard — switching to API polling")
+
+
+def codes_confirmed():
+    """True once the wizard's real vacCode + visaCategoryCode have been captured."""
+    return _CODES_CONFIRMED
+
+
 async def api_check_availability(page):
     """Poll VFS's authed CheckIsSlotAvailable endpoint via an IN-BROWSER fetch()
     (reuses the live session/cookies/origin — most Cloudflare-happy). Returns a
@@ -367,11 +435,25 @@ async def api_check_availability(page):
     """
     if not auth_captured():
         return None
+    # Prefer the codes the wizard actually used (captured off its CheckIsSlotAvailable
+    # POST body) over the GUESSED env defaults. Falling back to env keeps the call
+    # working before/if capture never fires.
+    global _API_SOURCE_LOGGED
+    country = _LIFT_BODY.get("countryCode") or VFS_COUNTRY
+    mission = _LIFT_BODY.get("missionCode") or VFS_MISSION
+    vac = _LIFT_BODY.get("vacCode") or VFS_VAC
+    visacat = _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT
+    if not _API_SOURCE_LOGGED:
+        _API_SOURCE_LOGGED = True
+        vac_src = "captured" if _LIFT_BODY.get("vacCode") else "env-default"
+        cat_src = "captured" if _LIFT_BODY.get("visaCategoryCode") else "env-default"
+        log("API: first call codes — vac=%s (%s) visacat=%s (%s) country=%s mission=%s" % (
+            vac, vac_src, visacat, cat_src, country, mission))
     body = {
-        "countryCode": VFS_COUNTRY,
-        "missionCode": VFS_MISSION,
-        "vacCode": VFS_VAC,
-        "visaCategoryCode": VFS_VISACAT,
+        "countryCode": country,
+        "missionCode": mission,
+        "vacCode": vac,
+        "visaCategoryCode": visacat,
         "roleName": "Individual",
         "loginUser": EMAIL,
         "payCode": "",
@@ -951,7 +1033,13 @@ async def main():
         slot = None          # truthy → a slot to book (UI subcat text OR API earliestDate)
         used_api = False     # did the cheap API path resolve this cycle?
 
-        if auth_captured():
+        # GUARANTEE CORRECT CODES: until the wizard has fired its OWN
+        # CheckIsSlotAvailable (so we sniff the real vac/visacat codes off its POST
+        # body), the API body would use GUESSED env defaults → silent false "no
+        # slots". So run the UI walk (select_route) FIRST while codes are unconfirmed;
+        # it triggers VFS's request → _install_auth_capture stores the real codes →
+        # codes_confirmed() flips → subsequent cycles use the fast API path.
+        if auth_captured() and codes_confirmed():
             api = await api_check_availability(page)
             if api is not None:
                 status = api.get("_status", 0)
@@ -974,8 +1062,13 @@ async def main():
             else:
                 api_fail_streak += 1
                 log(f"API: call failed (streak={api_fail_streak}) — falling back to UI")
-        else:
+        elif not auth_captured():
             log("API: auth headers not captured yet — using UI path")
+        else:
+            # auth headers present but the real codes aren't confirmed yet → drive the
+            # UI walk this cycle so VFS fires its own CheckIsSlotAvailable and we sniff
+            # the correct vac/visacat codes. Switches to API polling next cycle.
+            log("API: codes not confirmed yet — UI walk first to capture real codes")
 
         # FALLBACK / BACKWARD-COMPAT: if the API didn't resolve this cycle, run the
         # existing UI slot check (unchanged behaviour). Also used when API found a
