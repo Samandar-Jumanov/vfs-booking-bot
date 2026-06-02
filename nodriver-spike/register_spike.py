@@ -16,6 +16,9 @@ import re
 import secrets
 import sys
 import pathlib
+import urllib.request
+import urllib.error
+import urllib.parse
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -198,6 +201,112 @@ async def trigger_activation_email(browser, email, password):
             log("trigger: never reached inactive page (login may not have submitted) — email not triggered")
     except Exception as e:
         log("trigger: non-fatal error:", str(e))
+
+
+def _mailsac_messages(email):
+    """GET the Mailsac message list for `email`. Returns a parsed JSON list (or [])
+    using ONLY the Python stdlib (no new pip deps). Best-effort: any HTTP/parse
+    error returns [] so the caller's poll loop just retries."""
+    url = f"https://mailsac.com/api/addresses/{urllib.parse.quote(email)}/messages"
+    req = urllib.request.Request(url, headers={"Mailsac-Key": MAILSAC_KEY, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        data = json.loads(body)
+        return data if isinstance(data, list) else []
+    except urllib.error.HTTPError as he:
+        log(f"mailsac: HTTP {he.code} listing messages (retrying)")
+        return []
+    except Exception as e:
+        log("mailsac: list error (retrying):", str(e))
+        return []
+
+
+def _extract_activation_url(messages):
+    """Scan Mailsac messages for the VFS activation link. Handles the known
+    wrap-bug: the base64 `q=` token is split across lines with \\n/spaces, so we
+    strip ALL whitespace out of the URL and trim trailing non-URL chars
+    (a leaked ']', '"', ')' etc.). Returns a clean URL string or None."""
+    for m in messages or []:
+        # collect candidate link strings from the message's `links` array AND,
+        # as a fallback, any raw text fields that might carry the URL.
+        candidates = []
+        links = m.get("links") if isinstance(m, dict) else None
+        if isinstance(links, list):
+            candidates.extend([x for x in links if isinstance(x, str)])
+        for key in ("body", "text", "html"):
+            v = m.get(key) if isinstance(m, dict) else None
+            if isinstance(v, str):
+                candidates.append(v)
+        for raw in candidates:
+            if "activateemail" not in raw.lower():
+                continue
+            # find the activateemail URL inside the candidate string, allowing
+            # whitespace/newlines INSIDE the value (the wrap bug). [\s\S] = any char.
+            mt = re.search(r"https?://[\s\S]*?activateemail\?q=[\s\S]+", raw, re.I)
+            if not mt:
+                continue
+            url = mt.group(0)
+            # strip ALL whitespace/newlines that the wrap-bug injected
+            url = re.sub(r"\s+", "", url)
+            # trim trailing chars that commonly leak in (closing bracket/quote/paren/comma)
+            url = url.rstrip("]>\"').,;")
+            # cut at the first stray quote/bracket if one is embedded mid-URL
+            url = re.split(r'["\'<>\]]', url, maxsplit=1)[0]
+            if "activateemail?q=" in url.lower():
+                return url
+    return None
+
+
+async def activate_via_nodriver(browser, email):
+    """HANDS-OFF activation with NO Chrome extension: after the resend click sends
+    the VFS activation email, poll Mailsac (stdlib urllib) for the activateemail
+    link, clean the wrap-bug whitespace, then navigate this nodriver browser to it.
+    Returns True if activation looks confirmed. Best-effort: wrapped in try/except
+    so it can never crash the register flow (account stays registered+PENDING and
+    the backend reconcile can retry later)."""
+    if not MAILSAC_KEY:
+        log("activate: MAILSAC_API_KEY not set — cannot self-activate (left PENDING)")
+        return False
+    try:
+        log("activate: polling Mailsac for the activation link (≤90s)…")
+        activation_url = None
+        for attempt in range(18):  # 18 × 5s ≈ 90s
+            msgs = _mailsac_messages(email)
+            activation_url = _extract_activation_url(msgs)
+            if activation_url:
+                log(f"activate: found activation link after ~{attempt * 5}s")
+                break
+            await asyncio.sleep(5)
+        if not activation_url:
+            log("activate: no activation email arrived in ~90s — leaving PENDING (non-fatal)")
+            return False
+        log("activate: visiting cleaned activation URL:", activation_url[:80] + ("…" if len(activation_url) > 80 else ""))
+        page = await browser.get(activation_url)
+        await asyncio.sleep(6)
+        await dismiss_consent(page)
+        final_url = await jeval(page, "location.href") or ""
+        verdict = await jeval(page, """(()=>{const t=(document.body.innerText||'').toLowerCase();
+            const bad=/inactive|not activated|invalid|expired|link has expired/.test(t);
+            const good=/activated|success|verified|your account is active|now active/.test(t);
+            return JSON.stringify({bad, good});})()""")
+        v = json.loads(verdict) if verdict else {}
+        url_l = (final_url or "").lower()
+        # confirmed if: page says activated/success/verified, OR no 'inactive'/error
+        # wording AND we landed on a login/dashboard/account URL (VFS redirects there
+        # after a successful activation).
+        redirected_ok = any(k in url_l for k in ("/login", "dashboard", "/account", "activated", "success", "verified"))
+        confirmed = bool(v.get("good")) or (not v.get("bad") and redirected_ok)
+        log(f"activate: final_url={final_url} verdict(good={v.get('good')},bad={v.get('bad')}) → confirmed={confirmed}")
+        if confirmed:
+            log("activate: account ACTIVATED hands-off (no extension)")
+            milestone("activated", email=email)
+            return True
+        log("activate: visit did NOT confirm activation — leaving PENDING (non-fatal)")
+        return False
+    except Exception as e:
+        log("activate: non-fatal error:", str(e))
+        return False
 
 
 async def main():
@@ -444,6 +553,9 @@ async def main():
         # VFS sends the activation email on a LOGIN ATTEMPT, not at registration —
         # so trigger it now while we still have a browser session.
         await trigger_activation_email(browser, email, password)
+        # Then SELF-ACTIVATE with this same nodriver browser (no Chrome extension):
+        # poll Mailsac for the activation link and navigate to it here.
+        activated = await activate_via_nodriver(browser, email)
     else:
         milestone("failed", error="registration_not_confirmed", email=email)
     out = {"email": email, "password": password, "phone": "998" + phone, "registered": registered, "activated": activated}
