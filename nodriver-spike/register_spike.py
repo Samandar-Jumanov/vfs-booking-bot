@@ -177,9 +177,18 @@ async def trigger_activation_email(browser, email, password):
             await asyncio.sleep(1)
         if inactive:
             log("trigger: 'account inactive' page shown — clicking 'resend activation email'")
-            # CLICK the resend link — seeing the message is NOT enough; the email
-            # only sends when this link is clicked (confirmed by operator manually).
-            clicked_resend = await jeval(page, "(()=>{const a=[...document.querySelectorAll('a,button,span,u')].find(x=>/resend|click here/i.test(x.innerText||'')&&x.offsetParent!==null); if(a){a.click();return 1;} return 0;})()")
+            # CLICK the resend link with a TRUSTED click — a synthetic JS .click()
+            # does NOT fire Angular's handler (same as the Register button), so the
+            # email never sends (operator's REAL click works; JS click didn't).
+            clicked_resend = False
+            for el in await page.select_all("a, button, span, u"):
+                if re.search(r"resend|click here", (el.text or ""), re.I) and (el.text or "").strip():
+                    if await safe_click(page, el):
+                        clicked_resend = True
+                    break
+            if not clicked_resend:
+                # JS fallback only if no trusted target found
+                clicked_resend = bool(await jeval(page, "(()=>{const a=[...document.querySelectorAll('a,button,span,u')].find(x=>/resend|click here/i.test(x.innerText||'')&&x.offsetParent!==null); if(a){a.click();return 1;} return 0;})()"))
             await asyncio.sleep(3)
             # confirm a 'sent' acknowledgement if VFS shows one (best-effort)
             ack = await jeval(page, "/(sent|check your email|has been sent|email.*sent)/i.test(document.body.innerText||'')")
