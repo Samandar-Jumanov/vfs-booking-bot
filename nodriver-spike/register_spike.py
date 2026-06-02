@@ -162,15 +162,31 @@ async def trigger_activation_email(browser, email, password):
                 break
         if not clicked:
             await jeval(page, "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/sign\\s*in|log\\s*in/i.test(x.innerText||'')&&!x.disabled&&x.offsetParent); if(b){b.click();}})()")
-        await asyncio.sleep(4)
-        body = (await jeval(page, "document.body.innerText") or "").lower()
-        if "inactive" in body or "resend" in body or "activation" in body:
-            log("trigger: 'account inactive' shown — VFS is sending the activation email")
-            # click the 'click here to resend the activation email' link to be sure
-            await jeval(page, "(()=>{const a=[...document.querySelectorAll('a,button,span')].find(x=>/resend|click here/i.test(x.innerText||'')&&x.offsetParent); if(a){a.click();return 1;} return 0;})()")
+        # POLL up to 15s for the 'account inactive / not activated' page to render
+        # (VFS takes a few seconds to process the login and show it — a single 4s
+        # check missed it). Detect the inactive state OR the resend link.
+        inactive = False
+        for _ in range(15):
+            d = await jeval(page, """(()=>{const t=(document.body.innerText||'').toLowerCase();
+                const inact=/inactive|not activated|activation email|resend/.test(t);
+                const link=[...document.querySelectorAll('a,button,span,u')].some(e=>/resend|click here/i.test(e.innerText||'')&&e.offsetParent!==null);
+                return JSON.stringify({inact, link});})()""")
+            dd = json.loads(d) if d else {}
+            if dd.get("inact") or dd.get("link"):
+                inactive = True; break
+            await asyncio.sleep(1)
+        if inactive:
+            log("trigger: 'account inactive' page shown — clicking 'resend activation email'")
+            # CLICK the resend link — seeing the message is NOT enough; the email
+            # only sends when this link is clicked (confirmed by operator manually).
+            clicked_resend = await jeval(page, "(()=>{const a=[...document.querySelectorAll('a,button,span,u')].find(x=>/resend|click here/i.test(x.innerText||'')&&x.offsetParent!==null); if(a){a.click();return 1;} return 0;})()")
+            await asyncio.sleep(3)
+            # confirm a 'sent' acknowledgement if VFS shows one (best-effort)
+            ack = await jeval(page, "/(sent|check your email|has been sent|email.*sent)/i.test(document.body.innerText||'')")
+            log(f"trigger: resend clicked={bool(clicked_resend)} ack={bool(ack)}")
             milestone("activation_email_triggered", email=email)
         else:
-            log("trigger: no inactive message seen (login response unclear) — email may still have been sent")
+            log("trigger: never reached inactive page (login may not have submitted) — email not triggered")
     except Exception as e:
         log("trigger: non-fatal error:", str(e))
 
