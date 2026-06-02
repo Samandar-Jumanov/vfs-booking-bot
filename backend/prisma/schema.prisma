@@ -211,6 +211,7 @@ enum LifecycleStateEnum {
   WARM
   RESTRICTED
   BLOCKED
+  BOOKED
 }
 
 model VfsAccount {
@@ -232,6 +233,8 @@ model VfsAccount {
   lastError         String?
   tabUrl            String?
   profileIds        String[]
+  bookingConfirmation String?
+  bookedAt          DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 }

@@ -213,6 +213,23 @@ pipelineRouter.post(
           await tg(`📸 DRY-RUN complete for ${em} — review screenshot saved, not submitted`).catch(() => {});
         }
       } else if (body.step === 'booked' && body.status === 'ok') {
+        // Persist the booking so it survives beyond the Telegram alert: mark the
+        // account BOOKED (excluded from re-driving → no double-book) and store the
+        // confirmation number + timestamp for the dashboard / audit.
+        await prisma.vfsAccount
+          .update({
+            where: { id: account.id },
+            data: {
+              lifecycleState: 'BOOKED',
+              bookingConfirmation: body.confirmation ?? null,
+              bookedAt: new Date(),
+            } as Parameters<typeof prisma.vfsAccount.update>[0]['data'],
+          })
+          .catch((e) => {
+            // Never let a persistence hiccup swallow the success notification.
+            // eslint-disable-next-line no-console
+            console.error('[pipeline] failed to persist booked account:', (e as Error).message);
+          });
         await dispatchNotification({
           event: 'BOOKING_SUCCESS',
           confirmationNo: body.confirmation,

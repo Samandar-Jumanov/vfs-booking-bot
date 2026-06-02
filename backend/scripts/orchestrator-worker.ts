@@ -648,7 +648,11 @@ async function driveRun(runId: string): Promise<void> {
   // TARGET_EMAIL pins the run to one specific account.
   const targetEmail = process.env.TARGET_EMAIL?.trim();
   const accounts = await prisma.vfsAccount.findMany({
-    where: targetEmail ? { status: 'ACTIVE', email: targetEmail } : { status: 'ACTIVE' },
+    // Exclude already-BOOKED accounts so a successful booking is never re-driven
+    // (no double-book, no wasted requests on a client that's already done).
+    where: targetEmail
+      ? { status: 'ACTIVE', email: targetEmail, lifecycleState: { not: 'BOOKED' } }
+      : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' } },
     select: {
       id: true,
       email: true,
