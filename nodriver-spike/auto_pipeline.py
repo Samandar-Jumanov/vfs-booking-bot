@@ -26,6 +26,7 @@ Env:
 """
 import asyncio
 import os
+import random
 import re
 import ssl
 import sys
@@ -408,8 +409,20 @@ async def _install_auth_capture(page):
                 pass
 
         page.add_handler(cdp.network.RequestWillBeSent, on_req)
-        await page.send(cdp.network.enable())
-        log("AUTH-CAPTURE: CDP network capture enabled")
+        # max_post_data_size > 0 is REQUIRED for CDP to include the request body
+        # (postData) in RequestWillBeSent. Without it post_data is None → we never
+        # capture the wizard's real vac/visacat codes → codes_confirmed() never
+        # flips → the monitor is stuck re-walking the heavy UI (full dashboard
+        # reload) every cycle → that request volume is what trips 429201. With the
+        # body captured, codes confirm after ONE walk and we switch to cheap
+        # API-only polling (1 in-browser fetch/cycle) for the rest of the run.
+        try:
+            await page.send(cdp.network.enable(max_post_data_size=262144))
+        except TypeError:
+            # Older nodriver without the kwarg — fall back (codes may still be
+            # captured via to_json()'s postData on some builds).
+            await page.send(cdp.network.enable())
+        log("AUTH-CAPTURE: CDP network capture enabled (post-data ON)")
         return True
     except Exception as e:
         log("AUTH-CAPTURE: setup failed (UI fallback will be used):", str(e)[:80])
@@ -1252,6 +1265,8 @@ async def main():
     # API is unavailable/erroring (fallback → preserves current capability).
     attempt = 0
     api_fail_streak = 0  # consecutive API failures → trigger header re-capture / re-login flag
+    ui_walks = 0         # heavy UI walks done while codes still unconfirmed
+    MAX_UI_WALKS = 4     # after this, back off hard so we don't trip 429201
     while True:
         attempt += 1
         log(f"--- check #{attempt} ---")
@@ -1343,12 +1358,17 @@ async def main():
                 log("slot found but BOOK_ENABLED off — stopping for operator")
                 break
 
-        log(f"no slot — re-checking in {MONITOR_INTERVAL}s")
+        # Pace the next check with JITTER so requests aren't perfectly periodic
+        # (a fixed cadence is itself a bot signal and bunches requests). Once codes
+        # are confirmed we're on the cheap API path (1 in-browser fetch/cycle);
+        # before that each cycle is a heavy UI walk, which we cap below.
+        jitter = random.uniform(0, max(5.0, MONITOR_INTERVAL * 0.4))
+        path_tag = "api" if used_api else "ui"
+        log(f"no slot — re-checking in ~{int(MONITOR_INTERVAL + jitter)}s ({path_tag})")
         # emit a per-check milestone so the backend sends a "no slots" Telegram
         # on EVERY check (operator wants a message each time, not a summary).
-        path_tag = "api" if used_api else "ui"
         milestone("monitoring", email=EMAIL, detail=f"check #{attempt} ({path_tag}) — Work D-visa, no slots")
-        await asyncio.sleep(MONITOR_INTERVAL)
+        await asyncio.sleep(MONITOR_INTERVAL + jitter)
 
         if used_api:
             # Cheap path: no UI reload needed — the next fetch re-reads availability
@@ -1359,10 +1379,17 @@ async def main():
                 await _reenter_wizard_fresh(page)
                 api_fail_streak = 0
         else:
-            # UI fallback path: re-enter the wizard FRESH from the dashboard. A bare
-            # location.reload() of the mid-wizard URL drops the SPA's dropdowns
-            # (check #2 saw 0 dropdowns) — navigating to the dashboard and clicking
-            # "Start New Booking" reliably re-renders them (proven by check #1).
+            # UI path: we only walk the wizard so VFS fires its OWN
+            # CheckIsSlotAvailable and we sniff the real codes (→ switch to API).
+            # If that capture keeps failing, DON'T keep hammering the heavy walk
+            # (full dashboard reload) every cycle — that request volume is exactly
+            # what trips 429201. After MAX_UI_WALKS, back off hard so the IP lives.
+            ui_walks += 1
+            if not codes_confirmed() and ui_walks >= MAX_UI_WALKS:
+                slowdown = max(MONITOR_INTERVAL * 4, 180.0)
+                log(f"WARN: codes still unconfirmed after {ui_walks} UI walks — backing "
+                    f"off {int(slowdown)}s to protect the IP (CDP post-data capture issue?)")
+                await asyncio.sleep(slowdown)
             await _reenter_wizard_fresh(page)
 
     log("done — keeping browser open 15s")
