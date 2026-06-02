@@ -27,6 +27,7 @@ Env:
 import asyncio
 import os
 import re
+import ssl
 import sys
 import json
 import pathlib
@@ -173,6 +174,19 @@ def log(*a):
     print("[PIPE]", *a, flush=True)
 
 
+def _tg_ssl_ctx():
+    """SSL context for api.telegram.org that tolerates the VPS's TLS-intercepting
+    (self-signed) cert chain. The Eskiz Windows VPS MITMs outbound TLS, so the
+    default verifying context raises `CERTIFICATE_VERIFY_FAILED — self-signed
+    certificate in certificate chain` and the operator gets NO alerts. Telegram
+    notifications are not security-sensitive, so unverified is the pragmatic call.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def telegram(msg):
     if WORKER_BRIDGED:
         log("(bridged, skipping telegram):", msg); return
@@ -183,7 +197,7 @@ def telegram(msg):
         data = json.dumps({"chat_id": chat, "text": msg}).encode()
         req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage", data=data,
                                      headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=15)
+        urllib.request.urlopen(req, timeout=15, context=_tg_ssl_ctx())
         log("telegram sent:", msg)
     except Exception as e:
         log("telegram failed:", e)
@@ -196,7 +210,7 @@ def _telegram_text_raw(tok, chat, msg):
         data = json.dumps({"chat_id": chat, "text": msg}).encode()
         req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage", data=data,
                                      headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=15)
+        urllib.request.urlopen(req, timeout=15, context=_tg_ssl_ctx())
     except Exception as e:
         log("telegram text fallback failed:", e)
 
@@ -239,7 +253,7 @@ def telegram_photo(path, caption):
             data=body,
             headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
         )
-        urllib.request.urlopen(req, timeout=30)
+        urllib.request.urlopen(req, timeout=30, context=_tg_ssl_ctx())
         log("telegram photo sent:", caption)
     except Exception as e:
         log("telegram photo failed:", e)
@@ -515,7 +529,79 @@ async def api_check_availability(page):
 
 
 # ── LOGIN ──────────────────────────────────────────────────────────────────
-async def do_login(browser, page):
+# JS that re-syncs a login field with Angular's reactive form. On the slow VPS,
+# send_keys() occasionally lands the characters in the DOM input but Angular's
+# FormControl never registers them (a fill TIMING RACE that only shows on slow
+# hardware), so submit fails with "Email field cannot be left blank" even though
+# Turnstile passed. Forcing value + bubbling input/change/blur events makes
+# Angular's reactive form pick up the value the same way a real keystroke would.
+_SYNC_FIELD_JS = r"""((sel,val)=>{
+    const e=document.querySelector(sel);
+    if(!e) return JSON.stringify({found:false});
+    try{
+        const proto=e.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
+        const setter=Object.getOwnPropertyDescriptor(proto,'value').set;
+        e.focus();
+        setter.call(e,val);
+        e.dispatchEvent(new InputEvent('input',{bubbles:true,data:val,inputType:'insertText'}));
+        e.dispatchEvent(new Event('change',{bubbles:true}));
+        e.dispatchEvent(new Event('blur',{bubbles:true}));
+    }catch(_){
+        e.value=val;
+        e.dispatchEvent(new Event('input',{bubbles:true}));
+        e.dispatchEvent(new Event('change',{bubbles:true}));
+        e.dispatchEvent(new Event('blur',{bubbles:true}));
+    }
+    return JSON.stringify({found:true,len:(e.value||'').length});
+})"""
+
+
+async def _fill_login_field(page, el, selector, value):
+    """Type into a login field AND force Angular's reactive form to register it.
+    Real keystrokes first (send_keys), then a value+events re-sync, then verify the
+    DOM input actually holds the value. Returns True only when the input is non-empty."""
+    try:
+        await el.send_keys(value)
+    except Exception as e:
+        log("LOGIN: send_keys err:", str(e)[:60])
+    # Re-sync with Angular regardless of whether send_keys "worked" — cheap + idempotent.
+    await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps(selector), json.dumps(value)))
+    cur = await jeval(page, "(()=>{const e=document.querySelector(%s); return e?(e.value||'').length:0;})()" % json.dumps(selector))
+    return bool(cur)
+
+
+async def _fill_login_form(page):
+    """Fill email + password, verifying each input holds its value (Angular synced)
+    and polling until the Sign In button is enabled (Turnstile passed + form valid).
+    Returns True when the button is enabled, False otherwise."""
+    email_el = await page.select("#email", timeout=20)
+    if not email_el:
+        return False
+    ok_email = await _fill_login_field(page, email_el, "#email", EMAIL)
+    pwd_el = await page.select('#password, input[type="password"]', timeout=15)
+    if not pwd_el:
+        return False
+    ok_pwd = await _fill_login_field(page, pwd_el, "#password", PASSWORD)
+    log(f"LOGIN: filled (email_ok={ok_email} pwd_ok={ok_pwd}); waiting for Turnstile auto-pass + form-valid…")
+    # Poll up to ~30s for the Sign In button to enable. If the fields never stuck,
+    # re-sync them ONCE so a late-hydrating Angular form picks the values up.
+    refilled = False
+    for i in range(30):
+        if await sign_in_disabled(page) is False:
+            return True
+        if i == 8 and not refilled:
+            refilled = True
+            log("LOGIN: Sign In still disabled @8s — re-syncing fields once")
+            await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps("#email"), json.dumps(EMAIL)))
+            await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps("#password"), json.dumps(PASSWORD)))
+        await asyncio.sleep(1)
+    return await sign_in_disabled(page) is False
+
+
+async def _attempt_login(browser, page):
+    """ONE login attempt: ensure the email field renders (reload up to 3×), fill +
+    verify the form, click Sign In only when enabled, then confirm we left /login.
+    Returns True on success, False on this attempt's failure (caller may retry)."""
     log("LOGIN: navigating")
     # Wait until any login-form element appears (cap 10s; faster on good connections).
     await wait_until(page,
@@ -538,21 +624,25 @@ async def do_login(browser, page):
         await asyncio.sleep(8)
         await dismiss_consent(page)
     if not email_el:
-        log("LOGIN: email field never rendered — aborting")
+        log("LOGIN: email field never rendered — aborting this attempt")
         return False
-    await email_el.send_keys(EMAIL)
-    pwd_el = await page.select('#password, input[type="password"]', timeout=15)
-    await pwd_el.send_keys(PASSWORD)
-    log("LOGIN: filled; waiting for Turnstile auto-pass…")
-    for _ in range(30):
-        if await sign_in_disabled(page) is False:
-            break
-        await asyncio.sleep(1)
+    btn_enabled = await _fill_login_form(page)
     await dismiss_consent(page)
-    # click the Sign In button
+    if not btn_enabled:
+        # Sign In never enabled (Turnstile not passed yet OR form still invalid /
+        # email-blank race). Don't blind-click a disabled button — let the caller retry.
+        diag = await jeval(page, """(()=>{const f=document.querySelector('[name="cf-turnstile-response"]');
+            const b=[...document.querySelectorAll('button')].find(x=>/sign\\s*in/i.test(x.innerText||''));
+            return JSON.stringify({cfRespLen:f&&f.value?f.value.length:0, signInDisabled:b?!!b.disabled:'no-btn',
+              emailLen:(document.querySelector('#email')||{}).value?document.querySelector('#email').value.length:0,
+              err:[...document.querySelectorAll('mat-error,.mat-error,[class*="error" i]')].filter(e=>e.offsetParent&&(e.innerText||'').trim()).map(e=>(e.innerText||'').trim().slice(0,60)).slice(0,4)});})()""")
+        log("LOGIN: Sign In never enabled — diag:", diag)
+        return False
+    # click the Sign In button (now confirmed enabled)
     for b in await page.select_all("button"):
         if "sign in" in ((b.text or "").lower()):
             await b.mouse_click(); break
+    url = await jeval(page, "location.href") or ""
     for _ in range(25):
         url = await jeval(page, "location.href") or ""
         if "/login" not in url:
@@ -565,6 +655,29 @@ async def do_login(browser, page):
           err:[...document.querySelectorAll('mat-error,.mat-error,[class*="error" i]')].filter(e=>e.offsetParent&&(e.innerText||'').trim()).map(e=>(e.innerText||'').trim().slice(0,60)).slice(0,4)});})()""")
     log("LOGIN: post-submit url:", url, "diag:", diag)
     return bool(url) and "/login" not in url and "/page-not-found" not in url
+
+
+async def do_login(browser, page):
+    """Login with self-heal retry. On the slow VPS a single fill can lose the
+    race (email-blank) or the Sign In button never enables; retry up to 3× —
+    reload the login page + dismiss consent between attempts — before giving up."""
+    for n in range(1, 4):
+        log(f"LOGIN attempt {n}/3")
+        try:
+            if await _attempt_login(browser, page):
+                return True
+        except Exception as e:
+            log(f"LOGIN attempt {n}/3 raised:", str(e)[:90])
+        if n < 3:
+            log(f"LOGIN attempt {n}/3 failed — reloading login page and retrying")
+            try:
+                await page.get(LOGIN_URL)
+            except Exception:
+                pass
+            await asyncio.sleep(8)
+            await dismiss_consent(page)
+    log("LOGIN: all 3 attempts failed")
+    return False
 
 
 # ── WIZARD: enter + select centre/category/subcat ──────────────────────────
