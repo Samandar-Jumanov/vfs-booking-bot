@@ -17,6 +17,12 @@ Env:
                     BOOK_ENABLED are set, DRY_RUN takes precedence (no actual submit).
   SUBCAT            regex to pick sub-category (default: Work D-visa)
   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  optional alerts
+  -- Lift-API availability monitor (cheap authed slot check, see
+     docs/LIFT_API_AVAILABILITY_SPEC.md) --
+  VFS_COUNTRY       source country code for CheckIsSlotAvailable (default "uzb")
+  VFS_MISSION       destination/mission code                     (default "lva")
+  VFS_VAC           centre / VAC code                            (default "TAS")
+  VFS_VISACAT       visa category code (Work D-visa UZ→LVA)      (default "WDVUZ")
 """
 import asyncio
 import os
@@ -45,6 +51,24 @@ SHOTS.mkdir(exist_ok=True)
 
 WORKER_BRIDGED = os.environ.get("WORKER_BRIDGED") == "1"
 MAILSAC_KEY = os.environ.get("MAILSAC_API_KEY", "")
+
+# ── Lift-API availability monitoring (cheap, authed slot check) ───────────────
+# Instead of driving the booking-wizard UI every monitor cycle (slow, heavy on the
+# IP → Datadome throttle, fragile), poll VFS's own authed availability endpoint:
+#   POST https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable
+# We capture the custom auth headers (authorize/clientsource/route) the browser
+# sends on its OWN lift-api requests after login (see _install_auth_capture), then
+# replay the slot check from INSIDE the browser via fetch() so it reuses the live
+# session/cookies/origin (most Cloudflare-happy). Spec: docs/LIFT_API_AVAILABILITY_SPEC.md.
+LIFT_API_URL = "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable"
+VFS_COUNTRY = os.environ.get("VFS_COUNTRY", "uzb")     # source country code
+VFS_MISSION = os.environ.get("VFS_MISSION", "lva")     # destination/mission code
+VFS_VAC = os.environ.get("VFS_VAC", "TAS")             # centre/VAC code (Tashkent)
+VFS_VISACAT = os.environ.get("VFS_VISACAT", "WDVUZ")   # visa category (Work D-visa UZ→LVA)
+# Captured at login from the browser's own authed lift-api requests. Empty until
+# capture succeeds → monitor falls back to the UI select_route() path (current
+# behaviour), so nothing breaks if capture never fires.
+_LIFT_AUTH = {"authorize": None, "clientsource": None, "route": None}
 
 
 # ── Mailsac (booking OTP) ────────────────────────────────────────────────────
@@ -287,6 +311,115 @@ async def dismiss_consent(page):
 
 async def sign_in_disabled(page):
     return await jeval(page, "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/sign\\s*in/i.test(x.innerText||'')); return b?!!b.disabled:true;})()")
+
+
+# ── Lift-API auth capture + availability check ───────────────────────────────
+async def _install_auth_capture(page):
+    """Attach a CDP RequestWillBeSent handler that records the custom auth headers
+    (authorize / clientsource / route) the browser sends on its OWN lift-api
+    requests. Same proven approach as login_spike.py:101-123. Best-effort: if CDP
+    setup fails, capture stays empty and the monitor falls back to the UI path.
+
+    NOTE: these custom headers are only sent on AUTHENTICATED lift-api calls, which
+    fire AFTER login (e.g. when the dashboard/wizard loads). So this must be
+    installed BEFORE login and the wizard navigation so we catch the first one."""
+    try:
+        from nodriver import cdp
+
+        async def on_req(evt):
+            try:
+                u = evt.request.url
+                if "lift-api" not in u:
+                    return
+                hdrs = dict(evt.request.headers or {})
+                for k, v in hdrs.items():
+                    lk = k.lower()
+                    if lk in ("authorize", "clientsource", "route") and v:
+                        if _LIFT_AUTH.get(lk) != v:
+                            _LIFT_AUTH[lk] = v
+                            log(f"AUTH-CAPTURE: {lk}={str(v)[:24]}…")
+            except Exception:
+                pass
+
+        page.add_handler(cdp.network.RequestWillBeSent, on_req)
+        await page.send(cdp.network.enable())
+        log("AUTH-CAPTURE: CDP network capture enabled")
+        return True
+    except Exception as e:
+        log("AUTH-CAPTURE: setup failed (UI fallback will be used):", str(e)[:80])
+        return False
+
+
+def auth_captured():
+    """True once both required custom auth headers were sniffed off a lift-api req."""
+    return bool(_LIFT_AUTH.get("authorize") and _LIFT_AUTH.get("clientsource"))
+
+
+async def api_check_availability(page):
+    """Poll VFS's authed CheckIsSlotAvailable endpoint via an IN-BROWSER fetch()
+    (reuses the live session/cookies/origin — most Cloudflare-happy). Returns a
+    dict {earliestDate, earliestSlotLists, error, _status} on a parsed HTTP
+    response, or None on a transport/JS failure (caller then falls back to UI).
+
+    Body params come from env (defaults from docs/LIFT_API_AVAILABILITY_SPEC.md):
+    countryCode=VFS_COUNTRY, missionCode=VFS_MISSION, vacCode=VFS_VAC,
+    visaCategoryCode=VFS_VISACAT, roleName='Individual', loginUser=<email>, payCode=''.
+    """
+    if not auth_captured():
+        return None
+    body = {
+        "countryCode": VFS_COUNTRY,
+        "missionCode": VFS_MISSION,
+        "vacCode": VFS_VAC,
+        "visaCategoryCode": VFS_VISACAT,
+        "roleName": "Individual",
+        "loginUser": EMAIL,
+        "payCode": "",
+    }
+    headers = {
+        "authorize": _LIFT_AUTH.get("authorize") or "",
+        "clientsource": _LIFT_AUTH.get("clientsource") or "",
+        "content-type": "application/json;charset=UTF-8",
+        "accept": "application/json, text/plain, */*",
+    }
+    if _LIFT_AUTH.get("route"):
+        headers["route"] = _LIFT_AUTH["route"]
+    # The fetch runs in the page's own origin, so cookies (cf_clearance etc.) ride
+    # along with credentials:'include'. We JSON-serialize url/headers/body into the
+    # snippet so there's no string-escaping ambiguity, and return a JSON string the
+    # Python side parses (jeval already _unwraps nodriver's value wrapper).
+    payload = json.dumps({"url": LIFT_API_URL, "headers": headers, "body": body})
+    expr = (
+        "(async()=>{const cfg=%s;try{"
+        "const r=await fetch(cfg.url,{method:'POST',headers:cfg.headers,"
+        "body:JSON.stringify(cfg.body),credentials:'include'});"
+        "let j=null;try{j=await r.json();}catch(e){j=null;}"
+        "return JSON.stringify({status:r.status,data:j});"
+        "}catch(e){return JSON.stringify({status:0,error:String(e)});}})()"
+    ) % payload
+    raw = await jeval(page, expr)
+    if not raw:
+        log("API: in-browser fetch returned nothing")
+        return None
+    try:
+        env = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as e:
+        log("API: could not parse fetch result:", str(e)[:60])
+        return None
+    status = env.get("status", 0)
+    data = env.get("data") or {}
+    if status == 0:
+        log("API: fetch transport error:", str(env.get("error"))[:80])
+        return None
+    if status != 200:
+        log(f"API: HTTP {status} from CheckIsSlotAvailable", str(data)[:120])
+    out = {
+        "earliestDate": (data or {}).get("earliestDate"),
+        "earliestSlotLists": (data or {}).get("earliestSlotLists") or [],
+        "error": (data or {}).get("error"),
+        "_status": status,
+    }
+    return out
 
 
 # ── LOGIN ──────────────────────────────────────────────────────────────────
@@ -777,6 +910,11 @@ async def main():
     import nodriver as uc
     browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
     page = await browser.get(LOGIN_URL)
+    # Install the lift-api auth-header capture BEFORE login so we sniff authorize/
+    # clientsource off the browser's first authed lift-api request (fires once the
+    # dashboard/wizard loads). Enables the cheap API monitor; if it never captures,
+    # the monitor falls back to the UI select_route() path (current behaviour).
+    await _install_auth_capture(page)
 
     if not await do_login(browser, page):
         # Classify WHY login failed (datadome page-not-found, session expired,
@@ -799,12 +937,60 @@ async def main():
     await shot(page, "pipe_wizard")
     milestone("monitoring", email=EMAIL)
 
-    # Monitor loop
+    # ── Monitor loop ─────────────────────────────────────────────────────────
+    # PRIMARY path: poll VFS's authed CheckIsSlotAvailable endpoint (cheap, fast,
+    # ~1 req/cycle — far gentler on the IP than driving the UI wizard every check).
+    # Drive the UI (select_route) ONLY when the API says a slot exists OR when the
+    # API is unavailable/erroring (fallback → preserves current capability).
     attempt = 0
+    api_fail_streak = 0  # consecutive API failures → trigger header re-capture / re-login flag
     while True:
         attempt += 1
         log(f"--- check #{attempt} ---")
-        slot = await select_route(page)
+
+        slot = None          # truthy → a slot to book (UI subcat text OR API earliestDate)
+        used_api = False     # did the cheap API path resolve this cycle?
+
+        if auth_captured():
+            api = await api_check_availability(page)
+            if api is not None:
+                status = api.get("_status", 0)
+                err = api.get("error")
+                if status == 200 and not err:
+                    used_api = True
+                    api_fail_streak = 0
+                    earliest = api.get("earliestDate")
+                    slot_lists = api.get("earliestSlotLists") or []
+                    if earliest or slot_lists:
+                        slot = earliest or "slot"  # marker; UI re-picks the real subcat to book
+                        log("API: SLOT AVAILABLE — earliestDate=%s, lists=%d" % (earliest, len(slot_lists)))
+                    else:
+                        log("API: no slots (earliestDate null)")
+                else:
+                    # 401/403/429 or an error envelope → don't trust it; fall back to UI.
+                    api_fail_streak += 1
+                    code = (err or {}).get("code") if isinstance(err, dict) else None
+                    log(f"API: unusable (status={status}, code={code}, streak={api_fail_streak}) — falling back to UI")
+            else:
+                api_fail_streak += 1
+                log(f"API: call failed (streak={api_fail_streak}) — falling back to UI")
+        else:
+            log("API: auth headers not captured yet — using UI path")
+
+        # FALLBACK / BACKWARD-COMPAT: if the API didn't resolve this cycle, run the
+        # existing UI slot check (unchanged behaviour). Also used when API found a
+        # slot but we still need the UI to navigate to bookable state — select_route
+        # both confirms availability AND leaves the wizard ready for book().
+        if not used_api or slot:
+            ui_slot = await select_route(page)
+            if slot:
+                # API flagged a slot; prefer the concrete subcat select_route lands on
+                # (book() needs the wizard in the picked state). If the UI couldn't
+                # confirm it, keep the API marker so we still attempt to book.
+                slot = ui_slot or slot
+            else:
+                slot = ui_slot
+
         if slot:
             milestone("slot_found", email=EMAIL, slotId=slot)
             telegram(f"[bot] SLOT FOUND for {EMAIL}: {slot}")
@@ -831,20 +1017,36 @@ async def main():
             else:
                 log("slot found but BOOK_ENABLED off — stopping for operator")
                 break
+
         log(f"no slot — re-checking in {MONITOR_INTERVAL}s")
         # emit a per-check milestone so the backend sends a "no slots" Telegram
         # on EVERY check (operator wants a message each time, not a summary).
-        milestone("monitoring", email=EMAIL, detail=f"check #{attempt} — Work D-visa, no slots")
-        # go back to a clean Appointment Details state for the next check. The
-        # reload forces VFS to re-evaluate availability (required for a fresh
-        # read); after it, wait for the wizard form to re-render (≤8s) instead of
-        # a flat 8s sleep so a fast reload starts the next check sooner.
+        path_tag = "api" if used_api else "ui"
+        milestone("monitoring", email=EMAIL, detail=f"check #{attempt} ({path_tag}) — Work D-visa, no slots")
         await asyncio.sleep(MONITOR_INTERVAL)
-        await jeval(page, "location.reload()")
-        await wait_until(page,
-            "(()=>{return !!document.querySelector('mat-select') || /start new booking|book appointment|new booking/i.test(document.body.innerText||'');})()",
-            timeout=8, interval=0.4)
-        await enter_wizard(page)
+
+        if used_api:
+            # Cheap path: no UI reload needed — the next fetch re-reads availability
+            # live. But on repeated API failures (token expiry/403), drop back to the
+            # UI reload so we re-capture fresh auth headers off the browser's requests.
+            if api_fail_streak >= 3:
+                log("API: repeated failures — reloading wizard to re-capture auth headers")
+                await jeval(page, "location.reload()")
+                await wait_until(page,
+                    "(()=>{return !!document.querySelector('mat-select') || /start new booking|book appointment|new booking/i.test(document.body.innerText||'');})()",
+                    timeout=8, interval=0.4)
+                await enter_wizard(page)
+                api_fail_streak = 0
+        else:
+            # UI fallback path: go back to a clean Appointment Details state. The
+            # reload forces VFS to re-evaluate availability (required for a fresh
+            # read); after it, wait for the wizard form to re-render (≤8s) instead of
+            # a flat 8s sleep so a fast reload starts the next check sooner.
+            await jeval(page, "location.reload()")
+            await wait_until(page,
+                "(()=>{return !!document.querySelector('mat-select') || /start new booking|book appointment|new booking/i.test(document.body.innerText||'');})()",
+                timeout=8, interval=0.4)
+            await enter_wizard(page)
 
     log("done — keeping browser open 15s")
     await asyncio.sleep(15)
