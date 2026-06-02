@@ -43,3 +43,7 @@ test-results/
 frontend/tsc_errors.txt
 backend/tsc_errors.txt
 frontend/package-lock.json
+
+# captured live lift-api token (never commit)
+nodriver-spike/.lift-creds.json
+.lift-creds.json

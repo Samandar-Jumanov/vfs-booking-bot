@@ -439,6 +439,34 @@ def auth_captured():
     return bool(_LIFT_AUTH.get("authorize") and _LIFT_AUTH.get("clientsource"))
 
 
+LIFT_CREDS_FILE = str(pathlib.Path(__file__).resolve().parent / ".lift-creds.json")
+
+
+def _dump_lift_creds():
+    """Persist the captured auth token + real codes to .lift-creds.json so the
+    standalone direct-API poller (api_poller.py) can replay the slot-check from a
+    POOL OF ROTATING IPS — without a browser. This is the artifact that lets us
+    poll the API at scale (each IP makes few requests → no per-IP 429201). Only
+    useful if the token isn't IP/cookie-bound (see replay_probe verdict)."""
+    try:
+        creds = {
+            "email": EMAIL,
+            "capturedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+            "auth": {k: _LIFT_AUTH.get(k) for k in ("authorize", "clientsource", "route")},
+            "body": {
+                "countryCode": _LIFT_BODY.get("countryCode") or VFS_COUNTRY,
+                "missionCode": _LIFT_BODY.get("missionCode") or VFS_MISSION,
+                "vacCode": _LIFT_BODY.get("vacCode") or VFS_VAC,
+                "visaCategoryCode": _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT,
+            },
+        }
+        with open(LIFT_CREDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(creds, f, indent=2)
+        log(f"API: dumped live token + codes → {LIFT_CREDS_FILE} (for api_poller.py)")
+    except Exception as e:
+        log("API: failed to dump lift creds:", str(e)[:100])
+
+
 def _maybe_confirm_codes():
     """Flip _CODES_CONFIRMED once the wizard's real vac + visacat codes are in
     _LIFT_BODY. After this, api_check_availability() can be trusted with the
@@ -449,6 +477,7 @@ def _maybe_confirm_codes():
             and _LIFT_BODY.get("visaCategoryCode")):
         _CODES_CONFIRMED = True
         log("API: codes CONFIRMED from wizard — switching to API polling")
+        _dump_lift_creds()
 
 
 def codes_confirmed():
