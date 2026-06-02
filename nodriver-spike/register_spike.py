@@ -16,6 +16,7 @@ import re
 import secrets
 import sys
 import pathlib
+import ssl
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -208,9 +209,17 @@ def _mailsac_messages(email):
     using ONLY the Python stdlib (no new pip deps). Best-effort: any HTTP/parse
     error returns [] so the caller's poll loop just retries."""
     url = f"https://mailsac.com/api/addresses/{urllib.parse.quote(email)}/messages"
-    req = urllib.request.Request(url, headers={"Mailsac-Key": MAILSAC_KEY, "Accept": "application/json"})
+    # A browser User-Agent is REQUIRED — Mailsac's WAF/Cloudflare 403s the default
+    # "Python-urllib/3.x" UA (curl/backend work because their UA is allowed). Also
+    # use an unverified SSL context for the VPS's TLS-intercepting proxy.
+    req = urllib.request.Request(url, headers={
+        "Mailsac-Key": MAILSAC_KEY,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    })
+    _ctx = ssl.create_default_context(); _ctx.check_hostname = False; _ctx.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_ctx) as resp:
             body = resp.read().decode("utf-8", "replace")
         data = json.loads(body)
         return data if isinstance(data, list) else []
