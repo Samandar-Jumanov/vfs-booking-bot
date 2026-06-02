@@ -172,13 +172,23 @@ interface SpawnCtx {
   fromState: string;
 }
 
+// Outcome of a driven run: exit-derived result + the last milestone error (if any)
+// so the caller can quarantine the account on rate-limit/block.
+interface DriveOutcome {
+  result: 'ok' | 'failed';
+  error?: string;
+}
+
 function spawnAndWatch(
   cmd: string,
   args: string[],
   env: Record<string, string>,
   ctx: SpawnCtx,
-): Promise<'ok' | 'failed'> {
+): Promise<DriveOutcome> {
   return new Promise((resolve) => {
+    // Track the last milestone error seen on stdout so the caller can classify
+    // the run's failure mode (429001 / 429202 / block) and set a cooldown.
+    let lastError: string | undefined;
     const child = spawn(cmd, args, {
       env: { ...process.env, ...env },
       // stdio must be pipe so we can parse stdout for MILESTONE lines
@@ -196,6 +206,7 @@ function spawnAndWatch(
         if (m) {
           try {
             const ms = JSON.parse(m[1]) as Record<string, string>;
+            if (ms['error']) lastError = ms['error'];
             void postMilestone({
               runId: ctx.runId,
               email: ctx.email,
@@ -232,7 +243,7 @@ function spawnAndWatch(
 
     child.on('close', (code) => {
       clearInterval(stopPoller);
-      resolve(code === 0 ? 'ok' : 'failed');
+      resolve({ result: code === 0 ? 'ok' : 'failed', error: lastError });
     });
   });
 }
@@ -276,15 +287,18 @@ async function driveAccountReal(
     profileIds: string[];
     pollingRole: string;
   },
-): Promise<void> {
+): Promise<DriveOutcome> {
   let password = '';
   try {
     password = decryptField(acct.encryptedPassword);
   } catch (e) {
     log(`skip ${acct.email}: password decrypt failed — ${(e as Error).message}`);
-    return;
+    return { result: 'failed', error: 'password_decrypt_failed' };
   }
-  if (!password) { log(`skip ${acct.email}: empty password after decrypt`); return; }
+  if (!password) {
+    log(`skip ${acct.email}: empty password after decrypt`);
+    return { result: 'failed', error: 'password_empty' };
+  }
 
   // Respect WATCHER role — never book regardless of BOOK_ENABLED
   const bookEnabled =
@@ -349,7 +363,7 @@ async function driveAccountReal(
 
   log(`driving ${acct.email} (role=${acct.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, book=${bookEnabled === '1'})`);
 
-  await spawnAndWatch(PYTHON_BIN, [...PYTHON_EXTRA_ARGS, PIPELINE_SPIKE], spawnEnv, {
+  return spawnAndWatch(PYTHON_BIN, [...PYTHON_EXTRA_ARGS, PIPELINE_SPIKE], spawnEnv, {
     runId,
     email: acct.email,
     accountId: acct.id,
@@ -697,7 +711,7 @@ async function driveRun(runId: string): Promise<void> {
       }
     }
 
-    await driveAccountReal(runId, {
+    const outcome = await driveAccountReal(runId, {
       id: acct.id,
       email: acct.email,
       encryptedPassword: acct.encryptedPassword,
@@ -705,6 +719,41 @@ async function driveRun(runId: string): Promise<void> {
       profileIds: acct.profileIds,
       pollingRole: acct.pollingRole,
     });
+
+    // Auto-quarantine: record the run outcome on the account so the pacer's
+    // isDue() skips it next run (gating is purely via cooldownUntil — status stays
+    // ACTIVE so the account auto-recovers when the cooldown passes). No manual
+    // TARGET_EMAIL swapping needed: the worker rotates to other due accounts.
+    try {
+      const at = Date.now();
+      const err = outcome.error ?? '';
+      let cooldownUntil: Date | null = null;
+      let reason = '';
+      if (/429001/.test(err)) {
+        cooldownUntil = new Date(at + PACER_CFG.cooldown429001Ms);
+        reason = '429001';
+      } else if (/429202/.test(err)) {
+        cooldownUntil = new Date(at + PACER_CFG.cooldown429202Ms);
+        reason = '429202';
+      } else if (err && /session_expired|datadome|turnstile|login_failed|page_not_found|block/i.test(err)) {
+        cooldownUntil = new Date(at + 30 * 60 * 1000); // short 30-min backoff, recovers soon
+        reason = err;
+      }
+
+      await prisma.vfsAccount.update({
+        where: { id: acct.id },
+        data: { lastAttemptAt: new Date(at), cooldownUntil },
+      });
+
+      if (cooldownUntil) {
+        const mins = Math.round((cooldownUntil.getTime() - at) / 60000);
+        log(`quarantine ${acct.email}: cooldown ${mins}m (reason=${reason})`);
+      } else {
+        log(`${acct.email}: ok, cooldown cleared`);
+      }
+    } catch (e) {
+      log(`WARN: failed to record outcome for ${acct.email}: ${(e as Error).message}`);
+    }
   }
 
   log(`driveRun complete. runId=${runId}`);
