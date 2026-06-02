@@ -479,7 +479,16 @@ async def api_check_availability(page):
         "return JSON.stringify({status:r.status,data:j});"
         "}catch(e){return JSON.stringify({status:0,error:String(e)});}})()"
     ) % payload
-    raw = await jeval(page, expr)
+    # CRITICAL: the snippet is an async IIFE returning a Promise — nodriver only
+    # resolves it when await_promise=True (plain evaluate returns the pending
+    # promise → "returned nothing"). Unwrap nodriver's {type,value} wrapper.
+    try:
+        raw = await page.evaluate(expr, await_promise=True)
+        if isinstance(raw, dict) and "value" in raw and set(raw.keys()) <= {"type", "value", "subtype", "className"}:
+            raw = raw["value"]
+    except Exception as e:
+        log("API: evaluate(await_promise) failed:", str(e)[:90])
+        return None
     if not raw:
         log("API: in-browser fetch returned nothing")
         return None
