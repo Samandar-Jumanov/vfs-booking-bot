@@ -42,6 +42,7 @@ except Exception:
 EMAIL = os.environ.get("VFS_EMAIL", "")
 PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
+DASHBOARD_URL = os.environ.get("VFS_DASHBOARD_URL", LOGIN_URL.replace("/login", "/dashboard"))
 MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "120"))
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
@@ -579,6 +580,25 @@ async def enter_wizard(page):
             if await jeval(page, "!!document.querySelector('mat-select')"):
                 break
             await asyncio.sleep(1)
+
+
+async def _reenter_wizard_fresh(page):
+    """Re-enter the booking wizard FRESH for the next monitor check. A bare
+    location.reload() of the mid-wizard URL leaves the SPA without its dropdowns
+    (observed: 0 dropdowns on check #2). Navigating to the dashboard and clicking
+    'Start New Booking' reliably re-renders the form (as check #1 does). Also
+    clears the route cache so select_route re-scans the fresh DOM."""
+    _ROUTE_CACHE["sub_idx"] = None
+    _ROUTE_CACHE["subcat_texts"] = None
+    try:
+        await jeval(page, "location.href=%s" % json.dumps(DASHBOARD_URL))
+    except Exception:
+        await jeval(page, "location.reload()")
+    # Wait for the dashboard (Start New Booking) or a wizard dropdown to render.
+    await wait_until(page,
+        "(()=>{return /start new booking|book appointment|new booking/i.test(document.body.innerText||'') || !!document.querySelector('mat-select');})()",
+        timeout=15, interval=0.5)
+    await enter_wizard(page)
 
 
 async def open_select(page, index, label, polls=6):
@@ -1132,23 +1152,15 @@ async def main():
             # live. But on repeated API failures (token expiry/403), drop back to the
             # UI reload so we re-capture fresh auth headers off the browser's requests.
             if api_fail_streak >= 3:
-                log("API: repeated failures — reloading wizard to re-capture auth headers")
-                await jeval(page, "location.reload()")
-                await wait_until(page,
-                    "(()=>{return !!document.querySelector('mat-select') || /start new booking|book appointment|new booking/i.test(document.body.innerText||'');})()",
-                    timeout=8, interval=0.4)
-                await enter_wizard(page)
+                log("API: repeated failures — re-entering wizard to re-capture auth headers")
+                await _reenter_wizard_fresh(page)
                 api_fail_streak = 0
         else:
-            # UI fallback path: go back to a clean Appointment Details state. The
-            # reload forces VFS to re-evaluate availability (required for a fresh
-            # read); after it, wait for the wizard form to re-render (≤8s) instead of
-            # a flat 8s sleep so a fast reload starts the next check sooner.
-            await jeval(page, "location.reload()")
-            await wait_until(page,
-                "(()=>{return !!document.querySelector('mat-select') || /start new booking|book appointment|new booking/i.test(document.body.innerText||'');})()",
-                timeout=8, interval=0.4)
-            await enter_wizard(page)
+            # UI fallback path: re-enter the wizard FRESH from the dashboard. A bare
+            # location.reload() of the mid-wizard URL drops the SPA's dropdowns
+            # (check #2 saw 0 dropdowns) — navigating to the dashboard and clicking
+            # "Start New Booking" reliably re-renders them (proven by check #1).
+            await _reenter_wizard_fresh(page)
 
     log("done — keeping browser open 15s")
     await asyncio.sleep(15)
