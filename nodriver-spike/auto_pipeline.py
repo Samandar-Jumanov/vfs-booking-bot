@@ -90,6 +90,11 @@ _LIFT_BODY = {
 _CODES_CONFIRMED = False
 # Logged once so the operator can see which code source the first API call used.
 _API_SOURCE_LOGGED = False
+# DIAGNOSTIC: run the token-replay probe only once per run.
+_REPLAY_PROBED = False
+# A realistic desktop-Chrome UA for the direct (non-browser) replay probe.
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 
 # ── Mailsac (booking OTP) ────────────────────────────────────────────────────
@@ -539,6 +544,84 @@ async def api_check_availability(page):
         "_status": status,
     }
     return out
+
+
+async def replay_probe(page):
+    """DIAGNOSTIC (runs once/run). Fires the SAME CheckIsSlotAvailable as a DIRECT
+    Python HTTP request — NO browser, NO cookies — using only the captured
+    authorize/clientsource headers. The verdict tells us how to scale:
+
+      • HTTP 200  → the lift-api token is NOT IP/cookie-bound. We can poll from a
+                    POOL OF ROTATING IPS reusing one captured token (exactly how
+                    the 28k-checks/day services dodge the per-IP 429201). Cheap path.
+      • 401/403   → token is session/cookie/IP-bound → we'd need a full browser
+                    session per IP (heavier, what proxy services sell).
+      • 429       → even a single direct call is rate-limited at the IP.
+
+    Set REPLAY_PROXY=http://user:pass@host:port to route the probe through a proxy
+    and test IP-replay directly (a 200 through a *different* IP = rotation works)."""
+    if not auth_captured():
+        log("REPLAY-PROBE: no auth captured — skipping"); return
+    body = {
+        "countryCode": _LIFT_BODY.get("countryCode") or VFS_COUNTRY,
+        "missionCode": _LIFT_BODY.get("missionCode") or VFS_MISSION,
+        "vacCode": _LIFT_BODY.get("vacCode") or VFS_VAC,
+        "visaCategoryCode": _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT,
+        "roleName": "Individual",
+        "loginUser": EMAIL,
+        "payCode": "",
+    }
+    headers = {
+        "authorize": _LIFT_AUTH.get("authorize") or "",
+        "clientsource": _LIFT_AUTH.get("clientsource") or "",
+        "content-type": "application/json;charset=UTF-8",
+        "accept": "application/json, text/plain, */*",
+        "user-agent": BROWSER_UA,
+        "origin": "https://visa.vfsglobal.com",
+        "referer": "https://visa.vfsglobal.com/",
+    }
+    if _LIFT_AUTH.get("route"):
+        headers["route"] = _LIFT_AUTH["route"]
+    proxy = os.environ.get("REPLAY_PROXY", "").strip()
+    body_bytes = json.dumps(body).encode()
+
+    def _do():
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        else:
+            opener = urllib.request.build_opener()
+        req = urllib.request.Request(LIFT_API_URL, data=body_bytes, headers=headers, method="POST")
+        try:
+            r = opener.open(req, timeout=20)
+            return r.status, r.read().decode("utf-8", "replace")[:300]
+        except urllib.error.HTTPError as e:
+            try:
+                snip = e.read().decode("utf-8", "replace")[:300]
+            except Exception:
+                snip = ""
+            return e.code, snip
+        except Exception as e:
+            return 0, str(e)[:200]
+
+    try:
+        status, snippet = await asyncio.to_thread(_do)
+    except Exception as e:
+        log("REPLAY-PROBE: failed:", str(e)[:120]); return
+    where = "via PROXY" if proxy else "direct same-IP"
+    if status == 200:
+        verdict = "✅ TOKEN REPLAY WORKS (header-only, no cookies) — IP rotation is viable"
+    elif status in (401, 403):
+        verdict = f"❌ token bound (HTTP {status}) — needs browser/cookies per IP"
+    elif status == 429:
+        verdict = "⛔ rate-limited (429) even on a single direct call"
+    elif status == 0:
+        verdict = f"transport error: {snippet}"
+    else:
+        verdict = f"HTTP {status}"
+    log(f"REPLAY-PROBE [{where}]: status={status} → {verdict}")
+    log(f"REPLAY-PROBE body: {snippet}")
+    telegram(f"🧪 Token-replay probe [{where}]: HTTP {status} — {verdict}")
 
 
 # ── LOGIN ──────────────────────────────────────────────────────────────────
@@ -1222,7 +1305,7 @@ async def book(page, subcat):
 
 # ── MAIN ───────────────────────────────────────────────────────────────────
 async def main():
-    global BOOK_ENABLED
+    global BOOK_ENABLED, _REPLAY_PROBED
     if not EMAIL or not PASSWORD:
         log("ERROR: set VFS_EMAIL/VFS_PASSWORD"); sys.exit(2)
     if BOOK_DRY_RUN and BOOK_ENABLED:
@@ -1288,6 +1371,15 @@ async def main():
                 if status == 200 and not err:
                     used_api = True
                     api_fail_streak = 0
+                    # ONE-TIME DIAGNOSTIC: the in-browser API check just worked, so
+                    # we have a live token. Probe whether a DIRECT (cookieless) call
+                    # also works → tells us if IP-rotation polling is viable.
+                    if not _REPLAY_PROBED:
+                        _REPLAY_PROBED = True
+                        try:
+                            await replay_probe(page)
+                        except Exception as _pe:
+                            log("replay_probe error (non-fatal):", str(_pe)[:100])
                     earliest = api.get("earliestDate")
                     slot_lists = api.get("earliestSlotLists") or []
                     if earliest or slot_lists:
