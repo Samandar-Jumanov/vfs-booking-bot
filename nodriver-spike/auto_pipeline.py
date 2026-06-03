@@ -1450,9 +1450,9 @@ async def book(page, subcat):
     if still_on_details:
         log("STEP2b: post-OCR form detected — inspecting fields")
         # Read each visible input: label, placeholder, formcontrolname, current value
-        fields_info = await jeval(page, r"""(()=>{
+        fields_info_raw = await jeval(page, r"""(()=>{
             const inputs=[...document.querySelectorAll('input')].filter(i=>i.offsetParent!==null&&i.type!=='hidden');
-            return inputs.map(i=>{
+            return JSON.stringify(inputs.map(i=>{
                 const ff=i.closest('mat-form-field,.mat-mdc-form-field,.mat-form-field');
                 const lbl=ff?((ff.querySelector('mat-label,label,.mat-mdc-floating-label,.mat-form-field-label')||{}).innerText||'').trim():'';
                 return {
@@ -1460,8 +1460,15 @@ async def book(page, subcat):
                     placeholder:(i.placeholder||'').trim(),label:lbl,
                     value:(i.value||'').trim(),required:i.required||i.getAttribute('aria-required')==='true'
                 };
-            });
+            }));
         })()""")
+        # jeval returns non-dict structures unpredictably for JS objects — JSON.stringify
+        # and parse ensures we always get a proper list of dicts.
+        try:
+            fields_info = json.loads(fields_info_raw) if isinstance(fields_info_raw, str) else (fields_info_raw or [])
+        except Exception:
+            fields_info = []
+        log("STEP2b fields: %s" % str(fields_info)[:300])
         if isinstance(fields_info, list):
             for f in fields_info:
                 log("STEP2b FIELD: label=%r fc=%r placeholder=%r value=%r required=%s" % (
