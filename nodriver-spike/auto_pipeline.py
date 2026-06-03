@@ -1874,10 +1874,18 @@ async def main():
                     break
                 status = api.get("_status", 0)
                 err = api.get("error")
+                err_code = (err or {}).get("code") if isinstance(err, dict) else None
+                # error.code 1035 means "No slots available" — a legitimate negative
+                # result from VFS's own API.  Treat it as a clean no-slot, NOT a
+                # transport/block failure; keep scanning the remaining subcategories.
+                if err_code == 1035:
+                    log(f"API: no slots in {_nm or 'work-d'} (1035 — confirmed by API)")
+                    used_api = True
+                    api_fail_streak = 0
+                    continue  # next subcategory; do NOT break to UI
                 if status != 200 or err:
                     api_fail_streak += 1
-                    code = (err or {}).get("code") if isinstance(err, dict) else None
-                    log(f"API: unusable (status={status}, code={code}, streak={api_fail_streak}) — falling back to UI")
+                    log(f"API: unusable (status={status}, code={err_code}, streak={api_fail_streak}) — falling back to UI")
                     used_api = False
                     _api_broke = True
                     break
@@ -1919,16 +1927,28 @@ async def main():
             # Work-D slot drives select_route() + book(); OCMA never sets this.
             if workd_slot:
                 slot = workd_slot
+
+            # Safety-net flag: API returned all-1035 (clean no-slot across every
+            # subcategory, no break, no real error).  We keep the UI cross-check
+            # for now so we can compare API vs UI in logs and confirm whether the
+            # API surfaces OCMA the same way the wizard does.  Once logs show
+            # agreement we can drop the UI walk for the all-clear case.
+            _api_all_clear = (used_api and not _api_broke and not slot and not ocma_avail)
         elif not auth_captured():
             log("API: auth headers not captured yet — using UI path")
+            _api_all_clear = False
         else:
             log("API: codes not confirmed yet — UI walk first to capture real codes")
+            _api_all_clear = False
 
-        # FALLBACK / BACKWARD-COMPAT: if the API didn't resolve this cycle, run the
-        # existing UI slot check (unchanged behaviour). Also used when API found a
-        # slot but we still need the UI to navigate to bookable state — select_route
-        # both confirms availability AND leaves the wizard ready for book().
-        if not used_api or slot:
+        # FALLBACK / BACKWARD-COMPAT: run the existing UI slot check when:
+        #   a) API didn't resolve this cycle (used_api=False or _api_broke), OR
+        #   b) API found a slot (select_route needed to leave wizard in bookable state), OR
+        #   c) API returned all-1035 clean (_api_all_clear) — UI cross-check safety net.
+        # When _api_all_clear, log explicitly so we can later compare API vs UI output.
+        if _api_all_clear:
+            log("API: all subcategories returned 1035 (no slots) — running UI cross-check for safety")
+        if not used_api or slot or _api_all_clear:
             try:
                 ui_slot = await select_route(page)
             except Exception as _se:
