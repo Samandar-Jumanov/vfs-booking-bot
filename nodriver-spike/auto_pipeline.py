@@ -1260,6 +1260,10 @@ async def _try_subcat(page, sub_idx, texts):
         if not re.search(re.escape(wt[:15]), displayed, re.I):
             log(f"_try_subcat: displayed value '{displayed[:30]}' != intended '{wt[:18]}' — skipping (index drift?)")
             continue
+        # VFS sometimes pops a Verify/captcha modal right after subcat selection
+        # (before evaluating slot availability). Dismiss it so the Continue-button
+        # poll below can actually see the enabled state. No-ops fast when absent.
+        await handle_captcha_modal(page)
         # VFS evaluates availability → enables Continue. Poll (≤3s) instead of a
         # blind sleep so the happy path is fast but slow evaluations still pass.
         if await wait_until(page,
