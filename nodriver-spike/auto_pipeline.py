@@ -882,7 +882,9 @@ async def _fill_login_form(page):
     refilled = False
     for i in range(30):
         if await sign_in_disabled(page) is False:
-            return True
+            token_len = await jeval(page, "(()=>{const f=document.querySelector('[name=\"cf-turnstile-response\"]'); return f&&f.value?f.value.length:0;})()")
+            if token_len:
+                return True
         if i == 8 and not refilled:
             refilled = True
             log("LOGIN: Sign In still disabled @8s — re-syncing fields once")
