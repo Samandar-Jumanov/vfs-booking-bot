@@ -50,6 +50,15 @@ const REGISTER_STAGGER_SEC = Number(process.env.REGISTER_STAGGER_SEC ?? 120);
 // throttleGuard: hard cap on registrations per UTC day. Once hit, the worker
 // stops registering for the rest of the day (resets at 00:00 UTC).
 const MAX_REG_PER_DAY = Number(process.env.MAX_REG_PER_DAY ?? 8);
+// BOOKING_ONLY=1: skip pool top-up entirely — drive only ACTIVE accounts.
+// Use when the pool is pre-built and you want a light booking-only run.
+const BOOKING_ONLY = process.env.BOOKING_ONLY === '1';
+// WORKER_MODE: 'book' (default) | 'pool_builder'
+// pool_builder: continuously top up the account pool at REG_INTERVAL_MIN minutes/account,
+// never drives/books. Run separately from the booking worker.
+const WORKER_MODE = (process.env.WORKER_MODE ?? 'book') as 'book' | 'pool_builder';
+// REG_INTERVAL_MIN: minutes between registrations in pool_builder mode (default: 10)
+const REG_INTERVAL_MIN = Number(process.env.REG_INTERVAL_MIN ?? 10);
 const PROFILE_ENCRYPTION_KEY = (() => {
   const v = process.env.PROFILE_ENCRYPTION_KEY;
   if (!v) { console.error('[WORKER] PROFILE_ENCRYPTION_KEY is required'); process.exit(1); }
@@ -545,7 +554,8 @@ async function driveRun(runId: string): Promise<void> {
 
   // 1. Pool top-up. POOL_MIN=0 disables registration entirely (e.g. when the
   // extension isn't up to activate new ones and only existing accounts are used).
-  const poolMin = Number(process.env.POOL_MIN ?? 2);
+  const poolMin = BOOKING_ONLY ? 0 : Number(process.env.POOL_MIN ?? 2);
+  if (BOOKING_ONLY) log('BOOKING_ONLY mode — skipping pool top-up (POOL_MIN forced to 0)');
   const registered: Array<{ email: string; status: string }> = [];
   if (poolMin > 0) {
     const spare = await spareCount();
@@ -767,6 +777,45 @@ async function driveRun(runId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// runPoolBuilder — paced account registration loop (WORKER_MODE=pool_builder)
+// Tops up the pool slowly, one account every REG_INTERVAL_MIN minutes.
+// Never drives or books — keeps registration traffic well under the IP limit.
+// ---------------------------------------------------------------------------
+
+async function runPoolBuilder(): Promise<void> {
+  log(`Pool-builder mode: target POOL_MIN=${process.env.POOL_MIN ?? 2}, interval=${REG_INTERVAL_MIN}min/account`);
+  const poolMin = Number(process.env.POOL_MIN ?? 2);
+  let dailyReg: DailyRegState = { dayKey: new Date().toISOString().slice(0, 10), count: 0 };
+  for (;;) {
+    const spare = await spareCount();
+    log(`pool-builder: spare=${spare} ACTIVE+unlinked (target=${poolMin})`);
+    if (spare >= poolMin) {
+      log(`pool-builder: pool is full — sleeping ${REG_INTERVAL_MIN}min`);
+      await sleep(REG_INTERVAL_MIN * 60 * 1000);
+      continue;
+    }
+    if (!canRegisterNow(dailyReg, MAX_REG_PER_DAY, new Date())) {
+      log(`pool-builder: daily cap ${MAX_REG_PER_DAY} reached — sleeping until next UTC day`);
+      const msUntilMidnight = new Date(new Date().toISOString().slice(0, 10) + 'T24:00:00Z').getTime() - Date.now();
+      await sleep(Math.max(msUntilMidnight, 60_000));
+      dailyReg = { dayKey: new Date().toISOString().slice(0, 10), count: 0 };
+      continue;
+    }
+    const reg = await registerOne('pool-builder');
+    if (reg.ok) {
+      dailyReg = recordRegistration(dailyReg, new Date());
+      log(`pool-builder: registered ${reg.ok.email} (status=${reg.ok.status})`);
+    } else {
+      log(`pool-builder: registration failed — backing off 5min`);
+      await sleep(5 * 60 * 1000);
+      continue;
+    }
+    log(`pool-builder: waiting ${REG_INTERVAL_MIN}min before next registration`);
+    await sleep(REG_INTERVAL_MIN * 60 * 1000);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // pickNextDue usage — exported from pacer, used to log the next candidate
 // ---------------------------------------------------------------------------
 
@@ -967,6 +1016,12 @@ async function main(): Promise<void> {
   // behind by a previously-killed/old worker — so a (re)started worker never
   // ignores a stuck stop. (Task 2: self-clearing stop.)
   await clearOrphanedRunOnStartup();
+
+  if (WORKER_MODE === 'pool_builder') {
+    log(`Starting in pool_builder mode (REG_INTERVAL_MIN=${REG_INTERVAL_MIN}, POOL_MIN=${process.env.POOL_MIN ?? 2}, MAX_REG_PER_DAY=${MAX_REG_PER_DAY})`);
+    await runPoolBuilder(); // runs forever (or until SIGINT/SIGTERM)
+    return;
+  }
 
   for (;;) {
     try {
