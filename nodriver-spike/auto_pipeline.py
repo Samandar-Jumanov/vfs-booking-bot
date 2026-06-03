@@ -375,6 +375,8 @@ async def _install_auth_capture(page):
     try:
         from nodriver import cdp
 
+        _seen_urls = set()
+
         async def on_req(evt):
             try:
                 u = evt.request.url
@@ -387,12 +389,17 @@ async def _install_auth_capture(page):
                         if _LIFT_AUTH.get(lk) != v:
                             _LIFT_AUTH[lk] = v
                             log(f"AUTH-CAPTURE: {lk}={str(v)[:24]}…")
-                # Also sniff the REAL request body of the wizard's OWN
-                # CheckIsSlotAvailable POST → authoritative vac/visacat/country/
-                # mission codes (the env defaults are guesses). CDP exposes the body
-                # as request.post_data (nodriver attr) / "postData" (raw dict). Parse
-                # the JSON and stash the four codes in _LIFT_BODY.
-                if "checkisslotavailable" in u.lower():
+                # DIAGNOSTIC: log each distinct lift-api endpoint ONCE so we can see
+                # exactly which call carries the codes (vac/visacat live here).
+                if u not in _seen_urls:
+                    _seen_urls.add(u)
+                    _hp = getattr(evt.request, "post_data", None) is not None
+                    log("LIFT-URL:", u.split("?")[0][:130], "(postData=%s)" % _hp)
+                # Sniff the REAL vac/visacat/country/mission codes from ANY lift-api
+                # request body that carries them (not just CheckIsSlotAvailable) — the
+                # env defaults are guesses; whichever wizard call includes them flips
+                # codes_confirmed() and unlocks the cheap API monitor.
+                if True:
                     pd = getattr(evt.request, "post_data", None)
                     if pd is None:
                         try:
