@@ -1444,10 +1444,24 @@ async def handle_captcha_modal(page):
     """After Continue, VFS *sometimes* pops a Verify-Captcha modal whose Turnstile
     auto-passes; click its action button when enabled. If no modal appears, don't
     waste the full timeout — only wait when an overlay/dialog is actually present."""
-    has_modal = await jeval(page, "!!document.querySelector('.cdk-overlay-pane, mat-dialog-container, [role=dialog]')")
+    # A plain mat-select dropdown also creates .cdk-overlay-pane but only contains
+    # mat-option elements.  Only treat an overlay as a REAL captcha/verify modal when:
+    #   (a) a mat-dialog-container or [role="dialog"] element is present, OR
+    #   (b) a Cloudflare Turnstile frame / element is inside any overlay, OR
+    #   (c) a visible action button (submit/verify/confirm/proceed) exists in the overlay.
+    # A dropdown panel with nothing but mat-option nodes satisfies none of these → skip.
+    has_modal = await jeval(page, """(()=>{
+        const pane = document.querySelector('.cdk-overlay-pane');
+        if (!pane) return false;
+        if (document.querySelector('mat-dialog-container, [role="dialog"]')) return true;
+        if (pane.querySelector('iframe[src*="challenges.cloudflare.com"], [name="cf-turnstile-response"], .cf-turnstile')) return true;
+        const btnText = txt => ['submit','verify','confirm','proceed'].some(k => txt.toLowerCase().includes(k));
+        const actionBtn = [...(pane.querySelectorAll('button') || [])].find(b => btnText((b.innerText || '').trim()));
+        return !!actionBtn;
+    })()""")
     if not has_modal:
         return
-    await click_button_text(page, ["submit", "verify", "confirm", "proceed"], timeout=25)
+    await click_button_text(page, ["submit", "verify", "confirm", "proceed"], timeout=6)
 
 
 async def dump_state(page, label):
