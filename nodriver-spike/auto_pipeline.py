@@ -1853,6 +1853,20 @@ async def main():
                 # multi-hour monitor. Log, treat as "no slot this cycle", keep looping.
                 log("select_route errored (continuing loop):", str(_se)[:160])
                 ui_slot = None
+
+            # UI-path OCMA filter: if select_route landed on an OCMA subcat, treat
+            # it as report-only (same as the API path). Never book OCMA via the UI.
+            if ui_slot and re.search(r"ocma", ui_slot or "", re.I):
+                _now = time.time()
+                if _now - _ocma_last_report >= 600:
+                    _ocma_last_report = _now
+                    milestone("ocma_available", email=EMAIL, detail=f"subcatName={ui_slot}")
+                    telegram(f"[bot] ✅ OCMA slots available — {ui_slot} — bot detection confirmed ({EMAIL})")
+                    log(f"OCMA report (UI path) sent: {ui_slot}")
+                else:
+                    log(f"OCMA UI slot '{ui_slot}' rate-limited (sent <10min ago) — skipping report")
+                ui_slot = None  # do NOT pass to slot → no booking for OCMA
+
             if slot:
                 # API flagged a slot; prefer the concrete subcat select_route lands on
                 # (book() needs the wizard in the picked state). If the UI couldn't
