@@ -1212,14 +1212,53 @@ async def _scan_for_subcat(page):
 async def _try_subcat(page, sub_idx, texts):
     """Given the subcat dropdown index + its option texts, pick each Work-D-visa
     option and check whether a slot is available (Continue enabled). Returns the
-    chosen subcat text on a hit, else None."""
+    chosen subcat text on a hit, None on no slot, or the sentinel string
+    "SUBCAT_NOT_READY" when the opened dropdown exposes category options (index
+    drifted after _scan_for_subcat closed its panels) — so the caller can retry
+    cleanly rather than emitting a false 'no slot'.
+
+    On each open we RE-LOCATE the subcat dropdown by OPTIONS CONTENT (matching
+    SUBCAT_LIST_RE) rather than reusing sub_idx, which may have shifted since the
+    scan.  If the found index disagrees with sub_idx we log it and use the live
+    one.  If no dropdown currently exposes subcat options we return SUBCAT_NOT_READY
+    immediately — the caller handles it as a transient DOM-not-ready state."""
     work = [t for t in texts if SUBCAT.search(t)]
     if not work:
         log("no Work-D-visa sub-category in list"); return None
     for wt in work:
-        opts = await open_select(page, sub_idx, "subcat")
+        # Re-locate the subcat dropdown by content — the index can shift between
+        # the scan phase (which opens+closes panels) and this selection phase.
+        all_selects = await page.select_all("mat-select")
+        live_idx = sub_idx  # default: trust the passed index
+        for probe_i in range(len(all_selects)):
+            probe_texts = await _option_texts(page, probe_i, f"probe[{probe_i}]")
+            if any(SUBCAT_LIST_RE.search(t) for t in probe_texts):
+                if probe_i != sub_idx:
+                    log(f"_try_subcat: subcat index drifted {sub_idx}→{probe_i} — using live idx")
+                live_idx = probe_i
+                break
+        else:
+            # No dropdown currently has subcat options — form is in a transient state.
+            log("_try_subcat: no dropdown has subcat options — returning SUBCAT_NOT_READY")
+            return "SUBCAT_NOT_READY"
+
+        opts = await open_select(page, live_idx, "subcat")
+        # Guard: verify the panel we opened is the subcat panel (not the category
+        # dropdown, which would contain 'Latvia...' options).  If its options don't
+        # match SUBCAT_LIST_RE, the DOM is inconsistent — signal NOT_READY.
+        opt_texts = [(o.text or "").strip() for o in opts]
+        if not any(SUBCAT_LIST_RE.search(t) for t in opt_texts):
+            await close_overlay(page)
+            log("_try_subcat: opened panel has non-subcat options %s — returning SUBCAT_NOT_READY" % opt_texts[:3])
+            return "SUBCAT_NOT_READY"
+
         picked = await pick_option(opts, lambda t, wt=wt: t == wt, "sub:" + wt[:18])
         if not picked:
+            continue
+        # Verify the dropdown now shows the intended value (not just a stale display).
+        displayed = await _select_value_text(page, live_idx)
+        if not re.search(re.escape(wt[:15]), displayed, re.I):
+            log(f"_try_subcat: displayed value '{displayed[:30]}' != intended '{wt[:18]}' — skipping (index drift?)")
             continue
         # VFS evaluates availability → enables Continue. Poll (≤3s) instead of a
         # blind sleep so the happy path is fast but slow evaluations still pass.
@@ -1271,6 +1310,7 @@ async def select_route(page):
     # stick (page still spinner-loading, click landed mid-render), the subcat never
     # populates and we get a false "no slots". So pick → confirm the displayed value
     # changed off the placeholder → retry up to 3x → then wait for subcat to load.
+    cat_registered = False
     for _cat_try in range(3):
         opts = await open_select(page, 1, "category")
         if opts:
@@ -1279,9 +1319,19 @@ async def select_route(page):
         catval = await _select_value_text(page, 1)
         if re.search(r"long\s*stay|visa\s*d", catval, re.I):
             log("category registered:", catval[:40])
+            cat_registered = True
             break
         log(f"category NOT registered (shows '{catval[:30]}') — retry {_cat_try + 1}/3")
         await asyncio.sleep(1.5)
+
+    if not cat_registered:
+        # All 3 category retries exhausted without it sticking.  The subcat will
+        # NOT be populated, so scanning now would either find nothing or the category
+        # dropdown itself — both produce false results.  Return None so the monitor
+        # loop's _reenter_wizard_fresh path takes over on the next cycle.
+        log("select_route: category failed all retries — skipping subcat (will re-enter wizard next cycle)")
+        return None
+
     # subcat is API-loaded right after the category sticks — wait for it to populate.
     await wait_until(page,
         "(()=>{const s=document.querySelectorAll('mat-select'); return s.length>=3;})()",
@@ -1308,7 +1358,11 @@ async def select_route(page):
                 log(f"subcat fast-path: index {fast_idx}; options:", texts)
                 _ROUTE_CACHE["sub_idx"] = fast_idx
                 _ROUTE_CACHE["subcat_texts"] = texts
-                return await _try_subcat(page, fast_idx, texts)
+                result = await _try_subcat(page, fast_idx, texts)
+                if result == "SUBCAT_NOT_READY":
+                    log("subcat select failed (index drifted post-scan) — retry next cycle")
+                    return None
+                return result
         log("subcat fast-path: index didn't expose subcat options — re-scanning")
 
     # ── SLOW PATH: scan every dropdown for the subcat list, then cache it ──────
@@ -1318,7 +1372,11 @@ async def select_route(page):
     log(f"subcat at index {sub_idx}; options:", texts)
     _ROUTE_CACHE["sub_idx"] = sub_idx
     _ROUTE_CACHE["subcat_texts"] = texts
-    return await _try_subcat(page, sub_idx, texts)
+    result = await _try_subcat(page, sub_idx, texts)
+    if result == "SUBCAT_NOT_READY":
+        log("subcat select failed (index drifted post-scan) — retry next cycle")
+        return None
+    return result
 
 
 # ── BOOKING (Phase D) — ported from extension runBookingSteps ───────────────
