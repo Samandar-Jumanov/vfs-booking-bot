@@ -504,6 +504,7 @@ async function registerOne(runId: string): Promise<RegisterOutcome> {
         encryptedPassword: encryptField(result.password),
         phone: result.phone,
         status,
+        profileIds: [],
       },
     });
     log(`persisted ${result.email} → status=${status} (activated=${result.activated})`);

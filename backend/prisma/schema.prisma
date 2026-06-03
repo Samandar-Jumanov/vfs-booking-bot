@@ -232,7 +232,7 @@ model VfsAccount {
   restrictedReason  String?
   lastError         String?
   tabUrl            String?
-  profileIds        String[]
+  profileIds        String[]           @default([])
   bookingConfirmation String?
   bookedAt          DateTime?
   createdAt         DateTime      @default(now())

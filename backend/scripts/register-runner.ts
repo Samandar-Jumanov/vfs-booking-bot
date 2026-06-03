@@ -111,6 +111,7 @@ async function persist(r: RegResult): Promise<void> {
       encryptedPassword: encrypt(r.password),
       phone: r.phone,
       status,
+      profileIds: [],
     },
   });
   log(`persisted ${r.email} -> status=${status} (activated=${r.activated})`);

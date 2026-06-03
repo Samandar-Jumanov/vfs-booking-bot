@@ -155,6 +155,7 @@ accountsRouter.post('/', async (req: Request, res: Response, next: NextFunction)
         email: body.email,
         encryptedPassword,
         phone: body.phone ?? null,
+        profileIds: [],
       },
       select: {
         id: true,
@@ -698,6 +699,7 @@ accountsRouter.post('/recover-from-mailsac', async (req: Request, res: Response,
         phone,
         smsExternalId,
         status: 'ACTIVE',
+        profileIds: [],
       },
       select: { id: true, email: true },
     });
@@ -771,6 +773,7 @@ accountsRouter.post('/inject-cookies', async (req: Request, res: Response, next:
             lastWarmedAt: hasDatadome ? now : null,
             tabUrl: body.tabUrl ?? null,
             status: 'ACTIVE',
+            profileIds: [],
           },
           select: { id: true, email: true, status: true, lastWarmedAt: true },
         });

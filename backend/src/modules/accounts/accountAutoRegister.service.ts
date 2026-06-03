@@ -115,6 +115,7 @@ export async function autoRegisterAccount(opts: AutoRegisterOptions): Promise<Au
       phone: phone.number,
       smsExternalId: phone.id,
       status: PENDING_STATUS,
+      profileIds: [],
     },
     select: { id: true, email: true },
   });
