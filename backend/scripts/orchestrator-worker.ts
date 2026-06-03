@@ -906,7 +906,8 @@ const STALE_RUN_MS = 90_000;
 // DB-backed single-instance lock. A worker that hasn't updated its heartbeat
 // within this window is assumed dead and the lock is stolen.
 const WORKER_LOCK_KEY = 'worker_lock';
-const WORKER_LOCK_STALE_MS = 60_000; // 60s — 4× the poll interval
+const WORKER_LOCK_HEARTBEAT_MS = 30_000;  // write heartbeat every 30s
+const WORKER_LOCK_STALE_MS = 120_000;    // 120s — 4× heartbeat interval; stale = dead
 const FORCE_START = process.argv.includes('--force');
 
 // ---------------------------------------------------------------------------
@@ -1059,13 +1060,15 @@ async function main(): Promise<void> {
   const writeLockHeartbeat = () => prisma.settings.findUnique({ where: { key: WORKER_LOCK_KEY } }).then((row) => {
     const existing = row?.value as WorkerLock | null;
     if (existing?.pid === process.pid) {
+      const heartbeatAt = new Date().toISOString();
       return prisma.settings.update({
         where: { key: WORKER_LOCK_KEY },
-        update: { value: { ...existing, heartbeatAt: new Date().toISOString() } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
-      } as Parameters<typeof prisma.settings.update>[0]).catch(() => {});
+        data: { value: { ...existing, heartbeatAt } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+      }).then(() => { log(`Lock heartbeat written (pid=${process.pid}, heartbeatAt=${heartbeatAt})`); })
+        .catch((err: unknown) => { log(`WARN: lock heartbeat write failed: ${(err as Error).message}`); });
     }
   }).catch(() => {});
-  const lockHeartbeatTimer = setInterval(() => { void writeLockHeartbeat(); }, POLL_INTERVAL_SEC * 1000);
+  const lockHeartbeatTimer = setInterval(() => { void writeLockHeartbeat(); }, WORKER_LOCK_HEARTBEAT_MS);
   process.on('exit', () => clearInterval(lockHeartbeatTimer));
 
   // On startup, clear any orphaned 'stopping' run or stale 'running' run left
