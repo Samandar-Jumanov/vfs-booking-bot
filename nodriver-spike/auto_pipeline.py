@@ -921,15 +921,38 @@ async def _reenter_wizard_fresh(page):
     clears the route cache so select_route re-scans the fresh DOM."""
     _ROUTE_CACHE["sub_idx"] = None
     _ROUTE_CACHE["subcat_texts"] = None
-    try:
-        await jeval(page, "location.href=%s" % json.dumps(DASHBOARD_URL))
-    except Exception:
-        await jeval(page, "location.reload()")
-    # Wait for the dashboard (Start New Booking) or a wizard dropdown to render.
-    await wait_until(page,
-        "(()=>{return /start new booking|book appointment|new booking/i.test(document.body.innerText||'') || !!document.querySelector('mat-select');})()",
-        timeout=15, interval=0.5)
-    await enter_wizard(page)
+    # Re-entry is flaky: the SPA sometimes renders the 3 mat-selects but WITHOUT
+    # their data (centre/category options never load) → every later check sees
+    # empty dropdowns → false "no slots". So after entering, VERIFY the centre
+    # dropdown actually loaded its value ("VFS GLOBAL SERVICES …"); if the form
+    # came back empty, HARD-reload and retry (up to 3x).
+    for attempt in range(3):
+        try:
+            await jeval(page, "location.href=%s" % json.dumps(DASHBOARD_URL))
+        except Exception:
+            await jeval(page, "location.reload()")
+        await wait_until(page,
+            "(()=>{return /start new booking|book appointment|new booking/i.test(document.body.innerText||'') || !!document.querySelector('mat-select');})()",
+            timeout=15, interval=0.5)
+        await enter_wizard(page)
+        # Wait for the centre dropdown to auto-fill (1 Centre auto-selects) — the
+        # signal that the form's data actually loaded, not just the empty shell.
+        await wait_until(page,
+            "(()=>{const s=document.querySelectorAll('mat-select'); if(s.length<2)return false;"
+            "const v=s[0].querySelector('.mat-mdc-select-value,.mat-select-value,[class*=select-value]');"
+            "const t=((v&&v.innerText)||'').trim(); return t && !/choose|select/i.test(t);})()",
+            timeout=10, interval=0.4)
+        centre = await _select_value_text(page, 0)
+        if centre and not re.search(r"choose|select", centre, re.I):
+            log("wizard re-entered OK, centre loaded:", centre[:30])
+            return
+        log(f"wizard re-entry EMPTY (centre='{centre[:25]}') — hard reload, retry {attempt + 1}/3")
+        try:
+            await jeval(page, "location.reload()")
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+    log("wizard re-entry: form still empty after 3 tries — select_route will retry centre")
 
 
 # JS that scopes option-reading to the CURRENTLY-OPEN CDK overlay panel only.
