@@ -71,6 +71,9 @@ const PROFILE_ENCRYPTION_KEY = (() => {
   if (!v) { console.error('[WORKER] PROFILE_ENCRYPTION_KEY is required'); process.exit(1); }
   return v;
 })();
+// Auto-rotate: max 429001 swaps per driveRun() call. If we hit the cap,
+// multiple accounts blocked quickly = likely an IP issue, not account issue.
+const MAX_SWAPS_PER_RUN = Number(process.env.MAX_SWAPS_PER_RUN ?? 2);
 
 // ---------------------------------------------------------------------------
 // Inline AES-256-GCM decrypt (avoids importing backend env chain)
@@ -576,6 +579,30 @@ async function spareCount(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// findReadySpare — returns the best unlinked ACTIVE spare account for rotation.
+// "Ready" = ACTIVE, not BLOCKED/BOOKED lifecycle, no active cooldown, no client linked.
+// Orders by lastAttemptAt asc (least recently touched = freshest).
+// ---------------------------------------------------------------------------
+
+async function findReadySpare(excludeId: string): Promise<{
+  id: string;
+  email: string;
+} | null> {
+  const now = new Date();
+  return prisma.vfsAccount.findFirst({
+    where: {
+      id: { not: excludeId },
+      status: 'ACTIVE',
+      lifecycleState: { notIn: ['BLOCKED', 'BOOKED'] },
+      profileIds: { isEmpty: true },
+      OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }],
+    },
+    select: { id: true, email: true },
+    orderBy: { lastAttemptAt: 'asc' },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Per-run request budget factory
 // ---------------------------------------------------------------------------
 
@@ -743,6 +770,9 @@ async function driveRun(runId: string): Promise<void> {
 
   let lastAction = 0;
   let lastGlobalAction: number | null = null;
+  // Auto-rotate guardrail: count 429001 swaps in this run.
+  // If we exceed MAX_SWAPS_PER_RUN, stop swapping (likely an IP problem).
+  let swapCount = 0;
 
   for (const acct of accounts) {
     // Per-account pacer check
@@ -811,6 +841,66 @@ async function driveRun(runId: string): Promise<void> {
       } else if (err && /session_expired|datadome|turnstile|login_failed|page_not_found|block/i.test(err)) {
         cooldownUntil = new Date(at + 30 * 60 * 1000); // short 30-min backoff, recovers soon
         reason = err;
+      }
+
+      // ---------------------------------------------------------------------------
+      // Auto-rotate on 429001 (account block) — ONLY on 429001.
+      // 429202 / datadome / IP blocks must NOT trigger a swap because swapping
+      // accounts cannot fix an IP-level problem and only adds more requests.
+      // ---------------------------------------------------------------------------
+      if (reason === '429001' && acct.profileIds.length > 0) {
+        const { sendTelegram: tg } = await import('../src/modules/notifications/telegram.bot');
+
+        if (swapCount >= MAX_SWAPS_PER_RUN) {
+          // Cap hit — multiple account blocks in one run signals an IP-level issue.
+          const msg = `⚠️ Auto-rotate cap (${MAX_SWAPS_PER_RUN}) reached in one run — multiple 429001 blocks. Likely an IP issue. Stopping rotation, pausing all accounts.`;
+          log(msg);
+          await tg(msg).catch(() => {});
+        } else {
+          const spare = await findReadySpare(acct.id);
+
+          if (spare) {
+            // Single atomic transaction: move profileIds to spare, quarantine blocked.
+            await prisma.$transaction([
+              prisma.vfsAccount.update({
+                where: { id: spare.id },
+                data: { profileIds: acct.profileIds },
+              }),
+              prisma.vfsAccount.update({
+                where: { id: acct.id },
+                data: {
+                  profileIds: [],
+                  lifecycleState: 'BLOCKED',
+                  cooldownUntil: new Date(at + PACER_CFG.cooldown429001Ms),
+                  lastAttemptAt: new Date(at),
+                },
+              }),
+            ]);
+
+            swapCount += 1;
+            const msg = `♻️ Account ${acct.email} blocked (429001) — client moved to spare ${spare.email}, booking continues (swap ${swapCount}/${MAX_SWAPS_PER_RUN}).`;
+            log(msg);
+            await tg(msg).catch(() => {});
+
+            // Continue approach: next-cycle (lower risk).
+            // The spare is now ACTIVE + linked. The next driveRun() poll picks it up
+            // automatically. We do NOT append to the in-flight `accounts` array here
+            // because that could drive the spare immediately after a 429001 on the
+            // same IP without any stagger — the next cycle gives it a clean start.
+            log(`spare ${spare.email} is now linked — next run cycle will drive it`);
+
+            // Update cooldownUntil is already set in the transaction above; skip the
+            // normal update below to avoid overwriting it.
+            continue;
+          } else {
+            // No spare available — keep old behavior + alert.
+            const profileDesc = acct.profileIds.join(', ');
+            const msg = `⚠️ Account ${acct.email} blocked (429001), NO ready spare for client [${profileDesc}] — registering replacement in background (pool top-up).`;
+            log(msg);
+            await tg(msg).catch(() => {});
+            // Fall through to normal cooldown update below.
+          }
+        }
       }
 
       await prisma.vfsAccount.update({
