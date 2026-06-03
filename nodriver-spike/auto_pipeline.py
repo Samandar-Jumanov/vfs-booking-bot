@@ -32,6 +32,7 @@ import ssl
 import sys
 import json
 import pathlib
+import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -1741,6 +1742,7 @@ async def main():
     api_fail_streak = 0  # consecutive API failures → trigger header re-capture / re-login flag
     ui_walks = 0         # heavy UI walks done while codes still unconfirmed
     MAX_UI_WALKS = 4     # after this, back off hard so we don't trip 429201
+    _ocma_last_report = 0  # epoch-seconds of last OCMA Telegram alert (rate-limit ~10min)
     while True:
         attempt += 1
         log(f"--- check #{attempt} ---")
@@ -1765,8 +1767,16 @@ async def main():
         if auth_captured() and codes_confirmed():
             # Check EACH Work-D sub-category code via the API — no wizard, no
             # re-entry. (DIRECT_POLL uses the single captured code through a proxy.)
+            # OCMA and Work-D are treated differently: OCMA → report-only (no booking,
+            # no select_route nav); Work-D → report + book (gated by BOOK_ENABLED).
+            # Scan ALL subcats every cycle — do NOT break early on OCMA so Work-D is
+            # always checked even when OCMA has slots.
             checks = _WORKD_CODES if (_WORKD_CODES and not DIRECT_POLL) else [(None, None)]
+            ocma_avail = None   # (earliestDate, slot_count) if OCMA has slots this cycle
+            workd_slot = None   # earliest/marker if Work-D has slots this cycle
+            _api_broke = False  # true if any API call errored → fall through to UI
             for _nm, _cd in checks:
+                is_ocma = bool(re.search(r"ocma", _nm or "", re.I))
                 if DIRECT_POLL:
                     proxy = _next_proxy(attempt)
                     if proxy:
@@ -1777,6 +1787,7 @@ async def main():
                 if api is None:
                     api_fail_streak += 1
                     log(f"API: call failed (streak={api_fail_streak})")
+                    _api_broke = True
                     break
                 status = api.get("_status", 0)
                 err = api.get("error")
@@ -1785,6 +1796,7 @@ async def main():
                     code = (err or {}).get("code") if isinstance(err, dict) else None
                     log(f"API: unusable (status={status}, code={code}, streak={api_fail_streak}) — falling back to UI")
                     used_api = False
+                    _api_broke = True
                     break
                 used_api = True
                 api_fail_streak = 0
@@ -1797,10 +1809,33 @@ async def main():
                 earliest = api.get("earliestDate")
                 slot_lists = api.get("earliestSlotLists") or []
                 if earliest or slot_lists:
-                    slot = earliest or "slot"
-                    log("API: SLOT AVAILABLE in %s — earliestDate=%s lists=%d" % (_nm or "work-d", earliest, len(slot_lists)))
-                    break
-                log("API: no slots in %s" % (_nm or "work-d"))
+                    _count = len(slot_lists)
+                    log("API: SLOT AVAILABLE in %s — earliestDate=%s lists=%d" % (_nm or "work-d", earliest, _count))
+                    if is_ocma:
+                        ocma_avail = (earliest, _count)
+                        # Do NOT set slot / break — keep scanning for Work-D
+                    else:
+                        workd_slot = earliest or "slot"
+                        # Found Work-D slot; can stop scanning subcats early
+                        break
+                else:
+                    log("API: no slots in %s" % (_nm or "work-d"))
+
+            # ── OCMA report path (report-only, never book) ────────────────────
+            if ocma_avail and not _api_broke:
+                _now = time.time()
+                if _now - _ocma_last_report >= 600:  # at most once per ~10 min
+                    _ocma_last_report = _now
+                    _ed, _cnt = ocma_avail
+                    milestone("ocma_available", email=EMAIL, detail=f"earliestDate={_ed} lists={_cnt}")
+                    telegram(f"[bot] ✅ OCMA slots available — {_ed}, {_cnt} lists — bot detection confirmed ({EMAIL})")
+                    log(f"OCMA report sent (earliestDate={_ed}, lists={_cnt})")
+                else:
+                    log("OCMA slots available but report rate-limited (sent <10min ago)")
+
+            # Work-D slot drives select_route() + book(); OCMA never sets this.
+            if workd_slot:
+                slot = workd_slot
         elif not auth_captured():
             log("API: auth headers not captured yet — using UI path")
         else:
