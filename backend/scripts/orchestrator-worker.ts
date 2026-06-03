@@ -59,6 +59,13 @@ const BOOKING_ONLY = process.env.BOOKING_ONLY === '1';
 const WORKER_MODE = (process.env.WORKER_MODE ?? 'book') as 'book' | 'pool_builder';
 // REG_INTERVAL_MIN: minutes between registrations in pool_builder mode (default: 10)
 const REG_INTERVAL_MIN = Number(process.env.REG_INTERVAL_MIN ?? 10);
+// Per-run lift-api request budget. Default is conservative (50/run).
+// On budget exhaustion the Python child is killed and the account is cooled down.
+// Set higher once you've confirmed your IP has more headroom.
+const MAX_LIFT_REQUESTS = Number(process.env.MAX_LIFT_REQUESTS ?? 50);
+// Rolling-window request rate limit: max requests in RATE_WINDOW_MS. Default 12/60s.
+const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS ?? 60_000);
+const RATE_WINDOW_MAX = Number(process.env.RATE_WINDOW_MAX ?? 12);
 const PROFILE_ENCRYPTION_KEY = (() => {
   const v = process.env.PROFILE_ENCRYPTION_KEY;
   if (!v) { console.error('[WORKER] PROFILE_ENCRYPTION_KEY is required'); process.exit(1); }
@@ -193,6 +200,7 @@ function spawnAndWatch(
   args: string[],
   env: Record<string, string>,
   ctx: SpawnCtx,
+  budget?: { remaining: () => number; spend: () => void; rateOk: () => boolean },
 ): Promise<DriveOutcome> {
   return new Promise((resolve) => {
     // Track the last milestone error seen on stdout so the caller can classify
@@ -230,6 +238,26 @@ function spawnAndWatch(
               detail: ms['detail'],
             });
           } catch { /* ignore parse errors */ }
+        }
+        // Count lift-api requests for budget tracking
+        if (line.includes('LIFT-URL:') && budget) {
+          budget.spend();
+          const rem = budget.remaining();
+          if (rem % 10 === 0 || rem <= 5) {
+            process.stdout.write(`  [BUDGET] lift-api requests remaining: ${rem}\n`);
+          }
+          if (!budget.rateOk()) {
+            process.stdout.write('  [BUDGET] rate limit reached — killing child\n');
+            child.kill('SIGTERM');
+          } else if (rem <= 0) {
+            process.stdout.write('  [BUDGET] per-run budget exhausted — killing child\n');
+            child.kill('SIGTERM');
+          }
+        }
+        // Circuit breaker: on first page-not-found / rate-limit milestone, kill immediately
+        if (line.includes('MILESTONE') && (line.includes('rate_limit') || line.includes('datadome_block') || line.includes('login_failed'))) {
+          process.stdout.write('  [CIRCUIT-BREAKER] block/rate-limit detected — killing child immediately\n');
+          child.kill('SIGTERM');
         }
       }
     });
@@ -375,12 +403,14 @@ async function driveAccountReal(
 
   log(`driving ${acct.email} (role=${acct.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, book=${bookEnabled === '1'})`);
 
+  const budget = makeBudget();
+  log(`request budget: max=${MAX_LIFT_REQUESTS}/run, rate=${RATE_WINDOW_MAX}/${RATE_WINDOW_MS / 1000}s`);
   return spawnAndWatch(PYTHON_BIN, [...PYTHON_EXTRA_ARGS, PIPELINE_SPIKE], spawnEnv, {
     runId,
     email: acct.email,
     accountId: acct.id,
     fromState: acct.lifecycleState,
-  });
+  }, budget);
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +573,32 @@ async function spareCount(): Promise<number> {
   return prisma.vfsAccount.count({
     where: { status: 'ACTIVE', profileIds: { isEmpty: true } },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Per-run request budget factory
+// ---------------------------------------------------------------------------
+
+function makeBudget(): { remaining: () => number; spend: () => void; rateOk: () => boolean } {
+  let spent = 0;
+  const windowTimestamps: number[] = [];
+  return {
+    remaining: () => Math.max(0, MAX_LIFT_REQUESTS - spent),
+    spend: () => {
+      spent++;
+      const now = Date.now();
+      windowTimestamps.push(now);
+      // Trim timestamps outside the rolling window
+      while (windowTimestamps.length > 0 && now - windowTimestamps[0] > RATE_WINDOW_MS) {
+        windowTimestamps.shift();
+      }
+    },
+    rateOk: () => {
+      const now = Date.now();
+      const recentCount = windowTimestamps.filter(t => now - t <= RATE_WINDOW_MS).length;
+      return recentCount < RATE_WINDOW_MAX;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
