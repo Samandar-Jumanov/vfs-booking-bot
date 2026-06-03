@@ -117,6 +117,26 @@ async def fill(page, selectors, value, label):
     return False
 
 
+_SYNC_FIELD_JS = r"""((sel,val)=>{
+    const e=document.querySelector(sel);
+    if(!e) return JSON.stringify({found:false});
+    try{
+        const proto=e.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
+        const setter=Object.getOwnPropertyDescriptor(proto,'value').set;
+        e.focus();
+        setter.call(e,val);
+        e.dispatchEvent(new InputEvent('input',{bubbles:true,data:val,inputType:'insertText'}));
+        e.dispatchEvent(new Event('change',{bubbles:true}));
+        e.dispatchEvent(new Event('blur',{bubbles:true}));
+    }catch(_){
+        e.value=val;
+        e.dispatchEvent(new Event('input',{bubbles:true}));
+        e.dispatchEvent(new Event('change',{bubbles:true}));
+        e.dispatchEvent(new Event('blur',{bubbles:true}));
+    }
+    return JSON.stringify({found:true,len:(e.value||'').length});
+})"""
+
 
 async def trigger_activation_email(browser, email, password):
     """VFS does NOT send the activation email at registration time — it sends it
@@ -380,7 +400,6 @@ async def main():
     await fill(page, ['input[formcontrolname="emailid"]', 'input[name="emailid"]', 'input[type="email"]'], email, "email")
     await fill(page, ['input[formcontrolname="password"]', 'input[type="password"]'], password, "password")
     await fill(page, ['input[formcontrolname="confirmPassword"]', 'input[name="confirmPassword"]'], password, "confirmPassword")
-    await fill(page, ['input[formcontrolname="contact"]', 'input[type="tel"]', 'input[name="contact"]'], phone, "contact")
 
     # dismiss the cookie-consent popup BEFORE the dial-code dropdown — it loads
     # late and covers/displaces the dropdown overlay, which made mouse_click on the
@@ -388,53 +407,133 @@ async def main():
     await dismiss_consent(page)
     await asyncio.sleep(0.4)
 
-    # dial code → +998 / Uzbekistan. VFS UZ uses formcontrolname="dialcode"
-    # (lowercase). Try native <select> first, then the mat-select (open → maybe
-    # type "998" into a search box → click the matching option).
-    dial_done = await jeval(page, """(()=>{const s=document.querySelector('select[formcontrolname=\"dialcode\" i],select[name*=\"dial\" i],select[name=\"countryCode\"]');
+    # ── Dial Code: select +998 Uzbekistan ─────────────────────────────────────
+    # VFS uses a mat-select for the dial code. We must VERIFY the displayed value
+    # reads 998 after selection (past runs showed 992 Tajikistan despite the click
+    # claiming success — the option match or the selection didn't stick).
+    dial_done = await jeval(page, """(()=>{const s=document.querySelector('select[formcontrolname="dialcode" i],select[name*="dial" i],select[name="countryCode"]');
         if(s){const o=[...s.options].find(o=>o.value==='998'||/998/.test(o.textContent||'')); if(o){s.value=o.value; s.dispatchEvent(new Event('change',{bubbles:true})); return 'native-998';}} return null;})()""")
     if dial_done:
         log("dialcode:", dial_done)
     else:
+        # Find the mat-select for dial code
+        trig = None
         try:
-            trig = (await page.select('mat-select[formcontrolname="dialcode"]', timeout=2)
-                    or await page.select('mat-select[formcontrolname="dialCode"]', timeout=1))
+            trig = await page.select('mat-select[formcontrolname="dialcode"]', timeout=2)
         except Exception:
-            trig = None
+            pass
         if not trig:
-            # fuzzy: first mat-select whose attrs mention dial/country/code
-            for s in await page.select_all("mat-select, .mat-mdc-select"):
+            try:
+                trig = await page.select('mat-select[formcontrolname="dialCode"]', timeout=1)
+            except Exception:
+                pass
+        if not trig:
+            for s in await page.select_all("mat-select"):
                 fcn = (s.attrs.get("formcontrolname", "") if hasattr(s, "attrs") else "") or ""
                 if re.search(r"dial|country|code", fcn, re.I):
                     trig = s; break
+
         if trig:
-            # open: click the inner trigger (like the extension), retry the host
-            inner = None
-            try:
-                inner = await trig.query_selector('.mat-mdc-select-trigger, .mat-select-trigger')
-            except Exception:
-                inner = None
-            await safe_click(page, inner or trig)
-            await asyncio.sleep(1.2)
             OPT_SEL = "mat-option, .mat-option, .mat-mdc-option, [role=option], .ng-option"
-            picked = False
-            for attempt in range(10):
-                for o in await page.select_all(OPT_SEL):
-                    if re.search(r"\b\+?998\b|uzbek", (o.text or ""), re.I):
-                        if await safe_click(page, o):
-                            picked = True; log("dialcode chose", (o.text or '').strip()[:30])
+            # Retry up to 3 times: open → pick 998 → verify displayed value
+            for dial_retry in range(3):
+                inner = None
+                try:
+                    inner = await trig.query_selector('.mat-mdc-select-trigger, .mat-select-trigger')
+                except Exception:
+                    pass
+                await safe_click(page, inner or trig)
+                await asyncio.sleep(1.2)
+                picked = False
+                for attempt in range(10):
+                    for o in await page.select_all(OPT_SEL):
+                        if re.search(r"\b\+?998\b|uzbek", (o.text or ""), re.I):
+                            if await safe_click(page, o):
+                                picked = True
+                                log("dialcode option clicked: %s" % (o.text or "").strip()[:30])
+                            break
+                    if picked:
                         break
-                if picked:
-                    break
-                if attempt == 3:  # re-click to (re)open if panel didn't appear
-                    await safe_click(page, inner or trig)
+                    if attempt == 3:
+                        await safe_click(page, inner or trig)
+                    await asyncio.sleep(0.5)
+                # Verify the displayed value now shows 998
                 await asyncio.sleep(0.5)
-            if not picked:
-                opts = [(o.text or "").strip() for o in await page.select_all(OPT_SEL)]
-                log("dialcode NOT picked — options seen:", opts[:15])
-            log("dialcode mat-select picked:", picked)
+                disp = await jeval(page, """(()=>{const s=document.querySelector('mat-select[formcontrolname="dialcode"],mat-select[formcontrolname="dialCode"]');
+                    if(!s)return ''; const v=s.querySelector('.mat-mdc-select-value-text,.mat-select-value-text,.mat-mdc-select-value,.mat-select-value');
+                    return ((v&&v.innerText)||s.innerText||'').trim();})()""") or ""
+                log("dialcode displayed after pick (retry %d): %r" % (dial_retry, disp[:40]))
+                if "998" in disp or re.search(r"uzbek", disp, re.I):
+                    log("dialcode VERIFIED = 998")
+                    break
+                log("dialcode NOT 998 yet — retrying selection")
+                # close panel before retry
+                await jeval(page, "(()=>{['keydown','keyup'].forEach(t=>document.dispatchEvent(new KeyboardEvent(t,{key:'Escape',keyCode:27,bubbles:true})));})()")
+                await asyncio.sleep(0.5)
+            else:
+                log("WARN: dial code could not be set to 998 after 3 retries (showing: %r)" % disp[:40])
         else:
-            log("WARN dialcode dropdown not found")
+            log("WARN dialcode mat-select not found")
+
+    # ── Mobile Number: type into the phone text input ──────────────────────────
+    # The Mobile Number text field is a SEPARATE input from the dial-code mat-select.
+    # Inspect visible inputs and find the one that is NOT email/password/confirm and
+    # whose formcontrolname/placeholder/type suggests a phone/contact number.
+    # Use trusted Angular-sync fill (same as login) so the framework registers it.
+    phone_filled = False
+    # First try: direct selector for the contact input
+    phone_sel = None
+    for sel in ['input[formcontrolname="contact"]', 'input[formcontrolname="mobileNumber"]',
+                'input[formcontrolname="mobile"]', 'input[formcontrolname="phone"]',
+                'input[type="tel"]', 'input[name="contact"]']:
+        exists = await jeval(page, "(()=>{const e=document.querySelector(%s); return e&&e.offsetParent!==null?1:0;})()" % json.dumps(sel))
+        if exists:
+            phone_sel = sel
+            break
+    if not phone_sel:
+        # Fallback: find any visible text/number input that's not email/password/confirm
+        phone_sel_js = r"""(()=>{
+            const skip=/email|password|confirm/i;
+            const inputs=[...document.querySelectorAll('input')].filter(i=>{
+                if(!i.offsetParent) return false;
+                if(i.type==='hidden'||i.type==='checkbox') return false;
+                const fc=i.getAttribute('formcontrolname')||'';
+                const n=i.name||''; const pl=i.placeholder||'';
+                if(skip.test(fc)||skip.test(n)||skip.test(pl)) return false;
+                return true;
+            });
+            return inputs.length ? (inputs[0].getAttribute('formcontrolname')||inputs[0].id||inputs[0].name||'[0]') : '';
+        })()"""
+        fc_found = await jeval(page, phone_sel_js) or ""
+        if fc_found and fc_found != '[0]':
+            phone_sel = '[formcontrolname="%s"]' % fc_found
+        elif fc_found == '[0]':
+            phone_sel = 'input:not([type=hidden]):not([type=checkbox])'
+    if phone_sel:
+        # Use trusted sync fill (Angular reactive form)
+        result = await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps(phone_sel), json.dumps(phone)))
+        log("phone fill result: sel=%r result=%s" % (phone_sel, str(result)[:60]))
+        # also try send_keys in case sync alone isn't enough
+        try:
+            el = await page.select(phone_sel, timeout=2)
+            if el:
+                await el.click()
+                await asyncio.sleep(0.2)
+                await el.send_keys(phone)
+        except Exception as sk_e:
+            log("phone send_keys error (non-fatal): %s" % str(sk_e)[:60])
+        # re-sync after send_keys
+        await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps(phone_sel), json.dumps(phone)))
+        # verify
+        val = await jeval(page, "(()=>{const e=document.querySelector(%s); return e?(e.value||''):'';})()" % json.dumps(phone_sel)) or ""
+        log("phone field value after fill: %r (len=%d)" % (val[:20], len(val)))
+        if val:
+            phone_filled = True
+            log("phone FILLED OK")
+        else:
+            log("WARN: phone field still empty after fill")
+    else:
+        log("WARN: could not identify phone input selector")
 
     # Tick ALL 3 consents reliably. Material MDC checkboxes are flaky to click
     # (trusted host-click landed 2/3 or 0/3 on some runs → button stayed disabled).
@@ -481,6 +580,8 @@ async def main():
         milestone("consents_ticked", email=email)
     await asyncio.sleep(1)
 
+    log("phone_filled=%s" % phone_filled)
+
     # wait for Turnstile to auto-pass → Register button enables
     log("waiting for Turnstile auto-pass…")
     enabled = False
@@ -491,7 +592,18 @@ async def main():
             return JSON.stringify({dis:b?!!b.disabled:'no-btn', cf:f&&f.value?f.value.length:0, errs});})()""")
         d = json.loads(st) if st else {}
         if i % 5 == 0:
-            log(f"wait{i}: disabled={d.get('dis')} captchaLen={d.get('cf')} errors={d.get('errs')}")
+            diag = await jeval(page, """(()=>{
+                const ms=document.querySelector('mat-select[formcontrolname="dialcode"],mat-select[formcontrolname="dialCode"]');
+                const dialDisp=ms?(ms.querySelector('.mat-mdc-select-value-text,.mat-select-value-text')||ms).innerText||'':'?';
+                const ph=document.querySelector('input[formcontrolname="contact"],input[formcontrolname="mobileNumber"],input[type="tel"]');
+                const phVal=ph?ph.value||'':'?';
+                return JSON.stringify({dial:dialDisp.trim().slice(0,15), phLen:phVal.length});
+            })()""") or "{}"
+            import json as _json
+            _d = {}
+            try: _d = _json.loads(diag)
+            except: pass
+            log(f"wait{i}: disabled={d.get('dis')} captchaLen={d.get('cf')} errors={d.get('errs')} dial={_d.get('dial')} phLen={_d.get('phLen')}")
         if d.get("dis") is False:
             enabled = True; log("Register button ENABLED (captcha cf=%s)" % d.get("cf")); break
         await asyncio.sleep(1)
