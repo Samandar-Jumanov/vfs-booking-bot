@@ -1111,6 +1111,14 @@ async def _try_subcat(page, sub_idx, texts):
     return None
 
 
+async def _select_value_text(page, index):
+    """Return the DISPLAYED value of mat-select #index (placeholder text if nothing
+    is chosen). Used to verify a dependent dropdown selection actually registered."""
+    return (await jeval(page, """((i)=>{const s=document.querySelectorAll('mat-select')[i];
+        if(!s)return ''; const v=s.querySelector('.mat-mdc-select-value,.mat-select-value,[class*=select-value]');
+        return ((v&&v.innerText)||s.innerText||'').trim();})(%d)""" % index)) or ""
+
+
 async def select_route(page):
     """Pick centre + category + a Work-D-visa subcat that has slots. Robust to
     VFS's dependent (API-loaded) dropdowns. Returns the chosen subcat if a slot
@@ -1138,10 +1146,26 @@ async def select_route(page):
         "(()=>{const s=document.querySelectorAll('mat-select'); return s.length>1;})()",
         timeout=4, interval=0.3)
 
-    # category (index 1): pick "Long Stay/Visa D"
-    opts = await open_select(page, 1, "category")
-    if opts:
-        await pick_option(opts, lambda t: re.search("long stay", t, re.I), "category")
+    # category (index 1): pick "Long Stay/Visa D" and VERIFY it registered. The
+    # sub-category dropdown is DEPENDENT on this — if the category pick doesn't
+    # stick (page still spinner-loading, click landed mid-render), the subcat never
+    # populates and we get a false "no slots". So pick → confirm the displayed value
+    # changed off the placeholder → retry up to 3x → then wait for subcat to load.
+    for _cat_try in range(3):
+        opts = await open_select(page, 1, "category")
+        if opts:
+            await pick_option(opts, lambda t: re.search("long stay", t, re.I), "category")
+        await asyncio.sleep(1.2)
+        catval = await _select_value_text(page, 1)
+        if re.search(r"long\s*stay|visa\s*d", catval, re.I):
+            log("category registered:", catval[:40])
+            break
+        log(f"category NOT registered (shows '{catval[:30]}') — retry {_cat_try + 1}/3")
+        await asyncio.sleep(1.5)
+    # subcat is API-loaded right after the category sticks — wait for it to populate.
+    await wait_until(page,
+        "(()=>{const s=document.querySelectorAll('mat-select'); return s.length>=3;})()",
+        timeout=6, interval=0.3)
 
     # ── FAST PATH: prefer the LABEL-identified subcat dropdown, else the cached
     # index. Either way we VALIDATE against the open panel before trusting it. ──
@@ -1155,7 +1179,7 @@ async def select_route(page):
             # for it to populate, then verify its OWN (scoped) options look like the
             # subcat list before trusting the index.
             texts = []
-            for _ in range(8):  # ≤~4s
+            for _ in range(16):  # ≤~8s — VFS loads subcat via an API call post-category
                 texts = await _option_texts(page, fast_idx, "subcat(fast)")
                 if any(SUBCAT_LIST_RE.search(t) for t in texts):
                     break
