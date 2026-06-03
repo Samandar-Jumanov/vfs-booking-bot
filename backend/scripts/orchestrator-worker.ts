@@ -1044,7 +1044,9 @@ const STALE_RUN_MS = 90_000;
 
 // DB-backed single-instance lock. A worker that hasn't updated its heartbeat
 // within this window is assumed dead and the lock is stolen.
-const WORKER_LOCK_KEY = 'worker_lock';
+// Each box holds its OWN lock when BOX_ID is set, so two boxes don't refuse each other.
+// Default (no BOX_ID) = 'worker_lock' — unchanged single-box behavior.
+const WORKER_LOCK_KEY = process.env.BOX_ID ? `worker_lock_${process.env.BOX_ID}` : 'worker_lock';
 const WORKER_LOCK_HEARTBEAT_MS = 30_000;  // write heartbeat every 30s
 const WORKER_LOCK_STALE_MS = 120_000;    // 120s — 4× heartbeat interval; stale = dead
 const FORCE_START = process.argv.includes('--force');
