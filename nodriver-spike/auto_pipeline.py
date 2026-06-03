@@ -59,6 +59,8 @@ PROXY_LIST = [p.strip() for p in os.environ.get("PROXY_LIST", "").split(",") if 
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
 SUBCAT = re.compile(os.environ.get("SUBCAT", r"work\s*\(?\s*(?:visa\s*d|d\s*visa)"), re.I)
+if os.environ.get("PROVE_OCMA") == "1":
+    SUBCAT = re.compile(r"work\s*\(?\s*(?:visa\s*d|d\s*visa)|ocma", re.I)
 SHOTS = pathlib.Path(__file__).parent / "shots"
 SHOTS.mkdir(exist_ok=True)
 
