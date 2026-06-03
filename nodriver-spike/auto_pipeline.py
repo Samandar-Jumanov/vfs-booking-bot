@@ -41,6 +41,17 @@ try:
 except Exception:
     pass
 
+# Force unbuffered output so logs are never lost when Python exits mid-run
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+try:
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 EMAIL = os.environ.get("VFS_EMAIL", "")
 PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
@@ -1429,6 +1440,84 @@ async def book(page, subcat):
     await click_button_text(page, ["save"], timeout=30)
     await asyncio.sleep(3)
     await dump_state(page, "2c_after_save")
+    # ── Step 2b: post-OCR applicant detail form ────────────────────────────────
+    # After OCR, VFS may render a verification form (the page stays on "your-details"
+    # with visible mat-input-* fields for name/DOB/nationality/passport#/expiry).
+    # Detect, log all fields (with their OCR-extracted values), fill any empty
+    # required ones, then Save so the page advances to the Summary/OTP gate.
+    still_on_details = await jeval(page,
+        "(()=>{const url=location.href; const inputs=[...document.querySelectorAll('input')].filter(i=>i.offsetParent!==null&&i.type!=='hidden'); return url.includes('your-details')&&inputs.length>0;})()")
+    if still_on_details:
+        log("STEP2b: post-OCR form detected — inspecting fields")
+        # Read each visible input: label, placeholder, formcontrolname, current value
+        fields_info = await jeval(page, r"""(()=>{
+            const inputs=[...document.querySelectorAll('input')].filter(i=>i.offsetParent!==null&&i.type!=='hidden');
+            return inputs.map(i=>{
+                const ff=i.closest('mat-form-field,.mat-mdc-form-field,.mat-form-field');
+                const lbl=ff?((ff.querySelector('mat-label,label,.mat-mdc-floating-label,.mat-form-field-label')||{}).innerText||'').trim():'';
+                return {
+                    id:i.id||'',fc:i.getAttribute('formcontrolname')||'',
+                    placeholder:(i.placeholder||'').trim(),label:lbl,
+                    value:(i.value||'').trim(),required:i.required||i.getAttribute('aria-required')==='true'
+                };
+            });
+        })()""")
+        if isinstance(fields_info, list):
+            for f in fields_info:
+                log("STEP2b FIELD: label=%r fc=%r placeholder=%r value=%r required=%s" % (
+                    f.get('label',''), f.get('fc',''), f.get('placeholder',''),
+                    f.get('value','')[:30] if f.get('value') else '', f.get('required')))
+        # Build a profile fallback dict from env (worker passes these for linked profiles)
+        _profile = {
+            "firstName":  os.environ.get("PROFILE_FIRST_NAME", ""),
+            "lastName":   os.environ.get("PROFILE_LAST_NAME", ""),
+            "dob":        os.environ.get("PROFILE_DOB", ""),
+            "nationality":os.environ.get("PROFILE_NATIONALITY", ""),
+            "passport":   os.environ.get("PROFILE_PASSPORT", ""),
+            "expiry":     os.environ.get("PROFILE_EXPIRY", ""),
+        }
+        # Fill each visible empty input. Prefer the value VFS OCR already placed in the
+        # DOM (often in a read-only sibling span) — re-read off the page if value is empty.
+        # Fall back to the _profile dict keys matched by label keywords.
+        _LABEL_MAP = [
+            (re.compile(r"first|given", re.I),  "firstName"),
+            (re.compile(r"last|surname|family", re.I), "lastName"),
+            (re.compile(r"birth|dob|date of birth", re.I), "dob"),
+            (re.compile(r"national|country", re.I), "nationality"),
+            (re.compile(r"passport.*num|number|doc", re.I), "passport"),
+            (re.compile(r"expir|valid|till", re.I), "expiry"),
+        ]
+        if isinstance(fields_info, list):
+            for f in fields_info:
+                if f.get('value'):
+                    log("STEP2b: '%s' already filled → skipping" % f.get('label','?')[:30])
+                    continue
+                # Derive fill value from label
+                fill_val = ""
+                lbl = f.get('label','') + ' ' + f.get('placeholder','') + ' ' + f.get('fc','')
+                for pat, key in _LABEL_MAP:
+                    if pat.search(lbl):
+                        fill_val = _profile.get(key, "")
+                        break
+                if not fill_val:
+                    log("STEP2b: '%s' empty, no profile match → skipping" % f.get('label','?')[:30])
+                    continue
+                log("STEP2b: filling '%s' with profile value (len=%d)" % (f.get('label','?')[:30], len(fill_val)))
+                # Trusted typing: same Angular-sync approach as login fill
+                sel_expr = ""
+                if f.get('id'):
+                    sel_expr = "#" + f['id']
+                elif f.get('fc'):
+                    sel_expr = "[formcontrolname='%s']" % f['fc']
+                if sel_expr:
+                    await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps(sel_expr), json.dumps(fill_val)))
+        # Wait briefly for Angular validation, then click Save again
+        await asyncio.sleep(1.5)
+        await click_button_text(page, ["save"], timeout=20)
+        await asyncio.sleep(3)
+        await dump_state(page, "2d_after_detail_save")
+        new_url = await jeval(page, "location.href") or ""
+        log("STEP2b: after detail-save url=%s" % new_url.split('/')[-1].split('?')[0][:30])
     # Summary page → Continue advances to the OTP gate. Snapshot existing Mailsac
     # message ids first so we can distinguish the new OTP email from old mail.
     pre_ids = set(m.get("_id") for m in mailsac_list(EMAIL))

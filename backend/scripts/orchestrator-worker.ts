@@ -332,6 +332,9 @@ async function driveAccountReal(
   if (process.env.SUBCAT && process.env.SUBCAT.trim()) {
     spawnEnv['SUBCAT'] = process.env.SUBCAT.trim();
   }
+  if (process.env.PROVE_OCMA) {
+    spawnEnv['PROVE_OCMA'] = process.env.PROVE_OCMA;
+  }
 
   if (profile) {
     const [firstName, ...rest] = (profile.fullName ?? 'Test User').trim().split(/\s+/);
