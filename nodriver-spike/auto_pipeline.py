@@ -476,12 +476,21 @@ async def load_workd_codes(page):
         return True
     if not auth_captured():
         return False
+    # The subvisacategory endpoint requires the custom auth HEADERS (authorize/
+    # clientsource/route) — cookies alone → HTTP 500. Same headers the wizard sends.
+    _hdrs = {
+        "accept": "application/json, text/plain, */*",
+        "authorize": _LIFT_AUTH.get("authorize") or "",
+        "clientsource": _LIFT_AUTH.get("clientsource") or "",
+    }
+    if _LIFT_AUTH.get("route"):
+        _hdrs["route"] = _LIFT_AUTH["route"]
     expr = (
-        "(async()=>{try{const r=await fetch(%s,{headers:{'accept':'application/json'},"
+        "(async()=>{try{const r=await fetch(%s,{headers:%s,"
         "credentials:'include'});const j=await r.json();"
         "return JSON.stringify({status:r.status,data:j});}"
         "catch(e){return JSON.stringify({status:0,error:String(e)});}})()"
-        % json.dumps(SUBVISACAT_URL)
+        % (json.dumps(SUBVISACAT_URL), json.dumps(_hdrs))
     )
     try:
         raw = await page.evaluate(expr, await_promise=True)
