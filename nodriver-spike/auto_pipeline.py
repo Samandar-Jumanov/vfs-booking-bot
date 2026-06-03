@@ -1518,10 +1518,58 @@ async def book(page, subcat):
                     sel_expr = "[formcontrolname='%s']" % f['fc']
                 if sel_expr:
                     await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps(sel_expr), json.dumps(fill_val)))
-        # Wait briefly for Angular validation, then click Save again
+        # ── Nationality mat-select ────────────────────────────────────────────
+        # After OCR, VFS loads a Nationality dropdown (loaded from master/nationality).
+        # It is a mat-select, not an input, so the input loop above misses it.
+        # Open it, pick "Uzbekistan", verify the displayed value, then Save.
+        nat_selects = await page.select_all("mat-select")
+        if nat_selects:
+            log("STEP2b: %d mat-select(s) visible — attempting Nationality pick" % len(nat_selects))
+            nat_picked = False
+            for ns_idx, ns in enumerate(nat_selects):
+                # open this mat-select
+                await close_overlay(page)
+                try:
+                    await ns.mouse_click()
+                except Exception:
+                    await jeval(page, "(()=>{const s=document.querySelectorAll('mat-select')[%d]; if(s)s.click();})()" % ns_idx)
+                await asyncio.sleep(1.2)
+                # check if the panel has nationality-shaped options
+                opts = await page.select_all("mat-option, .mat-option, .mat-mdc-option, [role=option]")
+                opts_text = [(o.text or "").strip() for o in opts if (o.text or "").strip()]
+                log("STEP2b: mat-select[%d] options sample: %s" % (ns_idx, opts_text[:5]))
+                uzb_opt = next((o for o in opts if re.search(r"uzbek", (o.text or ""), re.I)), None)
+                if uzb_opt:
+                    try:
+                        await uzb_opt.mouse_click()
+                    except Exception:
+                        await jeval(page, "(()=>{const o=[...document.querySelectorAll('mat-option,.mat-mdc-option,[role=option]')].find(o=>/uzbek/i.test(o.innerText||'')); if(o)o.click();})()")
+                    await asyncio.sleep(0.8)
+                    # verify displayed value
+                    disp = await jeval(page, """(()=>{const s=document.querySelectorAll('mat-select')[%d];
+                        const v=s&&s.querySelector('.mat-mdc-select-value-text,.mat-select-value-text,.mat-mdc-select-value,.mat-select-value');
+                        return ((v&&v.innerText)||'').trim();})()""" % ns_idx) or ""
+                    log("STEP2b: Nationality mat-select[%d] now shows: %r" % (ns_idx, disp[:40]))
+                    nat_picked = True
+                    break
+                else:
+                    await close_overlay(page)
+            if not nat_picked:
+                log("STEP2b: Uzbekistan option not found in any mat-select — proceeding anyway")
+        # Wait briefly for Angular validation, then click Save/Continue
         await asyncio.sleep(1.5)
-        await click_button_text(page, ["save"], timeout=20)
-        await asyncio.sleep(3)
+        # Try Continue first (it may now be enabled once nationality is set), then Save
+        advanced = False
+        for btn_label in [["continue"], ["save"]]:
+            await click_button_text(page, btn_label, timeout=8)
+            await asyncio.sleep(2)
+            chk_url = await jeval(page, "location.href") or ""
+            if "your-details" not in chk_url:
+                advanced = True
+                log("STEP2b: page advanced → %s" % chk_url.split('/')[-1].split('?')[0][:30])
+                break
+        if not advanced:
+            log("STEP2b: still on your-details after save/continue")
         await dump_state(page, "2d_after_detail_save")
         new_url = await jeval(page, "location.href") or ""
         log("STEP2b: after detail-save url=%s" % new_url.split('/')[-1].split('?')[0][:30])
