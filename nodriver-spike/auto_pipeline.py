@@ -16,6 +16,9 @@ Env:
                     validating the booking flow end-to-end. If both BOOK_DRY_RUN and
                     BOOK_ENABLED are set, DRY_RUN takes precedence (no actual submit).
   SUBCAT            regex to pick sub-category (default: Work D-visa)
+  NATIONALITY_FILTER  regex; subcategory names must MATCH to be polled (default: uzbek|turkmen).
+                    Drops Tajik by default; cuts calls/cycle from 4 to 1 (real) or 2 (PROVE_OCMA).
+  RATELIMIT_BACKOFF_MIN  minutes to sleep silently after a 429201/429202 rate-limit (default 20).
   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  optional alerts
   -- Lift-API availability monitor (cheap authed slot check, see
      docs/LIFT_API_AVAILABILITY_SPEC.md) --
@@ -78,6 +81,15 @@ SHOTS.mkdir(exist_ok=True)
 
 WORKER_BRIDGED = os.environ.get("WORKER_BRIDGED") == "1"
 MAILSAC_KEY = os.environ.get("MAILSAC_API_KEY", "")
+# NATIONALITY_FILTER: regex that nationality names in _WORKD_CODES must MATCH to be
+# polled.  Default keeps Uzbek + Turkmen; drops Tajik.  Override via env to add/remove
+# nationalities without touching code.
+NATIONALITY_FILTER = re.compile(
+    os.environ.get("NATIONALITY_FILTER", r"uzbek|turkmen"), re.I
+)
+# RATELIMIT_BACKOFF_MIN: silent cooldown (in minutes) after a 429201/429202 rate-limit
+# response.  No requests are made during this window.  Default 20 minutes.
+RATELIMIT_BACKOFF_MIN = int(os.environ.get("RATELIMIT_BACKOFF_MIN", "20"))
 
 # ── Lift-API availability monitoring (cheap, authed slot check) ───────────────
 # Instead of driving the booking-wizard UI every monitor cycle (slow, heavy on the
@@ -535,6 +547,18 @@ async def load_workd_codes(page):
             found.append((nm, cd))
     log("CODES: subvisacategory had %d subcats; Work-D matches:" % len(data), found)
     if found:
+        # Filter to client-relevant nationalities only (drops Tajik by default).
+        # This cuts calls/cycle: real mode 4→1, demo (PROVE_OCMA) 4→2.
+        filtered = [(nm, cd) for nm, cd in found if NATIONALITY_FILTER.search(nm)]
+        if filtered:
+            log("CODES: polling %d relevant categories (nationality_filter=%s): %s"
+                % (len(filtered), os.environ.get("NATIONALITY_FILTER", "uzbek|turkmen"),
+                   [nm for nm, _ in filtered]))
+            found = filtered
+        else:
+            # Safety: if the filter drops everything (wrong env value), keep all and warn.
+            log("CODES: WARN — NATIONALITY_FILTER dropped all %d entries; ignoring filter"
+                % len(found))
         _WORKD_CODES = found
         _LIFT_BODY["countryCode"] = _LIFT_BODY.get("countryCode") or VFS_COUNTRY
         _LIFT_BODY["missionCode"] = _LIFT_BODY.get("missionCode") or VFS_MISSION
@@ -1823,6 +1847,7 @@ async def main():
     # API is unavailable/erroring (fallback → preserves current capability).
     attempt = 0
     api_fail_streak = 0  # consecutive API failures → trigger header re-capture / re-login flag
+    api_403_streak = 0   # consecutive HTTP-403 responses → re-login after 1-2 hits
     ui_walks = 0         # heavy UI walks done while codes still unconfirmed
     MAX_UI_WALKS = 4     # after this, back off hard so we don't trip 429201
     _ocma_last_report = 0  # epoch-seconds of last OCMA Telegram alert (rate-limit ~10min)
@@ -1882,15 +1907,53 @@ async def main():
                     log(f"API: no slots in {_nm or 'work-d'} (1035 — confirmed by API)")
                     used_api = True
                     api_fail_streak = 0
+                    api_403_streak = 0
                     continue  # next subcategory; do NOT break to UI
-                if status != 200 or err:
+                if status == 429 or err_code in (429201, 429202):
+                    # Hard per-IP rate-limit.  Do NOT fall back to the UI walk —
+                    # that would only burn MORE of the per-IP request budget.
+                    # Sleep silently for RATELIMIT_BACKOFF_MIN minutes, then resume.
+                    _backoff_s = RATELIMIT_BACKOFF_MIN * 60
+                    log(f"API: rate-limited (status={status}, code={err_code}) — "
+                        f"backing off {RATELIMIT_BACKOFF_MIN}min, NOT hitting VFS")
+                    milestone("monitoring", email=EMAIL,
+                              detail=f"check #{attempt} — rate-limited ({err_code or status}), "
+                                     f"silent backoff {RATELIMIT_BACKOFF_MIN}min")
+                    api_fail_streak = 0  # don't also trigger re-login on 429
+                    api_403_streak = 0
+                    used_api = False
+                    _api_broke = True   # suppress slot/booking path this cycle
+                    await asyncio.sleep(_backoff_s)
+                    break  # restart the for-subcat loop after sleep; outer while resumes
+                elif status == 403:
+                    # Token/cookie challenge — NOT a hard rate-limit.  Trigger re-login
+                    # after 1-2 consecutive 403s; short backoff; do NOT UI-walk.
+                    api_403_streak += 1
+                    log(f"API: 403 (streak={api_403_streak}) — will re-login if streak>=2; "
+                        f"NO UI walk")
+                    used_api = False
+                    _api_broke = True
+                    if api_403_streak >= 2:
+                        _short_backoff_s = random.uniform(120, 180)
+                        log(f"API: 403 streak={api_403_streak} — re-login in "
+                            f"{int(_short_backoff_s)}s (token refresh)")
+                        milestone("monitoring", email=EMAIL,
+                                  detail=f"check #{attempt} — 403 streak, re-login in "
+                                         f"{int(_short_backoff_s)}s")
+                        await asyncio.sleep(_short_backoff_s)
+                        api_fail_streak = 3  # force re-login branch below loop
+                        api_403_streak = 0
+                    break
+                elif status != 200 or err:
                     api_fail_streak += 1
+                    api_403_streak = 0
                     log(f"API: unusable (status={status}, code={err_code}, streak={api_fail_streak}) — falling back to UI")
                     used_api = False
                     _api_broke = True
                     break
                 used_api = True
                 api_fail_streak = 0
+                api_403_streak = 0
                 if not _REPLAY_PROBED:
                     _REPLAY_PROBED = True
                     try:
