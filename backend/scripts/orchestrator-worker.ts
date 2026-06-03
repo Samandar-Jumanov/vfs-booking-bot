@@ -798,6 +798,12 @@ interface ScenarioRun {
 // assumed orphaned (claimer crashed/killed) and is reclaimed by the next worker.
 const STALE_RUN_MS = 90_000;
 
+// DB-backed single-instance lock. A worker that hasn't updated its heartbeat
+// within this window is assumed dead and the lock is stolen.
+const WORKER_LOCK_KEY = 'worker_lock';
+const WORKER_LOCK_STALE_MS = 60_000; // 60s — 4× the poll interval
+const FORCE_START = process.argv.includes('--force');
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -850,21 +856,86 @@ async function clearOrphanedRunOnStartup(): Promise<void> {
   }
 }
 
+interface WorkerLock {
+  pid: number;
+  startedAt: string;
+  heartbeatAt: string;
+}
+
+async function acquireWorkerLock(): Promise<boolean> {
+  if (FORCE_START) {
+    log('--force flag: skipping worker-lock check');
+    return true;
+  }
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: WORKER_LOCK_KEY } });
+    const existing = row?.value as WorkerLock | null;
+    if (existing) {
+      const age = Date.now() - new Date(existing.heartbeatAt).getTime();
+      if (age < WORKER_LOCK_STALE_MS && existing.pid !== process.pid) {
+        log(`REFUSED: another worker is running (pid=${existing.pid}, heartbeat ${Math.round(age / 1000)}s ago). Use --force to override.`);
+        return false;
+      }
+      if (age >= WORKER_LOCK_STALE_MS) {
+        log(`Stealing stale worker lock (pid=${existing.pid}, heartbeat ${Math.round(age / 1000)}s ago — stale)`);
+      }
+    }
+    const now = new Date().toISOString();
+    const lockVal: WorkerLock = { pid: process.pid, startedAt: now, heartbeatAt: now };
+    await prisma.settings.upsert({
+      where: { key: WORKER_LOCK_KEY },
+      update: { value: lockVal as unknown as Parameters<typeof prisma.settings.upsert>[0]['update']['value'] },
+      create: { key: WORKER_LOCK_KEY, value: lockVal as unknown as Parameters<typeof prisma.settings.create>[0]['data']['value'] },
+    });
+    log(`Worker lock acquired (pid=${process.pid})`);
+    return true;
+  } catch (e) {
+    log('Worker lock DB error (proceeding anyway):', (e as Error).message);
+    return true; // DB errors must not block the worker
+  }
+}
+
+async function releaseWorkerLock(): Promise<void> {
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: WORKER_LOCK_KEY } });
+    const existing = row?.value as WorkerLock | null;
+    if (existing?.pid === process.pid) {
+      await prisma.settings.delete({ where: { key: WORKER_LOCK_KEY } }).catch(() => {});
+      log('Worker lock released');
+    }
+  } catch { /* ignore — we're exiting anyway */ }
+}
+
 async function main(): Promise<void> {
   // NOTE: single-instance protection is handled by the stale-run reclaim (a
   // crashed claimer's run is auto-reclaimed) + operational discipline (run one
   // worker). The file-lock was removed: under `npx tsx` the process tree spawns
   // sibling node procs that falsely tripped the lock on each other.
   void acquireSingleInstanceLock; // retained for reference; intentionally not gating
+
+  // DB-backed single-instance lock — prevents zombie pile-ups that burn the IP.
+  const lockAcquired = await acquireWorkerLock();
+  if (!lockAcquired) {
+    await prisma.$disconnect();
+    process.exit(1);
+  }
   log(`Orchestrator worker starting. BACKEND_URL=${BACKEND_URL} POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC}`);
 
   process.on('SIGINT', () => {
     log('SIGINT — shutting down');
-    void prisma.$disconnect().then(() => process.exit(0));
+    void (async () => {
+      await releaseWorkerLock();
+      await prisma.$disconnect();
+      process.exit(0);
+    })();
   });
   process.on('SIGTERM', () => {
     log('SIGTERM — shutting down');
-    void prisma.$disconnect().then(() => process.exit(0));
+    void (async () => {
+      await releaseWorkerLock();
+      await prisma.$disconnect();
+      process.exit(0);
+    })();
   });
 
   // Heartbeat: prove the engine is alive so the dashboard can show Engine 🟢/🔴.
@@ -879,6 +950,18 @@ async function main(): Promise<void> {
   await writeHeartbeat();
   const heartbeatTimer = setInterval(() => { void writeHeartbeat(); }, POLL_INTERVAL_SEC * 1000);
   process.on('exit', () => clearInterval(heartbeatTimer));
+
+  const writeLockHeartbeat = () => prisma.settings.findUnique({ where: { key: WORKER_LOCK_KEY } }).then((row) => {
+    const existing = row?.value as WorkerLock | null;
+    if (existing?.pid === process.pid) {
+      return prisma.settings.update({
+        where: { key: WORKER_LOCK_KEY },
+        update: { value: { ...existing, heartbeatAt: new Date().toISOString() } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+      } as Parameters<typeof prisma.settings.update>[0]).catch(() => {});
+    }
+  }).catch(() => {});
+  const lockHeartbeatTimer = setInterval(() => { void writeLockHeartbeat(); }, POLL_INTERVAL_SEC * 1000);
+  process.on('exit', () => clearInterval(lockHeartbeatTimer));
 
   // On startup, clear any orphaned 'stopping' run or stale 'running' run left
   // behind by a previously-killed/old worker — so a (re)started worker never
