@@ -209,11 +209,49 @@ function spawnAndWatch(
     // Track the last milestone error seen on stdout so the caller can classify
     // the run's failure mode (429001 / 429202 / block) and set a cooldown.
     let lastError: string | undefined;
+
+    // --- settle guard: ensures we resolve exactly once even if pipes hang ------
+    let settled = false;
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function finish(outcome: DriveOutcome): void {
+      if (settled) return;
+      settled = true;
+      if (watchdogTimer !== undefined) { clearTimeout(watchdogTimer); watchdogTimer = undefined; }
+      clearInterval(stopPoller);
+      resolve(outcome);
+    }
+
     const child = spawn(cmd, args, {
       env: { ...process.env, ...env },
       // stdio must be pipe so we can parse stdout for MILESTONE lines
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // --- killChild: SIGTERM → hard tree-kill after 3s → watchdog at 6s ----------
+    // Used by budget-rate, budget-exhausted, circuit-breaker, and stop paths.
+    // On win32 taskkill /T kills inherited Chrome children, freeing the stdio pipe.
+    function killChild(reason: string): void {
+      if (settled) return; // already done, nothing to kill
+      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+
+      // Hard tree-kill after ~3s if child is still alive
+      setTimeout(() => {
+        if (settled) return;
+        if (process.platform === 'win32' && child.pid) {
+          spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        } else {
+          try { child.kill('SIGKILL'); } catch { /* already dead */ }
+        }
+      }, 3_000);
+
+      // Watchdog: if still not settled after 6s, force-resolve so the caller never hangs
+      watchdogTimer = setTimeout(() => {
+        if (settled) return;
+        process.stdout.write(`  [WATCHDOG] child did not close within 6s (reason=${reason}) — forcing resolve\n`);
+        finish({ result: 'failed', error: lastError ?? reason });
+      }, 6_000);
+    }
 
     child.stdout.setEncoding('utf-8');
     child.stderr.setEncoding('utf-8');
@@ -251,16 +289,16 @@ function spawnAndWatch(
           }
           if (!budget.rateOk()) {
             process.stdout.write('  [BUDGET] rate limit reached — killing child\n');
-            child.kill('SIGTERM');
+            killChild('budget_rate_limit');
           } else if (rem <= 0) {
             process.stdout.write('  [BUDGET] per-run budget exhausted — killing child\n');
-            child.kill('SIGTERM');
+            killChild('budget_exhausted');
           }
         }
         // Circuit breaker: on first page-not-found / rate-limit milestone, kill immediately
         if (line.includes('MILESTONE') && (line.includes('rate_limit') || line.includes('datadome_block') || line.includes('login_failed'))) {
           process.stdout.write('  [CIRCUIT-BREAKER] block/rate-limit detected — killing child immediately\n');
-          child.kill('SIGTERM');
+          killChild(lastError ?? 'circuit_breaker');
         }
       }
     });
@@ -274,16 +312,20 @@ function spawnAndWatch(
         if (r && (r.status === 'stopping' || r.status === 'stopped')) {
           log(`[stop] signal for run ${ctx.runId} — sending SIGTERM to Python child`);
           clearInterval(stopPoller);
-          child.kill('SIGTERM');
-          // Grace: SIGKILL after 3s if still running
-          setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 3_000);
+          killChild('operator_stop');
         }
       }).catch(() => { /* DB blip — keep polling */ });
     }, 9_000);
 
+    // Resolve as soon as the process exits — exit fires even if stdio pipes are
+    // still held open by grandchildren (e.g. Chrome inheriting the stdout pipe).
+    child.on('exit', (code) => {
+      finish({ result: code === 0 ? 'ok' : 'failed', error: lastError });
+    });
+
+    // close fires after all stdio streams are flushed — also resolves (idempotent).
     child.on('close', (code) => {
-      clearInterval(stopPoller);
-      resolve({ result: code === 0 ? 'ok' : 'failed', error: lastError });
+      finish({ result: code === 0 ? 'ok' : 'failed', error: lastError });
     });
   });
 }
