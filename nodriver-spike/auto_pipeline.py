@@ -217,8 +217,15 @@ def _tg_ssl_ctx():
     return ctx
 
 
-def telegram(msg):
-    if WORKER_BRIDGED:
+def telegram(msg, force=False):
+    """Send a plain Telegram text message.
+
+    Normally skipped when WORKER_BRIDGED=1 (the Node worker bridges milestone
+    events to the backend which fires Telegram). Pass force=True to bypass the
+    bridge skip for critical positive alerts (e.g. OCMA available) that MUST
+    reach the client directly even in bridged mode.
+    """
+    if WORKER_BRIDGED and not force:
         log("(bridged, skipping telegram):", msg); return
     tok = os.environ.get("TELEGRAM_BOT_TOKEN"); chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not tok or not chat:
@@ -1828,7 +1835,7 @@ async def main():
                     _ocma_last_report = _now
                     _ed, _cnt = ocma_avail
                     milestone("ocma_available", email=EMAIL, detail=f"earliestDate={_ed} lists={_cnt}")
-                    telegram(f"[bot] ✅ OCMA slots available — {_ed}, {_cnt} lists — bot detection confirmed ({EMAIL})")
+                    telegram(f"[bot] ✅ OCMA slots available — {_ed}, {_cnt} lists — bot detection confirmed ({EMAIL})", force=True)
                     log(f"OCMA report sent (earliestDate={_ed}, lists={_cnt})")
                 else:
                     log("OCMA slots available but report rate-limited (sent <10min ago)")
@@ -1861,7 +1868,7 @@ async def main():
                 if _now - _ocma_last_report >= 600:
                     _ocma_last_report = _now
                     milestone("ocma_available", email=EMAIL, detail=f"subcatName={ui_slot}")
-                    telegram(f"[bot] ✅ OCMA slots available — {ui_slot} — bot detection confirmed ({EMAIL})")
+                    telegram(f"[bot] ✅ OCMA slots available — {ui_slot} — bot detection confirmed ({EMAIL})", force=True)
                     log(f"OCMA report (UI path) sent: {ui_slot}")
                 else:
                     log(f"OCMA UI slot '{ui_slot}' rate-limited (sent <10min ago) — skipping report")
