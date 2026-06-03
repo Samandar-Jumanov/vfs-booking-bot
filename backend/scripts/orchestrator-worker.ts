@@ -746,9 +746,13 @@ async function driveRun(runId: string): Promise<void> {
   const accounts = await prisma.vfsAccount.findMany({
     // Exclude already-BOOKED accounts so a successful booking is never re-driven
     // (no double-book, no wasted requests on a client that's already done).
+    // Default mode: only drive accounts that hold a client profile (profileIds non-empty).
+    // This keeps idle unlinked spares resting, and auto-rotate continues seamlessly —
+    // when a blocked account's profileIds are moved to a spare (rotate logic above),
+    // the spare becomes linked and is driven on the very next cycle.
     where: targetEmail
       ? { status: 'ACTIVE', email: targetEmail, lifecycleState: { not: 'BOOKED' } }
-      : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' } },
+      : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false } },
     select: {
       id: true,
       email: true,
@@ -760,6 +764,8 @@ async function driveRun(runId: string): Promise<void> {
     orderBy: { lastAttemptAt: 'asc' },
     ...(runLimit > 0 ? { take: runLimit } : {}),
   });
+
+  log(`account selection: mode=${targetEmail ? `pinned(${targetEmail})` : 'linked-profile'} found=${accounts.length}`);
 
   if (accounts.length === 0) {
     log('no ACTIVE accounts to drive — run complete');
