@@ -456,6 +456,65 @@ def auth_captured():
     return bool(_LIFT_AUTH.get("authorize") and _LIFT_AUTH.get("clientsource"))
 
 
+# The visa-category code for "Latvia Long Stay/Visa D" at the TAS centre (from
+# /master/visacategory). Static. The Work-D sub-cat codes live under it.
+VISACAT_LONGSTAY = os.environ.get("VFS_VISACAT_PARENT", "ZaremaT")
+SUBVISACAT_URL = (
+    "https://lift-api.vfsglobal.com/master/subvisacategory/%s/%s/%s/%s/en-US"
+    % (VFS_MISSION, VFS_COUNTRY, VFS_VAC, VISACAT_LONGSTAY)
+)
+_WORKD_CODES = []  # list of (name, code) for the Work-D sub-categories
+
+
+async def load_workd_codes(page):
+    """Fetch the (authed) sub-category list IN-BROWSER and extract the Work-D
+    codes. This gives the real visaCategoryCode(s) so we can poll the slot API
+    DIRECTLY — no wizard, no flaky re-entry. Sets _WORKD_CODES + confirms codes.
+    Returns True once the Work-D codes are known."""
+    global _WORKD_CODES
+    if _WORKD_CODES:
+        return True
+    if not auth_captured():
+        return False
+    expr = (
+        "(async()=>{try{const r=await fetch(%s,{headers:{'accept':'application/json'},"
+        "credentials:'include'});const j=await r.json();"
+        "return JSON.stringify({status:r.status,data:j});}"
+        "catch(e){return JSON.stringify({status:0,error:String(e)});}})()"
+        % json.dumps(SUBVISACAT_URL)
+    )
+    try:
+        raw = await page.evaluate(expr, await_promise=True)
+        if isinstance(raw, dict) and "value" in raw:
+            raw = raw["value"]
+        env = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as e:
+        log("CODES: subvisacategory fetch failed:", str(e)[:90])
+        return False
+    data = env.get("data") if isinstance(env, dict) else None
+    if not isinstance(data, list):
+        log("CODES: unexpected subvisacategory response:", str(env)[:160])
+        return False
+    found = []
+    for it in data:
+        if not isinstance(it, dict):
+            continue
+        nm = (it.get("name") or "").strip()
+        cd = (it.get("code") or it.get("subVisaCategoryCode") or "").strip()
+        if nm and cd and SUBCAT.search(nm):
+            found.append((nm, cd))
+    log("CODES: subvisacategory had %d subcats; Work-D matches:" % len(data), found)
+    if found:
+        _WORKD_CODES = found
+        _LIFT_BODY["countryCode"] = _LIFT_BODY.get("countryCode") or VFS_COUNTRY
+        _LIFT_BODY["missionCode"] = _LIFT_BODY.get("missionCode") or VFS_MISSION
+        _LIFT_BODY["vacCode"] = VFS_VAC
+        _LIFT_BODY["visaCategoryCode"] = found[0][1]
+        _maybe_confirm_codes()
+        return True
+    return False
+
+
 LIFT_CREDS_FILE = str(pathlib.Path(__file__).resolve().parent / ".lift-creds.json")
 
 
@@ -502,15 +561,14 @@ def codes_confirmed():
     return _CODES_CONFIRMED
 
 
-async def api_check_availability(page):
+async def api_check_availability(page, code_override=None):
     """Poll VFS's authed CheckIsSlotAvailable endpoint via an IN-BROWSER fetch()
     (reuses the live session/cookies/origin — most Cloudflare-happy). Returns a
     dict {earliestDate, earliestSlotLists, error, _status} on a parsed HTTP
     response, or None on a transport/JS failure (caller then falls back to UI).
 
-    Body params come from env (defaults from docs/LIFT_API_AVAILABILITY_SPEC.md):
-    countryCode=VFS_COUNTRY, missionCode=VFS_MISSION, vacCode=VFS_VAC,
-    visaCategoryCode=VFS_VISACAT, roleName='Individual', loginUser=<email>, payCode=''.
+    code_override: when set, query that specific visaCategoryCode (used to check
+    each Work-D sub-category in turn). Else uses the captured/env code.
     """
     if not auth_captured():
         return None
@@ -521,7 +579,7 @@ async def api_check_availability(page):
     country = _LIFT_BODY.get("countryCode") or VFS_COUNTRY
     mission = _LIFT_BODY.get("missionCode") or VFS_MISSION
     vac = _LIFT_BODY.get("vacCode") or VFS_VAC
-    visacat = _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT
+    visacat = code_override or _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT
     if not _API_SOURCE_LOGGED:
         _API_SOURCE_LOGGED = True
         vac_src = "captured" if _LIFT_BODY.get("vacCode") else "env-default"
@@ -1539,53 +1597,56 @@ async def main():
         # slots". So run the UI walk (select_route) FIRST while codes are unconfirmed;
         # it triggers VFS's request → _install_auth_capture stores the real codes →
         # codes_confirmed() flips → subsequent cycles use the fast API path.
+        # Once auth is captured, fetch the real Work-D codes (in-browser, authed)
+        # so we can poll the slot API DIRECTLY and SKIP the flaky wizard entirely.
+        if auth_captured() and not codes_confirmed():
+            try:
+                await load_workd_codes(page)
+            except Exception as _ce:
+                log("load_workd_codes error (non-fatal):", str(_ce)[:100])
+
         if auth_captured() and codes_confirmed():
-            # DIRECT_POLL: poll the API as a direct cookieless HTTP call (proven
-            # 24/7 pattern), rotating the proxy pool each cycle. Else use the
-            # in-browser fetch (default, reuses the live session/cookies).
-            if DIRECT_POLL:
-                proxy = _next_proxy(attempt)
-                if proxy:
-                    log(f"DIRECT poll via {proxy.split('@')[-1]}")
-                api = await api_check_direct(proxy)
-            else:
-                api = await api_check_availability(page)
-            if api is not None:
+            # Check EACH Work-D sub-category code via the API — no wizard, no
+            # re-entry. (DIRECT_POLL uses the single captured code through a proxy.)
+            checks = _WORKD_CODES if (_WORKD_CODES and not DIRECT_POLL) else [(None, None)]
+            for _nm, _cd in checks:
+                if DIRECT_POLL:
+                    proxy = _next_proxy(attempt)
+                    if proxy:
+                        log(f"DIRECT poll via {proxy.split('@')[-1]}")
+                    api = await api_check_direct(proxy)
+                else:
+                    api = await api_check_availability(page, code_override=_cd)
+                if api is None:
+                    api_fail_streak += 1
+                    log(f"API: call failed (streak={api_fail_streak})")
+                    break
                 status = api.get("_status", 0)
                 err = api.get("error")
-                if status == 200 and not err:
-                    used_api = True
-                    api_fail_streak = 0
-                    # ONE-TIME DIAGNOSTIC: the in-browser API check just worked, so
-                    # we have a live token. Probe whether a DIRECT (cookieless) call
-                    # also works → tells us if IP-rotation polling is viable.
-                    if not _REPLAY_PROBED:
-                        _REPLAY_PROBED = True
-                        try:
-                            await replay_probe(page)
-                        except Exception as _pe:
-                            log("replay_probe error (non-fatal):", str(_pe)[:100])
-                    earliest = api.get("earliestDate")
-                    slot_lists = api.get("earliestSlotLists") or []
-                    if earliest or slot_lists:
-                        slot = earliest or "slot"  # marker; UI re-picks the real subcat to book
-                        log("API: SLOT AVAILABLE — earliestDate=%s, lists=%d" % (earliest, len(slot_lists)))
-                    else:
-                        log("API: no slots (earliestDate null)")
-                else:
-                    # 401/403/429 or an error envelope → don't trust it; fall back to UI.
+                if status != 200 or err:
                     api_fail_streak += 1
                     code = (err or {}).get("code") if isinstance(err, dict) else None
                     log(f"API: unusable (status={status}, code={code}, streak={api_fail_streak}) — falling back to UI")
-            else:
-                api_fail_streak += 1
-                log(f"API: call failed (streak={api_fail_streak}) — falling back to UI")
+                    used_api = False
+                    break
+                used_api = True
+                api_fail_streak = 0
+                if not _REPLAY_PROBED:
+                    _REPLAY_PROBED = True
+                    try:
+                        await replay_probe(page)
+                    except Exception as _pe:
+                        log("replay_probe error (non-fatal):", str(_pe)[:100])
+                earliest = api.get("earliestDate")
+                slot_lists = api.get("earliestSlotLists") or []
+                if earliest or slot_lists:
+                    slot = earliest or "slot"
+                    log("API: SLOT AVAILABLE in %s — earliestDate=%s lists=%d" % (_nm or "work-d", earliest, len(slot_lists)))
+                    break
+                log("API: no slots in %s" % (_nm or "work-d"))
         elif not auth_captured():
             log("API: auth headers not captured yet — using UI path")
         else:
-            # auth headers present but the real codes aren't confirmed yet → drive the
-            # UI walk this cycle so VFS fires its own CheckIsSlotAvailable and we sniff
-            # the correct vac/visacat codes. Switches to API polling next cycle.
             log("API: codes not confirmed yet — UI walk first to capture real codes")
 
         # FALLBACK / BACKWARD-COMPAT: if the API didn't resolve this cycle, run the
