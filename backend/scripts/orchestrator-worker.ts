@@ -705,8 +705,10 @@ async function driveRun(runId: string): Promise<void> {
 
   // 1. Pool top-up. POOL_MIN=0 disables registration entirely (e.g. when the
   // extension isn't up to activate new ones and only existing accounts are used).
-  const poolMin = BOOKING_ONLY ? 0 : Number(process.env.POOL_MIN ?? 2);
-  if (BOOKING_ONLY) log('BOOKING_ONLY mode — skipping pool top-up (POOL_MIN forced to 0)');
+  // BOOKING_ONLY still enforces a minimum of 1 spare so the auto-rotate path
+  // always has a replacement ready when an account hits a 429001 block.
+  const poolMin = BOOKING_ONLY ? Math.max(1, Number(process.env.POOL_MIN ?? 1)) : Number(process.env.POOL_MIN ?? 2);
+  if (BOOKING_ONLY) log(`BOOKING_ONLY mode — pool top-up limited to POOL_MIN=${poolMin} spare(s) (rotate-ready buffer)`);
   const registered: Array<{ email: string; status: string }> = [];
   if (poolMin > 0) {
     const spare = await spareCount();
