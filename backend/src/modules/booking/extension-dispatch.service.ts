@@ -21,12 +21,11 @@ import { prisma } from '@config/database';
 import { logEvent } from '@modules/logs/logger';
 import { EventType, PollingRole, type VfsAccount } from '@prisma/client';
 import { decrypt } from '@utils/crypto';
-import { getSetting } from '@modules/settings/settings.service';
 import type { BookingJobPayload } from '@t/index';
 
 const DISPATCH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes per booking
 const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000; // 12h cookie freshness
-const DEFAULT_ACCOUNT_COOLDOWN_MS = 60 * 60 * 1000; // 60min for a 429001 account flag
+const ACCOUNT_429001_COOLDOWN_MS = 6 * 60 * 60 * 1000; // align with live VPS worker
 
 interface PendingDispatch {
   resolve: (result: ExtensionBookingResult) => void;
@@ -326,16 +325,15 @@ export async function bookViaExtension(payload: BookingJobPayload): Promise<Exte
       // VFS account-level throttle (429001) — cool the flagged account so the
       // next booking auto-swaps to a different ACTIVE account. Not an IP issue,
       // so we do NOT rotate the proxy. Returns to rotation after the cooldown.
-      const cooldownMs = (await getSetting<number>('account.cooldownMs')) ?? DEFAULT_ACCOUNT_COOLDOWN_MS;
       await prisma.vfsAccount.update({
         where: { id: account.id },
         data: {
           status: 'COOLDOWN',
-          cooldownUntil: new Date(Date.now() + cooldownMs),
+          cooldownUntil: new Date(Date.now() + ACCOUNT_429001_COOLDOWN_MS),
         },
       });
       logEvent('warn', EventType.BOOKING_FAILED,
-        `[AUTO-BOOK] account ${account.email} flagged (429001) → COOLDOWN ${Math.round(cooldownMs / 60000)}m, swapping`,
+        `[AUTO-BOOK] account ${account.email} flagged (429001) → COOLDOWN ${Math.round(ACCOUNT_429001_COOLDOWN_MS / 60000)}m, swapping`,
         { accountEmail: account.email });
     }
   }

@@ -198,6 +198,15 @@ interface DriveOutcome {
   error?: string;
 }
 
+interface DriveAccount {
+  id: string;
+  email: string;
+  encryptedPassword: string;
+  lifecycleState: string;
+  profileIds: string[];
+  pollingRole: string;
+}
+
 function spawnAndWatch(
   cmd: string,
   args: string[],
@@ -361,14 +370,7 @@ async function loadAccountTimings(): Promise<AccountTiming[]> {
 
 async function driveAccountReal(
   runId: string,
-  acct: {
-    id: string;
-    email: string;
-    encryptedPassword: string;
-    lifecycleState: string;
-    profileIds: string[];
-    pollingRole: string;
-  },
+  acct: DriveAccount,
 ): Promise<DriveOutcome> {
   let password = '';
   try {
@@ -400,7 +402,7 @@ async function driveAccountReal(
     PYTHONUTF8: '1',
     VFS_EMAIL: acct.email,
     VFS_PASSWORD: password,
-    MONITOR_INTERVAL: process.env.MONITOR_INTERVAL ?? '180',
+    MONITOR_INTERVAL: process.env.MONITOR_INTERVAL ?? '30',
     BOOK_ENABLED: bookEnabled,
     BOOK_DRY_RUN: process.env.BOOK_DRY_RUN ?? '',
     WORKER_BRIDGED: '1',
@@ -627,10 +629,7 @@ async function spareCount(): Promise<number> {
 // Orders by lastAttemptAt asc (least recently touched = freshest).
 // ---------------------------------------------------------------------------
 
-async function findReadySpare(excludeId: string): Promise<{
-  id: string;
-  email: string;
-} | null> {
+async function findReadySpare(excludeId: string): Promise<DriveAccount | null> {
   const now = new Date();
   return prisma.vfsAccount.findFirst({
     where: {
@@ -640,7 +639,14 @@ async function findReadySpare(excludeId: string): Promise<{
       profileIds: { isEmpty: true },
       OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }],
     },
-    select: { id: true, email: true },
+    select: {
+      id: true,
+      email: true,
+      encryptedPassword: true,
+      lifecycleState: true,
+      profileIds: true,
+      pollingRole: true,
+    },
     orderBy: { lastAttemptAt: 'asc' },
   });
 }
@@ -677,6 +683,21 @@ function makeBudget(): { remaining: () => number; spend: () => void; rateOk: () 
 
 async function driveRun(runId: string): Promise<void> {
   log(`driveRun start. runId=${runId}`);
+
+  // Let previously cooled accounts recover without relying on a separate backend
+  // sweep; the live VPS worker owns this path.
+  await prisma.vfsAccount.updateMany({
+    where: {
+      status: 'COOLDOWN',
+      cooldownUntil: { lte: new Date() },
+    },
+    data: {
+      status: 'ACTIVE',
+      lifecycleState: 'ACTIVE',
+      cooldownUntil: null,
+      restrictedReason: null,
+    },
+  });
 
   // 1. Pool top-up. POOL_MIN=0 disables registration entirely (e.g. when the
   // extension isn't up to activate new ones and only existing accounts are used).
@@ -786,13 +807,13 @@ async function driveRun(runId: string): Promise<void> {
   const runLimit = Number(process.env.RUN_LIMIT ?? 0);
   // TARGET_EMAIL pins the run to one specific account.
   const targetEmail = process.env.TARGET_EMAIL?.trim();
-  const accounts = await prisma.vfsAccount.findMany({
+  const accounts: DriveAccount[] = await prisma.vfsAccount.findMany({
     // Exclude already-BOOKED accounts so a successful booking is never re-driven
     // (no double-book, no wasted requests on a client that's already done).
     // Default mode: only drive accounts that hold a client profile (profileIds non-empty).
     // This keeps idle unlinked spares resting, and auto-rotate continues seamlessly —
     // when a blocked account's profileIds are moved to a spare (rotate logic above),
-    // the spare becomes linked and is driven on the very next cycle.
+    // the spare is queued into this same run after the normal stagger.
     where: targetEmail
       ? { status: 'ACTIVE', email: targetEmail, lifecycleState: { not: 'BOOKED' } }
       : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false } },
@@ -823,7 +844,8 @@ async function driveRun(runId: string): Promise<void> {
   // If we exceed MAX_SWAPS_PER_RUN, stop swapping (likely an IP problem).
   let swapCount = 0;
 
-  for (const acct of accounts) {
+  for (let accountIndex = 0; accountIndex < accounts.length; accountIndex++) {
+    const acct = accounts[accountIndex];
     // Per-account pacer check
     const timing = timings.find((t) => t.id === acct.id);
     if (timing && !isDue(timing, PACER_CFG, now)) {
@@ -872,10 +894,9 @@ async function driveRun(runId: string): Promise<void> {
       pollingRole: acct.pollingRole,
     });
 
-    // Auto-quarantine: record the run outcome on the account so the pacer's
-    // isDue() skips it next run (gating is purely via cooldownUntil — status stays
-    // ACTIVE so the account auto-recovers when the cooldown passes). No manual
-    // TARGET_EMAIL swapping needed: the worker rotates to other due accounts.
+    // Auto-quarantine: record the run outcome on the account so the pacer and
+    // account selection skip it until cooldownUntil passes. No manual TARGET_EMAIL
+    // swapping needed: the worker rotates to other due accounts.
     try {
       const at = Date.now();
       const err = outcome.error ?? '';
@@ -913,13 +934,15 @@ async function driveRun(runId: string): Promise<void> {
             await prisma.$transaction([
               prisma.vfsAccount.update({
                 where: { id: spare.id },
-                data: { profileIds: acct.profileIds },
+                data: { profileIds: acct.profileIds, lastAttemptAt: null },
               }),
               prisma.vfsAccount.update({
                 where: { id: acct.id },
                 data: {
+                  status: 'COOLDOWN',
                   profileIds: [],
-                  lifecycleState: 'BLOCKED',
+                  lifecycleState: 'RESTRICTED',
+                  restrictedReason: '429001',
                   cooldownUntil: new Date(at + PACER_CFG.cooldown429001Ms),
                   lastAttemptAt: new Date(at),
                 },
@@ -931,12 +954,11 @@ async function driveRun(runId: string): Promise<void> {
             log(msg);
             await tg(msg).catch(() => {});
 
-            // Continue approach: next-cycle (lower risk).
-            // The spare is now ACTIVE + linked. The next driveRun() poll picks it up
-            // automatically. We do NOT append to the in-flight `accounts` array here
-            // because that could drive the spare immediately after a 429001 on the
-            // same IP without any stagger — the next cycle gives it a clean start.
-            log(`spare ${spare.email} is now linked — next run cycle will drive it`);
+            // Re-drive approach: the spare is now ACTIVE + linked. Queue it for
+            // this same driveRun(); the normal global gap/stagger above still
+            // applies before the next spawn, so rotation is not immediate.
+            accounts.push({ ...spare, profileIds: acct.profileIds, lifecycleState: 'ACTIVE' });
+            log(`spare ${spare.email} is now linked — queued for this run`);
 
             // Update cooldownUntil is already set in the transaction above; skip the
             // normal update below to avoid overwriting it.
@@ -954,7 +976,15 @@ async function driveRun(runId: string): Promise<void> {
 
       await prisma.vfsAccount.update({
         where: { id: acct.id },
-        data: { lastAttemptAt: new Date(at), cooldownUntil },
+        data: reason === '429001'
+          ? {
+              status: 'COOLDOWN',
+              lifecycleState: 'RESTRICTED',
+              restrictedReason: '429001',
+              lastAttemptAt: new Date(at),
+              cooldownUntil,
+            }
+          : { lastAttemptAt: new Date(at), cooldownUntil },
       });
 
       if (cooldownUntil) {
@@ -1205,8 +1235,7 @@ async function main(): Promise<void> {
       return prisma.settings.update({
         where: { key: WORKER_LOCK_KEY },
         data: { value: { ...existing, heartbeatAt } as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
-      }).then(() => { log(`Lock heartbeat written (pid=${process.pid}, heartbeatAt=${heartbeatAt})`); })
-        .catch((err: unknown) => { log(`WARN: lock heartbeat write failed: ${(err as Error).message}`); });
+      }).catch((err: unknown) => { log(`WARN: lock heartbeat write failed: ${(err as Error).message}`); });
     }
   }).catch(() => {});
   const lockHeartbeatTimer = setInterval(() => { void writeLockHeartbeat(); }, WORKER_LOCK_HEARTBEAT_MS);

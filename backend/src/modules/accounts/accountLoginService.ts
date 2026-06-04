@@ -8,12 +8,11 @@ import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { logEvent } from '@modules/logs/logger';
 import { sendToExtension } from '@modules/websocket/ws.server';
 import { decrypt } from '@utils/crypto';
-import { getSetting } from '@modules/settings/settings.service';
 import { runActivation } from './accountActivationService';
 
 const LOGIN_TIMEOUT_MS = 90_000;
 const CRON_STALE_MS = 10 * 60 * 60 * 1000;
-const DEFAULT_ACCOUNT_COOLDOWN_MS = 60 * 60 * 1000; // 60min for a 429001 account flag
+const ACCOUNT_429001_COOLDOWN_MS = 6 * 60 * 60 * 1000; // align with live VPS worker
 
 type LoginResult =
   | { success: true; accountId: string; email: string; lastWarmedAt: Date | null }
@@ -199,12 +198,11 @@ export async function resolveLoginFailed(correlationId: string, reason: string):
   // rotation here). The account auto-returns to ACTIVE after the cooldown via the
   // existing expired-COOLDOWN reactivation sweeps.
   if (/429001|account.*lock|too many attempts/i.test(reason)) {
-    const cooldownMs = (await getSetting<number>('account.cooldownMs')) ?? DEFAULT_ACCOUNT_COOLDOWN_MS;
     await prisma.vfsAccount.update({
       where: { id: pending.accountId },
       data: {
         status: AccountStatus.COOLDOWN,
-        cooldownUntil: new Date(Date.now() + cooldownMs),
+        cooldownUntil: new Date(Date.now() + ACCOUNT_429001_COOLDOWN_MS),
       },
     }).catch((err) => {
       logEvent('error', EventType.BOOKING_FAILED,
@@ -212,7 +210,7 @@ export async function resolveLoginFailed(correlationId: string, reason: string):
         { accountId: pending.accountId });
     });
     logEvent('warn', EventType.BOOKING_FAILED,
-      `[LOGIN] account ${pending.email} flagged (429001) → COOLDOWN ${Math.round(cooldownMs / 60000)}m`,
+      `[LOGIN] account ${pending.email} flagged (429001) → COOLDOWN ${Math.round(ACCOUNT_429001_COOLDOWN_MS / 60000)}m`,
       { accountId: pending.accountId });
   }
 

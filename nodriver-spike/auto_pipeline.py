@@ -18,7 +18,7 @@ Env:
   SUBCAT            regex to pick sub-category (default: Work D-visa)
   NATIONALITY_FILTER  regex; subcategory names must MATCH to be polled (default: uzbek|turkmen).
                     Drops Tajik by default; cuts calls/cycle from 4 to 1 (real) or 2 (PROVE_OCMA).
-  RATELIMIT_BACKOFF_MIN  minutes to sleep silently after a 429201/429202 rate-limit (default 20).
+  RATELIMIT_BACKOFF_MIN  minutes to sleep silently after a 429201/429202 rate-limit (default 5).
   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  optional alerts
   -- Lift-API availability monitor (cheap authed slot check, see
      docs/LIFT_API_AVAILABILITY_SPEC.md) --
@@ -60,7 +60,7 @@ EMAIL = os.environ.get("VFS_EMAIL", "")
 PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
 DASHBOARD_URL = os.environ.get("VFS_DASHBOARD_URL", LOGIN_URL.replace("/login", "/dashboard"))
-MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "120"))
+MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "30"))
 # DIRECT_POLL=1 → monitor by calling CheckIsSlotAvailable as a DIRECT (cookieless,
 # no-browser) HTTP request replaying the captured token — the proven pattern from
 # working VFS monitors (khanrn/vfs-slots-api-monitor): the rate limit bites the
@@ -88,8 +88,9 @@ NATIONALITY_FILTER = re.compile(
     os.environ.get("NATIONALITY_FILTER", r"uzbek|turkmen"), re.I
 )
 # RATELIMIT_BACKOFF_MIN: silent cooldown (in minutes) after a 429201/429202 rate-limit
-# response.  No requests are made during this window.  Default 20 minutes.
-RATELIMIT_BACKOFF_MIN = int(os.environ.get("RATELIMIT_BACKOFF_MIN", "20"))
+# response.  No requests are made during this window.  Default 5 minutes.
+# For a confirmed 2-hour IP ban set RATELIMIT_BACKOFF_MIN=120 in the environment.
+RATELIMIT_BACKOFF_MIN = int(os.environ.get("RATELIMIT_BACKOFF_MIN", "5"))
 
 # ── Lift-API availability monitoring (cheap, authed slot check) ───────────────
 # Instead of driving the booking-wizard UI every monitor cycle (slow, heavy on the
@@ -2096,7 +2097,7 @@ async def main():
             # what trips 429201. After MAX_UI_WALKS, back off hard so the IP lives.
             ui_walks += 1
             if not codes_confirmed() and ui_walks >= MAX_UI_WALKS:
-                slowdown = max(MONITOR_INTERVAL * 4, 180.0)
+                slowdown = max(MONITOR_INTERVAL * 2, 60.0)
                 log(f"WARN: codes still unconfirmed after {ui_walks} UI walks — backing "
                     f"off {int(slowdown)}s to protect the IP (CDP post-data capture issue?)")
                 await asyncio.sleep(slowdown)

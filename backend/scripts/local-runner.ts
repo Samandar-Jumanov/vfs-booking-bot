@@ -12,7 +12,7 @@
  *   RUNNER_MAX_CONCURRENT=3   max simultaneous browsers
  *   RUNNER_STAGGER_SEC=30     gap between launches (login pacing)
  *   RUNNER_POLL_SEC=120       how often to look for newly-activated accounts
- *   MONITOR_INTERVAL=180      passed to each pipeline
+ *   MONITOR_INTERVAL=30       passed to each pipeline (default 30s; use 60 for conservative)
  *   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  optional alerts (passed through)
  */
 import path from 'path';
@@ -58,7 +58,7 @@ async function launchForAccount(account: { id: string; email: string; encryptedP
     PYTHONUTF8: '1',
     VFS_EMAIL: account.email,
     VFS_PASSWORD: password,
-    MONITOR_INTERVAL: process.env.MONITOR_INTERVAL ?? '180',
+    MONITOR_INTERVAL: process.env.MONITOR_INTERVAL ?? '30',
     BOOK_ENABLED: bookEnabled,
   };
   if (profile) {

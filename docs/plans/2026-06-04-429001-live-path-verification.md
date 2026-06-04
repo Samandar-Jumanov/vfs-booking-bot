@@ -82,6 +82,33 @@ exhausted immediately; quarantine not persisted; page-not-found masks the 429001
 - [ ] On the next live `rate_limit_429001`, confirm in the worker log / Telegram: account flips to
       `COOLDOWN`, a different spare is driven, and the run continues. Capture the log lines here.
 
+## Findings
+
+Task 1 live-path trace:
+- `backend/scripts/orchestrator-worker.ts:201-211` creates `spawnAndWatch()` and tracks the last milestone `error`; `:263-279` parses `MILESTONE` JSON and stores `ms.error`; `:298-301` kills the Python child on `rate_limit` / `datadome_block` / `login_failed`, preserving the last error for the caller.
+- `backend/scripts/orchestrator-worker.ts:678` starts `driveRun()`. It loads the account list once at `:789-809`; default selection is only `ACTIVE` accounts with non-empty `profileIds` (`:792-798`), so unlinked spares are intentionally idle until linked.
+- On `rate_limit_429001`, `driveRun()` maps the outcome to reason `429001` and a 6h cooldown at `backend/scripts/orchestrator-worker.ts:884-886` using `PACER_CFG.cooldown429001Ms` defined at `:117`.
+- The swap branch only runs for `429001` with linked profiles at `backend/scripts/orchestrator-worker.ts:900`. `findReadySpare()` selects a different `ACTIVE`, unlinked, non-`BLOCKED`/`BOOKED`, non-cooling account at `:630-645`.
+- Before the fix, the transaction at `backend/scripts/orchestrator-worker.ts:913-927` moved the blocked account's `profileIds` to the spare, cleared `profileIds` from the blocked account, set its `lifecycleState` to `BLOCKED`, and set `cooldownUntil = now + 6h`. It did not set `status = COOLDOWN`; the live pacer gated via `cooldownUntil` while leaving `status` `ACTIVE`.
+- Pre-fix gap: after a successful swap, `backend/scripts/orchestrator-worker.ts:934-939` explicitly said the spare was for the "next run cycle", then `:943` continued the already-loaded loop. Because the account array was loaded before the swap (`:789-809`), the spare was not driven in the same run. `driveRun()` returned at `:971-972`; the main loop then marked `scenario_run.status = completed` at `backend/scripts/orchestrator-worker.ts:1282-1294`. Therefore the spare was linked, but not automatically re-spawned in the same live run.
+- `nodriver-spike/auto_pipeline.py:318-340` classifies explicit `429202` and `429001` body text before checking `/page-not-found`; login failure then calls `classify_block()` and emits `milestone("failed", error=reason_code)` at `nodriver-spike/auto_pipeline.py:1823-1832`. So the live Python classifier does not mask a readable `429001` behind `page-not-found`.
+- `backend/src/modules/lifecycle/throttleGuard.ts:36-63` does match URL `page-not-found` before explicit 429, but that helper is used for TypeScript lifecycle/register throttle signals, not the live Python login classification. It can misclassify a signal containing both `/page-not-found` URL and `429001` text, but it is not the source of the live `rate_limit_429001` milestone.
+
+Task 2 verdict:
+- **B. Swap cools down but never re-drives.** Evidence: the profile move and 6h cooldown happen in the live worker transaction, but the spare is not inserted into the in-flight drive queue, and the outer scenario is marked `completed` after `driveRun()` returns.
+
+Task 3 reconciliation:
+- Keep commit `899f1c0` only as a safety net for extension/dashboard-triggered flows that still exist (`accounts.router`, `monitor.service`, `booking.worker`, and `extension.state` can reach `loginAccount` / `extension-dispatch`). It is inert for the VPS hands-off worker. To avoid divergent policy, align its default 429001 cooldown with the live worker's 6h policy instead of the current 60m fallback.
+
+Task 4 implementation:
+- `backend/scripts/orchestrator-worker.ts:201-208` now has a `DriveAccount` shape so selected spares carry the fields needed to re-spawn `auto_pipeline.py`.
+- `backend/scripts/orchestrator-worker.ts:684-700` resets expired `COOLDOWN` accounts to `ACTIVE` / `lifecycleState=ACTIVE` for the VPS worker path.
+- `backend/scripts/orchestrator-worker.ts:810` types the in-flight accounts as a mutable `DriveAccount[]`, and `:847` uses an index loop so `accounts.push()` additions are driven in the same `driveRun()`.
+- On a 429001 swap, `backend/scripts/orchestrator-worker.ts:933-949` now moves `profileIds` to the spare and sets the blocked account to `status=COOLDOWN`, `lifecycleState=RESTRICTED`, `restrictedReason=429001`, and `cooldownUntil=now+6h`; `:956-961` queues the spare for the same run after the normal stagger.
+- If the swap cap is hit or no spare exists, the normal 429001 fallback at `backend/scripts/orchestrator-worker.ts:978-986` now also marks the account `COOLDOWN` / `RESTRICTED` instead of only setting `cooldownUntil`.
+- `backend/src/modules/accounts/accountLoginService.ts:15,205,213` and `backend/src/modules/booking/extension-dispatch.service.ts:28,332,336` keep the extension-path safety net but align its default 429001 cooldown to 6h.
+- Verification: `cd backend && npx.cmd tsc --noEmit` passed. `npx tsc --noEmit` via PowerShell failed first because local execution policy blocks `npx.ps1`, so `npx.cmd` was used for the same command.
+
 ## Notes / risks
 - The TS commit `899f1c0` is already on `origin/main` but does NOT affect the live worker
   (Railway ≠ VPS worker, per `CLAUDE.md:235`). It is inert in production until the extension
