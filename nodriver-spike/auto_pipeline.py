@@ -1958,7 +1958,7 @@ async def book(page, subcat):
 
 # ── MAIN ───────────────────────────────────────────────────────────────────
 async def main():
-    global BOOK_ENABLED, _REPLAY_PROBED
+    global BOOK_ENABLED, _REPLAY_PROBED, EMAIL, PASSWORD
     if not EMAIL or not PASSWORD:
         log("ERROR: set VFS_EMAIL/VFS_PASSWORD"); sys.exit(2)
     if BOOK_DRY_RUN and BOOK_ENABLED:
@@ -2103,7 +2103,6 @@ async def main():
                         _spare_rotated = False
                         spare_cred = _spare_creds_pop()
                         if spare_cred:
-                            global EMAIL, PASSWORD
                             _prev_email_spare = EMAIL
                             EMAIL = spare_cred["email"]
                             PASSWORD = spare_cred["password"]
@@ -2144,16 +2143,101 @@ async def main():
                                 EMAIL = _prev_email_spare
                                 PASSWORD = ""  # clear — we don't know the original password here
                         if not _spare_rotated:
-                            # No spare credential or inline login failed —
-                            # fall back to original sleep behaviour.
-                            _backoff_s = RATELIMIT_BACKOFF_MIN * 60
-                            log(f"POOL: no spare account available — "
-                                f"sleeping {RATELIMIT_BACKOFF_MIN}min as fallback")
-                            milestone("monitoring", email=EMAIL,
-                                      detail=f"check #{attempt} — rate-limited ({err_code or status}), "
-                                             f"no pool spare, silent backoff {RATELIMIT_BACKOFF_MIN}min")
-                            await asyncio.sleep(_backoff_s)
-                            break  # restart the for-subcat loop after sleep; outer while resumes
+                            # Option B: no spare credential (or inline login failed) —
+                            # register a brand-new VFS account on the spot, then log in
+                            # with it so polling continues without a sleep.
+                            # Falls back to the original RATELIMIT_BACKOFF_MIN sleep only
+                            # if registration itself fails.
+                            _reg_success = False
+                            if MAILSAC_KEY:
+                                log(f"REGISTER: no spare accounts left — registering a new VFS account on the spot")
+                                milestone("monitoring", email=EMAIL,
+                                          detail=f"check #{attempt} — no spare, starting auto-registration")
+                                try:
+                                    _reg_script = str(pathlib.Path(__file__).resolve().parent / "register_spike.py")
+                                    # Run register_spike in a SUBPROCESS so its own nodriver
+                                    # browser does not conflict with this pipeline's browser.
+                                    _reg_env = {**os.environ, "MAILSAC_API_KEY": MAILSAC_KEY}
+                                    _reg_proc = await asyncio.create_subprocess_exec(
+                                        sys.executable, _reg_script,
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.STDOUT,
+                                        env=_reg_env,
+                                    )
+                                    log("REGISTER: subprocess started — waiting up to 3 minutes")
+                                    try:
+                                        _reg_out_bytes, _ = await asyncio.wait_for(
+                                            _reg_proc.communicate(), timeout=180
+                                        )
+                                    except asyncio.TimeoutError:
+                                        log("REGISTER: subprocess timed out after 3 minutes — killing")
+                                        try:
+                                            _reg_proc.kill()
+                                        except Exception:
+                                            pass
+                                        _reg_out_bytes = b""
+                                    _reg_out = _reg_out_bytes.decode("utf-8", "replace") if _reg_out_bytes else ""
+                                    log("REGISTER: subprocess output (last 1000 chars):\n" + _reg_out[-1000:])
+                                    # Parse the RESULT line: RESULT: {"email":..., "password":..., "registered":...}
+                                    _reg_data = None
+                                    for _line in _reg_out.splitlines():
+                                        if _line.startswith("RESULT:") or "[REG] RESULT:" in _line:
+                                            _json_part = _line[_line.index("{"):]
+                                            try:
+                                                _reg_data = json.loads(_json_part)
+                                            except Exception:
+                                                pass
+                                            break
+                                    if _reg_data and _reg_data.get("registered") and _reg_data.get("email") and _reg_data.get("password"):
+                                        _new_email = _reg_data["email"]
+                                        _new_password = _reg_data["password"]
+                                        log(f"REGISTER: new account registered: {_new_email} (activated={_reg_data.get('activated')}) — logging in")
+                                        milestone("monitoring", email=EMAIL,
+                                                  detail=f"check #{attempt} — registered {_new_email}, logging in inline")
+                                        _prev_email_reg = EMAIL
+                                        EMAIL = _new_email
+                                        PASSWORD = _new_password
+                                        try:
+                                            login_ok = await do_login(browser, page)
+                                        except Exception as _rle:
+                                            log(f"REGISTER: inline login raised: {str(_rle)[:80]}")
+                                            login_ok = False
+                                        if login_ok:
+                                            _pool_register_self()
+                                            try:
+                                                await enter_wizard(page)
+                                                _pool_register_self()
+                                            except Exception as _rwe:
+                                                log(f"REGISTER: enter_wizard after reg-login raised: {str(_rwe)[:80]}")
+                                            log(f"REGISTER: now polling as freshly-registered {EMAIL}")
+                                            milestone("monitoring", email=EMAIL,
+                                                      detail=f"check #{attempt} — registered+logged-in {EMAIL}, resuming poll")
+                                            _reg_success = True
+                                            _api_broke = False
+                                            break  # outer while resumes immediately
+                                        else:
+                                            log(f"REGISTER: login failed for new account {EMAIL} — reverting to {_prev_email_reg}")
+                                            EMAIL = _prev_email_reg
+                                            PASSWORD = ""
+                                    else:
+                                        _err_hint = (_reg_data or {}).get("error", "no RESULT line found")
+                                        log(f"REGISTER: registration did not succeed (error={_err_hint}) — falling back to sleep")
+                                except Exception as _reg_exc:
+                                    log(f"REGISTER: unexpected error: {str(_reg_exc)[:120]} — falling back to sleep")
+                            else:
+                                log("REGISTER: MAILSAC_API_KEY not set — cannot auto-register, falling back to sleep")
+
+                            if not _reg_success:
+                                # Registration failed (or MAILSAC key missing) —
+                                # fall back to original sleep behaviour.
+                                _backoff_s = RATELIMIT_BACKOFF_MIN * 60
+                                log(f"POOL: no spare account available and registration failed — "
+                                    f"sleeping {RATELIMIT_BACKOFF_MIN}min as fallback")
+                                milestone("monitoring", email=EMAIL,
+                                          detail=f"check #{attempt} — rate-limited ({err_code or status}), "
+                                                 f"no pool spare, registration failed, silent backoff {RATELIMIT_BACKOFF_MIN}min")
+                                await asyncio.sleep(_backoff_s)
+                                break  # restart the for-subcat loop after sleep; outer while resumes
                 elif status == 403:
                     # Token/cookie challenge — NOT a hard rate-limit.  Trigger re-login
                     # after 1-2 consecutive 403s; short backoff; do NOT UI-walk.
