@@ -656,6 +656,46 @@ async function findReadySpare(excludeId: string): Promise<DriveAccount | null> {
 }
 
 // ---------------------------------------------------------------------------
+// writeSpareCredentials — write ACTIVE+unlinked account credentials to
+// nodriver-spike/.spare-credentials.json so auto_pipeline.py can log in a
+// spare account inline when the pool has no pre-authed token available.
+// Called after every pool top-up check so the file is always fresh.
+// ---------------------------------------------------------------------------
+
+const SPARE_CREDS_FILE = path.resolve(__dirname, '..', '..', 'nodriver-spike', '.spare-credentials.json');
+
+async function writeSpareCredentials(): Promise<void> {
+  try {
+    const rows = await prisma.vfsAccount.findMany({
+      where: {
+        status: 'ACTIVE',
+        profileIds: { isEmpty: true },
+        lifecycleState: { notIn: ['BLOCKED', 'BOOKED', 'RESTRICTED'] },
+      },
+      select: { email: true, encryptedPassword: true },
+      orderBy: { lastAttemptAt: 'asc' },
+    });
+
+    const creds: Array<{ email: string; password: string }> = [];
+    for (const row of rows) {
+      try {
+        const password = decryptField(row.encryptedPassword);
+        if (password) creds.push({ email: row.email, password });
+      } catch {
+        // Skip accounts whose password can't be decrypted — Python can't use them.
+      }
+    }
+
+    const tmp = SPARE_CREDS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(creds, null, 2), 'utf-8');
+    fs.renameSync(tmp, SPARE_CREDS_FILE);
+    log(`spare-creds: wrote ${creds.length} ACTIVE+unlinked credential(s) to .spare-credentials.json`);
+  } catch (e) {
+    log(`WARN: writeSpareCredentials failed (non-fatal): ${(e as Error).message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Per-run request budget factory
 // ---------------------------------------------------------------------------
 
@@ -757,6 +797,9 @@ async function driveRun(runId: string): Promise<void> {
     } else {
       log(`pool ok: spare=${spare} ACTIVE+unlinked accounts`);
     }
+    // Always refresh .spare-credentials.json after pool check so auto_pipeline.py
+    // can log in an unlinked spare inline when the pool has no pre-authed token.
+    await writeSpareCredentials();
   }
 
   // 1b. Wait for any just-registered PENDING accounts to flip ACTIVE (up to 3 min).

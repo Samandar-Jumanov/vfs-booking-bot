@@ -584,6 +584,10 @@ LIFT_CREDS_FILE = str(pathlib.Path(__file__).resolve().parent / ".lift-creds.jso
 # Shared pool file — all running auto_pipeline instances write here on login so
 # any instance can rotate to another account's token on a 429.
 ACCOUNT_POOL_FILE = str(pathlib.Path(__file__).resolve().parent / ".account-pool.json")
+# Spare-credentials file — written by orchestrator-worker.ts with ACTIVE+unlinked
+# account {email, password} entries.  When the pool has no pre-authed spare, the
+# pipeline reads one entry here, logs in inline, captures the token, and continues.
+SPARE_CREDENTIALS_FILE = str(pathlib.Path(__file__).resolve().parent / ".spare-credentials.json")
 
 
 def _pool_read() -> dict:
@@ -665,6 +669,34 @@ def _pool_next_available(current_email: str) -> dict | None:
     except Exception as e:
         log("POOL: next_available failed:", str(e)[:80])
     return None
+
+
+def _spare_creds_pop() -> dict | None:
+    """Atomically pop and return the first entry from .spare-credentials.json
+    (written by orchestrator-worker.ts with ACTIVE+unlinked {email, password}
+    entries).  Removes the consumed entry from the file so two concurrent
+    instances never pick the same account.  Returns None on any error or when
+    the file is empty / missing."""
+    try:
+        with open(SPARE_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+            creds: list = json.load(f)
+        if not creds or not isinstance(creds, list):
+            return None
+        entry = creds.pop(0)
+        # Write back the remaining entries atomically
+        tmp = SPARE_CREDENTIALS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(creds, f, indent=2)
+        os.replace(tmp, SPARE_CREDENTIALS_FILE)
+        if entry.get("email") and entry.get("password"):
+            log(f"SPARE: popped credential for {entry['email']} ({len(creds)} remaining in file)")
+            return entry
+        return None
+    except FileNotFoundError:
+        return None  # file not written by worker yet — expected
+    except Exception as e:
+        log("SPARE: _spare_creds_pop failed:", str(e)[:80])
+        return None
 
 
 def _pool_apply_account(entry: dict) -> None:
@@ -2065,15 +2097,63 @@ async def main():
                         # next cycle polls with the new account's token right away.
                         break  # break the for-subcat loop; outer while resumes
                     else:
-                        # No spare account available — fall back to original behaviour.
-                        _backoff_s = RATELIMIT_BACKOFF_MIN * 60
-                        log(f"POOL: no spare account available — "
-                            f"sleeping {RATELIMIT_BACKOFF_MIN}min as fallback")
-                        milestone("monitoring", email=EMAIL,
-                                  detail=f"check #{attempt} — rate-limited ({err_code or status}), "
-                                         f"no pool spare, silent backoff {RATELIMIT_BACKOFF_MIN}min")
-                        await asyncio.sleep(_backoff_s)
-                        break  # restart the for-subcat loop after sleep; outer while resumes
+                        # No pre-authed pool spare.  Before sleeping, try to log in
+                        # an ACTIVE+unlinked account whose credentials were pre-written
+                        # by orchestrator-worker.ts into .spare-credentials.json.
+                        _spare_rotated = False
+                        spare_cred = _spare_creds_pop()
+                        if spare_cred:
+                            global EMAIL, PASSWORD
+                            _prev_email_spare = EMAIL
+                            EMAIL = spare_cred["email"]
+                            PASSWORD = spare_cred["password"]
+                            log(f"SPARE: logging in {EMAIL} inline (no pool spare after 429)")
+                            milestone("monitoring", email=EMAIL,
+                                      detail=f"check #{attempt} — no pool spare, inline login of spare {EMAIL}")
+                            try:
+                                login_ok = await do_login(browser, page)
+                            except Exception as _le:
+                                log(f"SPARE: inline login raised: {str(_le)[:80]}")
+                                login_ok = False
+                            if login_ok:
+                                # Token capture fires when wizard loads its first
+                                # lift-api request; pre-register now so the pool
+                                # entry exists, then enter wizard to capture the token.
+                                _pool_register_self()
+                                try:
+                                    await enter_wizard(page)
+                                    _pool_register_self()  # re-register with token if now captured
+                                except Exception as _we:
+                                    log(f"SPARE: enter_wizard after inline login raised: {str(_we)[:80]}")
+                                next_from_spare = _pool_next_available(_prev_email_spare)
+                                if next_from_spare:
+                                    _pool_apply_account(next_from_spare)
+                                    log(f"SPARE: rotated {_prev_email_spare} → {EMAIL} — continuing poll immediately")
+                                    milestone("monitoring", email=EMAIL,
+                                              detail=f"check #{attempt} — spare logged in, rotated from {_prev_email_spare}")
+                                else:
+                                    # Already on the new account (EMAIL was set above);
+                                    # pool entry may be sparse (no token yet) but the
+                                    # next cycle will poll with the new session.
+                                    log(f"SPARE: now polling as {EMAIL} (token capture pending wizard walk)")
+                                _api_broke = False
+                                _spare_rotated = True
+                                break  # outer while resumes immediately with new account
+                            else:
+                                log(f"SPARE: inline login failed for {EMAIL} — reverting to {_prev_email_spare}")
+                                EMAIL = _prev_email_spare
+                                PASSWORD = ""  # clear — we don't know the original password here
+                        if not _spare_rotated:
+                            # No spare credential or inline login failed —
+                            # fall back to original sleep behaviour.
+                            _backoff_s = RATELIMIT_BACKOFF_MIN * 60
+                            log(f"POOL: no spare account available — "
+                                f"sleeping {RATELIMIT_BACKOFF_MIN}min as fallback")
+                            milestone("monitoring", email=EMAIL,
+                                      detail=f"check #{attempt} — rate-limited ({err_code or status}), "
+                                             f"no pool spare, silent backoff {RATELIMIT_BACKOFF_MIN}min")
+                            await asyncio.sleep(_backoff_s)
+                            break  # restart the for-subcat loop after sleep; outer while resumes
                 elif status == 403:
                     # Token/cookie challenge — NOT a hard rate-limit.  Trigger re-login
                     # after 1-2 consecutive 403s; short backoff; do NOT UI-walk.
