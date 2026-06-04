@@ -580,6 +580,109 @@ async def load_workd_codes(page):
 
 
 LIFT_CREDS_FILE = str(pathlib.Path(__file__).resolve().parent / ".lift-creds.json")
+# Shared pool file — all running auto_pipeline instances write here on login so
+# any instance can rotate to another account's token on a 429.
+ACCOUNT_POOL_FILE = str(pathlib.Path(__file__).resolve().parent / ".account-pool.json")
+
+
+def _pool_read() -> dict:
+    """Read .account-pool.json; returns {} on missing/corrupt file."""
+    try:
+        with open(ACCOUNT_POOL_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _pool_write(pool: dict) -> None:
+    """Atomically write pool dict to .account-pool.json (tmp-file rename)."""
+    tmp = ACCOUNT_POOL_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(pool, f, indent=2)
+        os.replace(tmp, ACCOUNT_POOL_FILE)
+    except Exception as e:
+        log("POOL: write failed:", str(e)[:80])
+
+
+def _pool_register_self() -> None:
+    """Write (or update) this account's entry in the pool file after a
+    successful login + auth capture. Idempotent — safe to call multiple times."""
+    if not (EMAIL and _LIFT_AUTH.get("authorize") and _LIFT_AUTH.get("clientsource")):
+        return
+    try:
+        pool = _pool_read()
+        pool[EMAIL] = {
+            "email": EMAIL,
+            "auth": {k: _LIFT_AUTH.get(k) for k in ("authorize", "clientsource", "route")},
+            "body": {
+                "countryCode": _LIFT_BODY.get("countryCode") or VFS_COUNTRY,
+                "missionCode": _LIFT_BODY.get("missionCode") or VFS_MISSION,
+                "vacCode": _LIFT_BODY.get("vacCode") or VFS_VAC,
+                "visaCategoryCode": _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT,
+            },
+            "rateLimitedUntil": pool.get(EMAIL, {}).get("rateLimitedUntil"),
+            "updatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        }
+        _pool_write(pool)
+        log(f"POOL: registered {EMAIL} → {ACCOUNT_POOL_FILE}")
+    except Exception as e:
+        log("POOL: register_self failed:", str(e)[:80])
+
+
+def _pool_mark_ratelimited(email: str, cooldown_minutes: int) -> None:
+    """Mark email as rate-limited until now + cooldown_minutes in the pool file."""
+    try:
+        import datetime as _dt
+        until = (_dt.datetime.utcnow() + _dt.timedelta(minutes=cooldown_minutes)).isoformat() + "Z"
+        pool = _pool_read()
+        if email in pool:
+            pool[email]["rateLimitedUntil"] = until
+            _pool_write(pool)
+            log(f"POOL: marked {email} rate-limited until {until}")
+    except Exception as e:
+        log("POOL: mark_ratelimited failed:", str(e)[:80])
+
+
+def _pool_next_available(current_email: str) -> dict | None:
+    """Return the pool entry for the next non-rate-limited account that is not
+    the current one, or None if no such account exists in the pool."""
+    try:
+        import datetime as _dt
+        now_str = _dt.datetime.utcnow().isoformat() + "Z"
+        pool = _pool_read()
+        for email, entry in pool.items():
+            if email == current_email:
+                continue
+            rl_until = entry.get("rateLimitedUntil")
+            if rl_until and rl_until > now_str:
+                continue  # still cooling down
+            if not entry.get("auth", {}).get("authorize"):
+                continue  # incomplete entry
+            return entry
+    except Exception as e:
+        log("POOL: next_available failed:", str(e)[:80])
+    return None
+
+
+def _pool_apply_account(entry: dict) -> None:
+    """Hot-swap the global auth state to the credentials from a pool entry.
+    Updates _LIFT_AUTH, _LIFT_BODY, and the module-level EMAIL global so all
+    subsequent API calls use the new account's token without a re-login."""
+    global EMAIL, _API_SOURCE_LOGGED
+    new_email = entry.get("email", "")
+    new_auth = entry.get("auth", {})
+    new_body = entry.get("body", {})
+    if new_email:
+        EMAIL = new_email
+    for k in ("authorize", "clientsource", "route"):
+        _LIFT_AUTH[k] = new_auth.get(k)
+    for k in ("countryCode", "missionCode", "vacCode", "visaCategoryCode"):
+        if new_body.get(k):
+            _LIFT_BODY[k] = new_body[k]
+    # Reset the "logged once" flag so the first call with the new token logs its source.
+    _API_SOURCE_LOGGED = False
+    log(f"POOL: swapped to account {EMAIL} (authorize={str(_LIFT_AUTH.get('authorize') or '')[:16]}…)")
 
 
 def _dump_lift_creds():
@@ -603,6 +706,9 @@ def _dump_lift_creds():
         with open(LIFT_CREDS_FILE, "w", encoding="utf-8") as f:
             json.dump(creds, f, indent=2)
         log(f"API: dumped live token + codes → {LIFT_CREDS_FILE} (for api_poller.py)")
+        # Also write to the shared account pool so other running instances (and this
+        # one after a 429 swap) can rotate to this account's token.
+        _pool_register_self()
     except Exception as e:
         log("API: failed to dump lift creds:", str(e)[:100])
 
@@ -1845,6 +1951,13 @@ async def main():
     log("LOGIN OK")
     milestone("logged_in", email=EMAIL)
     telegram(f"[bot] logged in {EMAIL}, monitoring Work D-visa slots…")
+    # Pre-register this account in the shared pool immediately after login.
+    # At this point auth headers may not yet be captured (they arrive when the
+    # wizard fires its first lift-api request), so the entry will be sparse.
+    # _dump_lift_creds() called later from _maybe_confirm_codes() will overwrite
+    # with the full token.  This early write lets a concurrent instance see this
+    # account exists in the pool even if it 429s before our codes confirm.
+    _pool_register_self()
 
     await enter_wizard(page)
     await shot(page, "pipe_wizard")
@@ -1920,21 +2033,40 @@ async def main():
                     api_403_streak = 0
                     continue  # next subcategory; do NOT break to UI
                 if status == 429 or err_code in (429201, 429202):
-                    # Hard per-IP rate-limit.  Do NOT fall back to the UI walk —
-                    # that would only burn MORE of the per-IP request budget.
-                    # Sleep silently for RATELIMIT_BACKOFF_MIN minutes, then resume.
-                    _backoff_s = RATELIMIT_BACKOFF_MIN * 60
+                    # Hard per-IP rate-limit.  Primary strategy: rotate to another
+                    # account's token from the shared pool so polling continues
+                    # WITHOUT a sleep.  Fall back to the original RATELIMIT_BACKOFF_MIN
+                    # sleep only when the pool has no other available account.
                     log(f"API: rate-limited (status={status}, code={err_code}) — "
-                        f"backing off {RATELIMIT_BACKOFF_MIN}min, NOT hitting VFS")
-                    milestone("monitoring", email=EMAIL,
-                              detail=f"check #{attempt} — rate-limited ({err_code or status}), "
-                                     f"silent backoff {RATELIMIT_BACKOFF_MIN}min")
+                        f"checking account pool for rotation")
                     api_fail_streak = 0  # don't also trigger re-login on 429
                     api_403_streak = 0
                     used_api = False
                     _api_broke = True   # suppress slot/booking path this cycle
-                    await asyncio.sleep(_backoff_s)
-                    break  # restart the for-subcat loop after sleep; outer while resumes
+
+                    # Mark the current account as cooling down in the pool file.
+                    _pool_mark_ratelimited(EMAIL, RATELIMIT_BACKOFF_MIN)
+
+                    next_acct = _pool_next_available(EMAIL)
+                    if next_acct:
+                        _prev_email = EMAIL
+                        _pool_apply_account(next_acct)
+                        log(f"POOL: rotated {_prev_email} → {EMAIL} — continuing poll immediately")
+                        milestone("monitoring", email=EMAIL,
+                                  detail=f"check #{attempt} — rotated from {_prev_email} after 429 ({err_code or status})")
+                        # Continue the outer while loop immediately (no sleep) so the
+                        # next cycle polls with the new account's token right away.
+                        break  # break the for-subcat loop; outer while resumes
+                    else:
+                        # No spare account available — fall back to original behaviour.
+                        _backoff_s = RATELIMIT_BACKOFF_MIN * 60
+                        log(f"POOL: no spare account available — "
+                            f"sleeping {RATELIMIT_BACKOFF_MIN}min as fallback")
+                        milestone("monitoring", email=EMAIL,
+                                  detail=f"check #{attempt} — rate-limited ({err_code or status}), "
+                                         f"no pool spare, silent backoff {RATELIMIT_BACKOFF_MIN}min")
+                        await asyncio.sleep(_backoff_s)
+                        break  # restart the for-subcat loop after sleep; outer while resumes
                 elif status == 403:
                     # Token/cookie challenge — NOT a hard rate-limit.  Trigger re-login
                     # after 1-2 consecutive 403s; short backoff; do NOT UI-walk.
