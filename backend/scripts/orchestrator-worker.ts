@@ -403,6 +403,10 @@ async function driveAccountReal(
     VFS_EMAIL: acct.email,
     VFS_PASSWORD: password,
     MONITOR_INTERVAL: process.env.MONITOR_INTERVAL ?? '30',
+    // API_MONITOR_INTERVAL: interval for the cheap in-browser API path. Hard-pinned
+    // to 30s here so a large MONITOR_INTERVAL in the Railway env (used for the slow
+    // UI path) does not stall the fast API poll cycle. Override via env if needed.
+    API_MONITOR_INTERVAL: process.env.API_MONITOR_INTERVAL ?? '30',
     BOOK_ENABLED: bookEnabled,
     BOOK_DRY_RUN: process.env.BOOK_DRY_RUN ?? '',
     WORKER_BRIDGED: '1',

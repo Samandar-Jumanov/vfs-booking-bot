@@ -9,7 +9,10 @@ run in this real browser (Cloudflare-happy).
 Run (PowerShell):
   $env:VFS_EMAIL="..."; $env:VFS_PASSWORD="..."; python nodriver-spike/auto_pipeline.py
 Env:
-  MONITOR_INTERVAL  seconds between slot re-checks (default 120)
+  MONITOR_INTERVAL  seconds between slot re-checks on the UI path (default 30)
+  API_MONITOR_INTERVAL  seconds between re-checks on the cheap API path (default 30).
+                    Separate from MONITOR_INTERVAL so a large UI interval does NOT
+                    stall the fast API cycle.  Usually leave at 30.
   BOOK_ENABLED      "1" to actually book on a slot (default off = monitor only, safe)
   BOOK_DRY_RUN      "1" to run the full booking flow up to the Review screen, take a
                     screenshot, and exit WITHOUT clicking Submit/Confirm. Useful for
@@ -61,6 +64,12 @@ PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
 DASHBOARD_URL = os.environ.get("VFS_DASHBOARD_URL", LOGIN_URL.replace("/login", "/dashboard"))
 MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "30"))
+# API_MONITOR_INTERVAL: seconds between checks when on the cheap API path (one in-
+# browser fetch, no wizard walk).  Defaults to 30 regardless of MONITOR_INTERVAL so
+# a large MONITOR_INTERVAL value (configured for the heavy UI path) does NOT make the
+# fast API path sleep for minutes.  Set to the same value as MONITOR_INTERVAL to
+# override.
+API_MONITOR_INTERVAL = int(os.environ.get("API_MONITOR_INTERVAL", "30"))
 # DIRECT_POLL=1 → monitor by calling CheckIsSlotAvailable as a DIRECT (cookieless,
 # no-browser) HTTP request replaying the captured token — the proven pattern from
 # working VFS monitors (khanrn/vfs-slots-api-monitor): the rate limit bites the
@@ -2073,13 +2082,16 @@ async def main():
         # (a fixed cadence is itself a bot signal and bunches requests). Once codes
         # are confirmed we're on the cheap API path (1 in-browser fetch/cycle);
         # before that each cycle is a heavy UI walk, which we cap below.
-        jitter = random.uniform(0, max(5.0, MONITOR_INTERVAL * 0.4))
+        # On the API path use API_MONITOR_INTERVAL (default 30s) so a large
+        # MONITOR_INTERVAL set for the UI path doesn't stall the fast API cycle.
+        interval_for_path = API_MONITOR_INTERVAL if used_api else MONITOR_INTERVAL
+        jitter = random.uniform(0, max(5.0, interval_for_path * 0.4))
         path_tag = "api" if used_api else "ui"
-        log(f"no slot — re-checking in ~{int(MONITOR_INTERVAL + jitter)}s ({path_tag})")
+        log(f"no slot — re-checking in ~{int(interval_for_path + jitter)}s ({path_tag})")
         # emit a per-check milestone so the backend sends a "no slots" Telegram
         # on EVERY check (operator wants a message each time, not a summary).
         milestone("monitoring", email=EMAIL, detail=f"check #{attempt} ({path_tag}) — Work D-visa, no slots")
-        await asyncio.sleep(MONITOR_INTERVAL + jitter)
+        await asyncio.sleep(interval_for_path + jitter)
 
         if used_api:
             # Cheap path: no UI reload needed — the next fetch re-reads availability
