@@ -64,6 +64,7 @@ PASSWORD = os.environ.get("VFS_PASSWORD", "")
 LOGIN_URL = os.environ.get("VFS_LOGIN_URL", "https://visa.vfsglobal.com/uzb/en/lva/login")
 DASHBOARD_URL = os.environ.get("VFS_DASHBOARD_URL", LOGIN_URL.replace("/login", "/dashboard"))
 MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "30"))
+UI_MONITOR_INTERVAL = int(os.environ.get("UI_MONITOR_INTERVAL", str(min(MONITOR_INTERVAL, 90))))
 # API_MONITOR_INTERVAL: seconds between checks when on the cheap API path (one in-
 # browser fetch, no wizard walk).  Defaults to 30 regardless of MONITOR_INTERVAL so
 # a large MONITOR_INTERVAL value (configured for the heavy UI path) does NOT make the
@@ -621,6 +622,7 @@ def _pool_register_self() -> None:
                 "vacCode": _LIFT_BODY.get("vacCode") or VFS_VAC,
                 "visaCategoryCode": _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT,
             },
+            "codesConfirmed": _CODES_CONFIRMED,
             "rateLimitedUntil": pool.get(EMAIL, {}).get("rateLimitedUntil"),
             "updatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
         }
@@ -669,7 +671,7 @@ def _pool_apply_account(entry: dict) -> None:
     """Hot-swap the global auth state to the credentials from a pool entry.
     Updates _LIFT_AUTH, _LIFT_BODY, and the module-level EMAIL global so all
     subsequent API calls use the new account's token without a re-login."""
-    global EMAIL, _API_SOURCE_LOGGED
+    global EMAIL, _API_SOURCE_LOGGED, _CODES_CONFIRMED
     new_email = entry.get("email", "")
     new_auth = entry.get("auth", {})
     new_body = entry.get("body", {})
@@ -682,6 +684,10 @@ def _pool_apply_account(entry: dict) -> None:
             _LIFT_BODY[k] = new_body[k]
     # Reset the "logged once" flag so the first call with the new token logs its source.
     _API_SOURCE_LOGGED = False
+    if entry.get("codesConfirmed") and new_body.get("vacCode") and new_body.get("visaCategoryCode"):
+        _CODES_CONFIRMED = True
+    else:
+        _CODES_CONFIRMED = False
     log(f"POOL: swapped to account {EMAIL} (authorize={str(_LIFT_AUTH.get('authorize') or '')[:16]}…)")
 
 
@@ -2051,6 +2057,7 @@ async def main():
                     if next_acct:
                         _prev_email = EMAIL
                         _pool_apply_account(next_acct)
+                        _api_broke = False
                         log(f"POOL: rotated {_prev_email} → {EMAIL} — continuing poll immediately")
                         milestone("monitoring", email=EMAIL,
                                   detail=f"check #{attempt} — rotated from {_prev_email} after 429 ({err_code or status})")
@@ -2216,7 +2223,7 @@ async def main():
         # before that each cycle is a heavy UI walk, which we cap below.
         # On the API path use API_MONITOR_INTERVAL (default 30s) so a large
         # MONITOR_INTERVAL set for the UI path doesn't stall the fast API cycle.
-        interval_for_path = API_MONITOR_INTERVAL if used_api else MONITOR_INTERVAL
+        interval_for_path = API_MONITOR_INTERVAL if used_api else UI_MONITOR_INTERVAL
         jitter = random.uniform(0, max(5.0, interval_for_path * 0.4))
         path_tag = "api" if used_api else "ui"
         log(f"no slot — re-checking in ~{int(interval_for_path + jitter)}s ({path_tag})")
