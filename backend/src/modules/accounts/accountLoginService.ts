@@ -8,10 +8,12 @@ import { solveTurnstile } from '@modules/captcha/twoCaptcha';
 import { logEvent } from '@modules/logs/logger';
 import { sendToExtension } from '@modules/websocket/ws.server';
 import { decrypt } from '@utils/crypto';
+import { getSetting } from '@modules/settings/settings.service';
 import { runActivation } from './accountActivationService';
 
 const LOGIN_TIMEOUT_MS = 90_000;
 const CRON_STALE_MS = 10 * 60 * 60 * 1000;
+const DEFAULT_ACCOUNT_COOLDOWN_MS = 60 * 60 * 1000; // 60min for a 429001 account flag
 
 type LoginResult =
   | { success: true; accountId: string; email: string; lastWarmedAt: Date | null }
@@ -181,7 +183,7 @@ export function resolveLoginFieldsFilled(correlationId: string, captchaSolved: b
   });
 }
 
-export function resolveLoginFailed(correlationId: string, reason: string): void {
+export async function resolveLoginFailed(correlationId: string, reason: string): Promise<void> {
   const pending = pendingLogins.get(correlationId);
   if (!pending) return;
   pendingLogins.delete(correlationId);
@@ -190,6 +192,30 @@ export function resolveLoginFailed(correlationId: string, reason: string): void 
     accountId: pending.accountId,
     correlationId,
   });
+
+  // VFS account-level throttle (429001) at login — quarantine the account so the
+  // login cron / monitor / orchestrator stop re-picking it and re-burning it.
+  // It's account heat, not an IP issue, so this is a status change only (no proxy
+  // rotation here). The account auto-returns to ACTIVE after the cooldown via the
+  // existing expired-COOLDOWN reactivation sweeps.
+  if (/429001|account.*lock|too many attempts/i.test(reason)) {
+    const cooldownMs = (await getSetting<number>('account.cooldownMs')) ?? DEFAULT_ACCOUNT_COOLDOWN_MS;
+    await prisma.vfsAccount.update({
+      where: { id: pending.accountId },
+      data: {
+        status: AccountStatus.COOLDOWN,
+        cooldownUntil: new Date(Date.now() + cooldownMs),
+      },
+    }).catch((err) => {
+      logEvent('error', EventType.BOOKING_FAILED,
+        `[LOGIN] failed to quarantine flagged account ${pending.email}: ${(err as Error).message}`,
+        { accountId: pending.accountId });
+    });
+    logEvent('warn', EventType.BOOKING_FAILED,
+      `[LOGIN] account ${pending.email} flagged (429001) → COOLDOWN ${Math.round(cooldownMs / 60000)}m`,
+      { accountId: pending.accountId });
+  }
+
   pending.resolve({
     success: false,
     accountId: pending.accountId,
