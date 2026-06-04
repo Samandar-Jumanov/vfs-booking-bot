@@ -228,44 +228,37 @@ PUT    /api/settings/captcha
 
 ---
 
-## Current State & Known Issues (updated 2026-05-29)
+## Current State & Known Issues (updated 2026-06-03)
 
-Scope is **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer pool accounts. Architecture: Node/TS backend on Railway + Next.js frontend on Railway + **nodriver** Python spike (`nodriver-spike/auto_pipeline.py`) for hands-off login+booking on the operator's UZ machine. Chrome MV3 extension still runs the slot-monitor/auth-sniffer. Package manager is **npm** (not pnpm).
+Scope: **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer accounts. Architecture: Node/TS backend + Next.js dashboard on **Railway**; **nodriver** Python engine (`nodriver-spike/auto_pipeline.py`) for hands-off register/login/monitor/book, driven by `backend/scripts/orchestrator-worker.ts`. Package manager is **npm**.
 
-**Build & test status (verified 2026-05-29):**
-- Backend TypeScript (`npm run build`) — **clean** (exit 0, zero errors).
-- Frontend Next.js build — **clean** (16 static routes, 4 minor lint warnings only).
-- Python spikes (`py_compile`) — **clean**.
-- Unit tests: **166/166 green**. The previously failing `monitor.service.test.ts` test was stale — `selectFreshWatcherAccount` now correctly stamps `lastUsedAt` on account selection (round-robin pacing); test expectation updated to match.
-- ESLint: 42 cosmetic errors (unused vars, empty blocks) — no runtime or logic impact.
-- **Known footgun: `npm run test:e2e:dry` and worker `SIMULATE=1` both require a live Railway `DATABASE_URL`** — they read/write the prod DB even in "dry/simulate" mode. No safe local integration-test path exists yet.
+**HOSTING — deployed + running:** the engine (worker + visible Chrome) runs on an **Eskiz Windows Server 2022 VPS in Tashkent** (`45.138.159.150`, ~$30/mo). A UZ datacenter IP beats Datadome; **no proxy**. Backend + dashboard on Railway. ⚠️ The worker runs **locally on the VPS** — pushing to Railway does NOT update it; `git pull` + **restart the worker** on the VPS to load new code. Access via RDP (`.\Administrator`) or VMmanager VNC.
+⚠️ **24/7 unattended needs an active desktop session:** the bot drives a VISIBLE Chrome (headless is blocked by VFS), which is suspended when RDP disconnects or the box sleeps. Set `powercfg /change *-timeout-ac 0` and keep the session alive with `tscon <id> /dest:console` before disconnecting. See `ops/ADD_BOX.md`.
 
-**Working (proven):**
-- **nodriver hands-off login**: `auto_pipeline.py` auto-passes Cloudflare Turnstile without the extension or `chrome.debugger`. Login→dashboard fully automated on a clean IP + fresh profile.
-- **Auto-register + auto-activate**: `register_spike.py` registers hands-off; backend fetches Mailsac activation link and visits it via extension (clean UZ IP). Automated only for **Mailsac** pool emails (no API access to customers' personal inboxes).
-- Slot monitoring + authenticated polling. lift-api auth = `authorize` + `clientsource` custom headers (NOT `Authorization`); captured via `chrome.webRequest` in the extension service-worker.
-- Booking **Steps 1–5** coded in `auto_pipeline.py`:
-  - Step 2 = passport-image upload (VFS OCR-extracts applicant identity from the bio-page scan).
-  - **Step 3 = OTP gate: `mailsac_otp_code()` IS wired at `auto_pipeline.py:486`** — polls Mailsac and fills the OTP automatically. Blocker is **`MAILSAC_API_KEY`** not being set: if missing, `mailsac_otp_code()` times out after 120s and booking stalls at Step 3.
-  - Step 5 Submit is reachable and **`BOOK_DRY_RUN`-guarded** (set `BOOK_DRY_RUN=1` to screenshot the review screen without submitting). **Still unvalidated on a live slot.**
-- Full chain **create→activate→login→monitor** proven live (2026-05-28). Booking submit gated on a real slot appearing.
-- Orchestrator worker (`backend/scripts/orchestrator-worker.ts`) wires the Python spikes to the Railway backend via MILESTONE lines. `SIMULATE=1` disables VFS browser hits but still requires a live prod DB (see footgun above).
+**Monitoring = lift-api direct (no UI walk).** After login the engine enters the wizard ONCE to capture auth headers (`authorize`/`clientsource`) + the real category codes, then polls `CheckIsSlotAvailable` directly. **`error.code 1035` = "No slots available"** (a valid negative, not a block). The UI/wizard walk is only a fallback. OCMA codes: Work-D Uzbek `LSHMEDCL`, OCMA Uzbek `LNGOTHR`; vac `TAS`, parent `ZaremaT`.
 
-**Active constraint — operator-assisted login for degraded accounts:**
-- The fully hands-off nodriver path works for fresh accounts/IPs. For accounts flagged by heavy testing (poisoned `cf_clearance`), the operator logs in manually in a plain Chrome tab; the bot takes over for monitoring/booking.
-- Fresh Chrome profile + clean UZ residential IP always passes Turnstile (manual or nodriver).
+**Working / proven (2026-06-03, live on the VPS):**
+- Hands-off **register → activate (Mailsac link, no extension) → login (auto-Turnstile) → monitor → detect** — full chain, single "Start".
+- **OCMA detection proof DELIVERED to client** via Telegram (`ocma_available` milestone + `telegram(force=True)`).
+- **OCMA = detect+alert only (never booked); Work-D = book** (the real target). Per-category split in the monitor loop.
+- **drive-by-linked:** worker drives only accounts holding a client `profileIds` (idle spares rest); passport injected from the DB (`Profile.passportImageEnc` → `.passport-cache/<id>.png`).
+- **auto-rotate on `429001`:** moves the client's profile to a ready spare + quarantines the blocked account (cap 2 swaps/run); only on account-blocks, not IP-blocks.
+- **one-worker lock** (DB `worker_lock[_${BOX_ID}]`, heartbeat) — refuses a 2nd instance; `BOX_ID` namespaces it per box.
+- **lean polling:** drops irrelevant Tajik categories (`NATIONALITY_FILTER` default `uzbek|turkmen`) → 1 call/cycle (real) / 2 (demo). On `429/429201` → silent `RATELIMIT_BACKOFF_MIN` (default 20m) backoff, on `403` → re-login refresh; neither falls back to the UI hammer.
+- Dashboard operator controls (Start/Stop, engine light, Stop countdown); block-alert reason codes + Telegram photo.
 
-**Gotcha that cost a full day:** the operator's **VPN** poisons the BrightData proxy source IP → BrightData returns `ip_blacklisted` → surfaces as VFS "Session Expired". **Check VPN + BrightData IP-allowlist BEFORE blaming Datadome/VFS.**
+**KEY CONSTRAINT (measured 2026-06-03):** the VFS per-IP limit is a **cumulative budget of ~10 `CheckIsSlotAvailable` calls per ~2h**, speed-independent (`429201`, sliding ~2h, resets on ANY request). The lift token is **IP/cookie-bound** (direct cookieless replay = 403). ⟹ one IP ≈ ~10 checks/2h and CANNOT sustain continuous monitoring; **fast/continuous coverage requires MULTIPLE UZ IPs** (each its own VPS+session, staggered). See `ops/MULTI_BOX_DESIGN.md` + `ops/ADD_BOX.md`.
 
-**Proxy is now OPTIONAL** — the operator is in UZ on a clean residential IP (`84.54.x`, Tashkent), so VFS loads directly. Launcher (`launch-bot-chrome.ps1`) env flags:
-- `VFS_USE_PROXY=true` → route VFS through BrightData (only if NOT in UZ). Default **off**.
-- `VFS_FRESH_PROFILE=true` → launch a brand-new Chrome profile (clean Cloudflare cookies; defeats a flagged profile).
+**Remaining blockers:**
+1. **Real Work-D booking-to-confirmation NEVER reached** — no live Work-D slot has appeared (Work-D = 1035). Booking Steps 1–5 are coded + walked (passport→OCR→fields→OTP→submit) but the final submit on a real slot is the one unproven product unknown. OCMA is detect-only so it doesn't exercise submit.
+2. **Multi-box coordination not built** — per-box lock (`BOX_ID`) exists, but running N boxes still needs work-partitioning (Model 1) or monitor-fan-out (Model 2) so they don't double-drive an account. Today: manual partition via `TARGET_EMAIL` per box.
+3. **Mailsac free tier 429s** on activation/OTP → paid tier for reliable hands-off.
+4. Backend `/api/pipeline/event` step enum lacks `ocma_available`/`activated` → cosmetic HTTP 400 (account still persists; Telegram still fires).
 
-**Backend env flags (default OFF — see `backend/.env.example`):**
-- `LOGIN_CRON_ENABLED` — the 6-hourly mass-login refresh; OFF because it logs in every stale account at once and triggers VFS **429001** "Access Restricted".
-- `NOTIFY_BOOKING_FAILURES` — Telegram/email failure alerts; OFF so dev test fires don't spam the operator/client.
+**Launcher env (`launch-worker.ps1` / orchestrator-worker):** `WORKER_BOOK=1` arms real submit (maps to `BOOK_ENABLED`; default = DRY-RUN). `PROVE_OCMA=1` also monitors+reports OCMA (demo). `BOOKING_ONLY=1` skips pool top-up (drive existing ACTIVE only). `WORKER_MODE=pool_builder` = paced registration only. `TARGET_EMAIL` pins to one account. `BOX_ID` (multi-box lock). `NATIONALITY_FILTER` (default `uzbek|turkmen`). `RATELIMIT_BACKOFF_MIN` (default 20). `POOL_MIN`, `MONITOR_INTERVAL`, `MAX_REG_PER_DAY`. ⚠️ `launch-worker.ps1` loads `backend/.env.worker` AFTER shell vars, so values in that file OVERRIDE `$env:` — edit the file for `POOL_MIN` etc.
+⚠️ **pool_builder over-registers** (spare-count quirk) — watch `MAX_REG_PER_DAY`; heavy registration floods can flag the IP.
 
-**Diagnostic/trigger scripts** (`backend/scripts/`, run via `railway run --service backend npx tsx scripts/<x>.ts`): `trigger-auto-login` (TARGET_ID), `trigger-register`, `trigger-recover` (activate PENDING via Mailsac), `trigger-booking`, `verify-proxy-exit.js`, `verify-vfs-reachable.js`.
+**`ops/` folder:** `ADD_BOX.md` (new-box runbook + keep-alive), `MULTI_BOX_DESIGN.md`, `DEPLOY_VPS.md`, `setup-vps.ps1`, `install/uninstall-autostart.ps1`, `CLIENT_OPERATION.md`. Diagnostics: `nodriver-spike/rate_probe.py` (per-IP ceiling), `backend/scripts/get-account-pw.ts` (decrypt account pw).
 
 ---
 
