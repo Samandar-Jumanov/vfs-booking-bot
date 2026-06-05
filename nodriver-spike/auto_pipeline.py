@@ -2216,6 +2216,7 @@ async def main():
 
         slot = None          # truthy → a slot to book (UI subcat text OR API earliestDate)
         used_api = False     # did the cheap API path resolve this cycle?
+        _ip_rest_skip = False  # set when an IP-level 429 forces a silent rest → skip UI walk this cycle
 
         # GUARANTEE CORRECT CODES: until the wizard has fired its OWN
         # CheckIsSlotAvailable (so we sniff the real vac/visacat codes off its POST
@@ -2268,17 +2269,36 @@ async def main():
                     api_fail_streak = 0
                     api_403_streak = 0
                     continue  # next subcategory; do NOT break to UI
-                if status == 429 or err_code in (429201, 429202):
-                    # Hard per-IP rate-limit.  Primary strategy: rotate to another
-                    # account's token from the shared pool so polling continues
-                    # WITHOUT a sleep.  Fall back to the original RATELIMIT_BACKOFF_MIN
-                    # sleep only when the pool has no other available account.
-                    log(f"API: rate-limited (status={status}, code={err_code}) — "
-                        f"checking account pool for rotation")
+                if status == 429 or err_code in (429201, 429202, 429001):
                     api_fail_streak = 0  # don't also trigger re-login on 429
                     api_403_streak = 0
                     used_api = False
                     _api_broke = True   # suppress slot/booking path this cycle
+
+                    # CRITICAL: 429201 / 429202 / generic-429 are IP/SESSION-level
+                    # throttles.  Rotating accounts CANNOT clear them — the IP itself
+                    # is blocked, and EVERY further request (rotate / inline-login /
+                    # register) RESETS the sliding ~2h window, so churning keeps the IP
+                    # blocked forever (the "429 death spiral" observed in the logs).
+                    # The ONLY cure is to STOP making requests and rest.  Account
+                    # rotation is valid ONLY for 429001 (account-level "Access
+                    # Restricted for User ID"), where the IP is fine and swapping to
+                    # another account on the same IP is the correct move.
+                    if err_code != 429001:
+                        _pool_mark_ratelimited(EMAIL, RATELIMIT_BACKOFF_MIN)
+                        _backoff_s = max(RATELIMIT_BACKOFF_MIN, 20) * 60  # floor 20min — never tight-loop
+                        _ip_rest_skip = True  # do NOT run the UI walk after this (truly silent rest)
+                        log(f"API: IP-level rate-limit ({err_code or status}) — RESTING "
+                            f"{int(_backoff_s/60)}min, NO account rotation / NO UI walk "
+                            f"(swapping can't fix an IP block and only keeps it blocked)")
+                        milestone("monitoring", email=EMAIL,
+                                  detail=f"check #{attempt} — IP rate-limit ({err_code or status}); "
+                                         f"silent rest {int(_backoff_s/60)}min (no churn)")
+                        await asyncio.sleep(_backoff_s)
+                        break  # outer while resumes after the rest — no churn, no UI walk
+
+                    # ── account-level block (429001): rotation IS valid (IP is fine) ──
+                    log(f"API: account block (429001) — rotating to another account")
 
                     # Mark the current account as cooling down in the pool file.
                     _pool_mark_ratelimited(EMAIL, RATELIMIT_BACKOFF_MIN)
@@ -2537,7 +2557,7 @@ async def main():
         # When _api_all_clear, log explicitly so we can later compare API vs UI output.
         if _api_all_clear:
             log("API: all subcategories returned 1035 (no slots) — running UI cross-check for safety")
-        if not used_api or slot or _api_all_clear:
+        if (not used_api or slot or _api_all_clear) and not _ip_rest_skip:
             try:
                 ui_slot = await select_route(page)
             except Exception as _se:
