@@ -2537,11 +2537,10 @@ async def main():
             if workd_slot:
                 slot = workd_slot
 
-            # Safety-net flag: API returned all-1035 (clean no-slot across every
-            # subcategory, no break, no real error).  We keep the UI cross-check
-            # for now so we can compare API vs UI in logs and confirm whether the
-            # API surfaces OCMA the same way the wizard does.  Once logs show
-            # agreement we can drop the UI walk for the all-clear case.
+            # Safety-net flag: API returned a clean no-slot response across every
+            # subcategory, no break, no real error. Treat this as authoritative:
+            # do not run the heavy UI wizard cross-check on normal no-slot cycles,
+            # because that extra browser traffic is a prime trigger for VFS 429s.
             _api_all_clear = (used_api and not _api_broke and not slot and not ocma_avail)
         elif not auth_captured():
             log("API: auth headers not captured yet — using UI path")
@@ -2552,12 +2551,11 @@ async def main():
 
         # FALLBACK / BACKWARD-COMPAT: run the existing UI slot check when:
         #   a) API didn't resolve this cycle (used_api=False or _api_broke), OR
-        #   b) API found a slot (select_route needed to leave wizard in bookable state), OR
-        #   c) API returned all-1035 clean (_api_all_clear) — UI cross-check safety net.
-        # When _api_all_clear, log explicitly so we can later compare API vs UI output.
+        #   b) API found a slot (select_route needed to leave wizard in bookable state).
+        # A clean API no-slot result skips the UI path to keep request volume low.
         if _api_all_clear:
-            log("API: all subcategories returned 1035 (no slots) — running UI cross-check for safety")
-        if (not used_api or slot or _api_all_clear) and not _ip_rest_skip:
+            log("API: clean no-slot result across relevant subcategories - skipping UI cross-check")
+        if (not used_api or slot) and not _ip_rest_skip:
             try:
                 ui_slot = await select_route(page)
             except Exception as _se:
