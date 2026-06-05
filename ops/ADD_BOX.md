@@ -103,6 +103,7 @@ python --version   # confirm 3.12.x
 
 python -m pip install --upgrade pip
 python -m pip install nodriver
+python -m pip install tzdata          # needed by zoneinfo on Windows for BURST_TZ
 ```
 
 > **Set PYTHON_BIN to the direct exe path** (see Step 5). The worker launches Python via

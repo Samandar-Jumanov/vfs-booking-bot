@@ -207,6 +207,111 @@ interface DriveAccount {
   pollingRole: string;
 }
 
+const PROFILE_SELECT = {
+  id: true,
+  fullName: true,
+  passportNumberEnc: true,
+  dobEnc: true,
+  passportExpiry: true,
+  nationality: true,
+  email: true,
+  phone: true,
+  passportImageEnc: true,
+} as const;
+
+type DriveProfile = Awaited<ReturnType<typeof loadDriveProfile>>;
+
+function dateOnly(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function splitProfileName(fullName: string): { firstName: string; lastName: string } {
+  const [firstName, ...rest] = (fullName || 'Test User').trim().split(/\s+/);
+  return { firstName, lastName: rest.join(' ').trim() || firstName };
+}
+
+async function loadDriveProfile(profileIds: string[]): Promise<{
+  id: string;
+  fullName: string;
+  passportNumberEnc: string;
+  dobEnc: string;
+  passportExpiry: Date;
+  nationality: string;
+  email: string;
+  phone: string;
+  passportImageEnc: string | null;
+} | null> {
+  if (profileIds.length === 0) return null;
+  return prisma.profile.findFirst({
+    where: { id: { in: profileIds }, isActive: true },
+    select: PROFILE_SELECT,
+  });
+}
+
+function addProfileEnv(spawnEnv: Record<string, string>, profile: NonNullable<DriveProfile>, prefix = 'PROFILE'): void {
+  const { firstName, lastName } = splitProfileName(profile.fullName);
+  let passportPlain = '';
+  let dobPlain = '';
+  try { passportPlain = decryptField(profile.passportNumberEnc); } catch { /* leave empty */ }
+  try { dobPlain = decryptField(profile.dobEnc); } catch { /* leave empty */ }
+
+  // Keep the historical FIRSTNAME/LASTNAME spelling and also provide the Python
+  // FIRST_NAME/LAST_NAME spelling used by auto_pipeline.py.
+  spawnEnv[`${prefix}_FIRSTNAME`] = firstName;
+  spawnEnv[`${prefix}_LASTNAME`] = lastName;
+  spawnEnv[`${prefix}_FIRST_NAME`] = firstName;
+  spawnEnv[`${prefix}_LAST_NAME`] = lastName;
+  spawnEnv[`${prefix}_DOB`] = dobPlain;
+  spawnEnv[`${prefix}_NATIONALITY`] = profile.nationality;
+  spawnEnv[`${prefix}_PASSPORT`] = passportPlain;
+  spawnEnv[`${prefix}_EXPIRY`] = dateOnly(profile.passportExpiry);
+  spawnEnv[`${prefix}_EMAIL`] = profile.email;
+  spawnEnv[`${prefix}_CONTACT`] = profile.phone;
+}
+
+function writePassportImage(profile: NonNullable<DriveProfile>, envKey: string, spawnEnv: Record<string, string>): string | null {
+  if (!profile.passportImageEnc) return null;
+  try {
+    const imageBase64 = decryptField(profile.passportImageEnc);
+    const cacheDir = path.join(__dirname, '..', '.passport-cache');
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+    const imagePath = path.join(cacheDir, `${profile.id}.png`);
+    fs.writeFileSync(imagePath, Buffer.from(imageBase64, 'base64'));
+    spawnEnv[envKey] = imagePath;
+    return imagePath;
+  } catch (imgErr) {
+    log(`WARN: failed to write passport image for profile ${profile.id}: ${(imgErr as Error).message}`);
+    return null;
+  }
+}
+
+async function findBookerPeer(watcher: DriveAccount): Promise<DriveAccount | null> {
+  const now = new Date();
+  if (watcher.profileIds.length > 0) {
+    const shared = await prisma.vfsAccount.findFirst({
+      where: {
+        id: { not: watcher.id },
+        status: 'ACTIVE',
+        pollingRole: 'BOOKER',
+        lifecycleState: { notIn: ['BLOCKED', 'BOOKED', 'RESTRICTED'] },
+        profileIds: { hasSome: watcher.profileIds },
+        OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }],
+      },
+      select: {
+        id: true,
+        email: true,
+        encryptedPassword: true,
+        lifecycleState: true,
+        profileIds: true,
+        pollingRole: true,
+      },
+      orderBy: { lastAttemptAt: 'asc' },
+    });
+    if (shared) return shared;
+  }
+  return findReadySpare(watcher.id);
+}
+
 function spawnAndWatch(
   cmd: string,
   args: string[],
@@ -391,12 +496,7 @@ async function driveAccountReal(
       : process.env.BOOK_ENABLED ?? '';
 
   // Load profile if linked (same as local-runner.ts)
-  const profile =
-    acct.profileIds.length > 0
-      ? await prisma.profile.findFirst({
-          where: { id: { in: acct.profileIds }, isActive: true },
-        })
-      : null;
+  const profile = await loadDriveProfile(acct.profileIds);
 
   const spawnEnv: Record<string, string> = {
     PYTHONUTF8: '1',
@@ -425,15 +525,7 @@ async function driveAccountReal(
   }
 
   if (profile) {
-    const [firstName, ...rest] = (profile.fullName ?? 'Test User').trim().split(/\s+/);
-    let passportPlain = '';
-    try { passportPlain = decryptField(profile.passportNumberEnc); } catch { /* leave empty */ }
-    spawnEnv['PROFILE_FIRSTNAME'] = firstName;
-    spawnEnv['PROFILE_LASTNAME'] = rest.join(' ').trim() || firstName;
-    spawnEnv['PROFILE_NATIONALITY'] = profile.nationality;
-    spawnEnv['PROFILE_PASSPORT'] = passportPlain;
-    spawnEnv['PROFILE_EMAIL'] = profile.email;
-    spawnEnv['PROFILE_CONTACT'] = profile.phone;
+    addProfileEnv(spawnEnv, profile);
 
     // Write decrypted passport BIO-page image to a temp file so Python uploads the correct scan.
     if (profile.passportImageEnc) {
@@ -450,6 +542,31 @@ async function driveAccountReal(
         // PASSPORT_IMAGE left unset — Python falls back to its default hardcoded path
       }
     }
+  }
+
+  const booker = await findBookerPeer(acct);
+  if (booker) {
+    try {
+      const bookerPassword = decryptField(booker.encryptedPassword);
+      const bookerProfile = await loadDriveProfile(booker.profileIds.length > 0 ? booker.profileIds : acct.profileIds);
+      if (bookerPassword && bookerProfile) {
+        spawnEnv['BOOKER_EMAIL'] = booker.email;
+        spawnEnv['BOOKER_PASSWORD'] = bookerPassword;
+        spawnEnv['BOOK_ENABLED'] = process.env.BOOK_ENABLED ?? '';
+        addProfileEnv(spawnEnv, bookerProfile, 'BOOKER_PROFILE');
+        const bookerImagePath = writePassportImage(bookerProfile, 'BOOKER_PASSPORT_IMAGE', spawnEnv);
+        if (!bookerImagePath && spawnEnv['PASSPORT_IMAGE']) {
+          spawnEnv['BOOKER_PASSPORT_IMAGE'] = spawnEnv['PASSPORT_IMAGE'];
+        }
+        log(`BOOKER: paired ${booker.email} with watcher ${acct.email}`);
+      } else {
+        log('BOOKER: none available — watcher-only');
+      }
+    } catch (e) {
+      log(`BOOKER: peer unusable (${(e as Error).message}) — watcher-only`);
+    }
+  } else {
+    log('BOOKER: none available — watcher-only');
   }
 
   log(`driving ${acct.email} (role=${acct.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, book=${bookEnabled === '1'})`);
@@ -865,7 +982,7 @@ async function driveRun(runId: string): Promise<void> {
     // the spare is queued into this same run after the normal stagger.
     where: targetEmail
       ? { status: 'ACTIVE', email: targetEmail, lifecycleState: { not: 'BOOKED' } }
-      : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false } },
+      : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false }, pollingRole: { not: 'BOOKER' } },
     select: {
       id: true,
       email: true,

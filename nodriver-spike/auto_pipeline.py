@@ -42,6 +42,11 @@ import time
 import urllib.error
 import urllib.request
 import urllib.parse
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -71,6 +76,23 @@ UI_MONITOR_INTERVAL = int(os.environ.get("UI_MONITOR_INTERVAL", str(min(MONITOR_
 # fast API path sleep for minutes.  Set to the same value as MONITOR_INTERVAL to
 # override.
 API_MONITOR_INTERVAL = int(os.environ.get("API_MONITOR_INTERVAL", "30"))
+BURST_WINDOWS = os.environ.get("BURST_WINDOWS", "")
+BURST_INTERVAL = int(os.environ.get("BURST_INTERVAL", "3"))
+IDLE_INTERVAL = int(os.environ.get("IDLE_INTERVAL", "300"))
+BURST_TZ = os.environ.get("BURST_TZ", "Asia/Tashkent")
+BOOKER_EMAIL = os.environ.get("BOOKER_EMAIL", "")
+BOOKER_PASSWORD = os.environ.get("BOOKER_PASSWORD", "")
+BOOKER_PASSPORT_IMAGE = os.environ.get("BOOKER_PASSPORT_IMAGE", "")
+BOOKER_PROFILE = {
+    "firstName": os.environ.get("BOOKER_PROFILE_FIRST_NAME", os.environ.get("BOOKER_PROFILE_FIRSTNAME", "")),
+    "lastName": os.environ.get("BOOKER_PROFILE_LAST_NAME", os.environ.get("BOOKER_PROFILE_LASTNAME", "")),
+    "dob": os.environ.get("BOOKER_PROFILE_DOB", ""),
+    "nationality": os.environ.get("BOOKER_PROFILE_NATIONALITY", ""),
+    "passport": os.environ.get("BOOKER_PROFILE_PASSPORT", ""),
+    "expiry": os.environ.get("BOOKER_PROFILE_EXPIRY", ""),
+}
+_BURST_TZ_WARNED = False
+_BURST_WINDOWS_LOGGED = False
 # DIRECT_POLL=1 → monitor by calling CheckIsSlotAvailable as a DIRECT (cookieless,
 # no-browser) HTTP request replaying the captured token — the proven pattern from
 # working VFS monitors (khanrn/vfs-slots-api-monitor): the rate limit bites the
@@ -225,6 +247,62 @@ def milestone(step, **kw):
 
 def log(*a):
     print("[PIPE]", *a, flush=True)
+
+
+def _parse_burst_windows(raw=None):
+    raw = BURST_WINDOWS if raw is None else raw
+    windows = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part or "-" not in part:
+            continue
+        start, end = [p.strip() for p in part.split("-", 1)]
+        try:
+            sh, sm = [int(x) for x in start.split(":", 1)]
+            eh, em = [int(x) for x in end.split(":", 1)]
+        except Exception:
+            continue
+        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+            continue
+        windows.append((sh * 60 + sm, eh * 60 + em))
+    return windows
+
+
+_BURST_WINDOWS_PARSED = _parse_burst_windows()
+
+
+def _burst_interval_now(now=None):
+    """Return BURST_INTERVAL/IDLE_INTERVAL inside configured local windows.
+    None means BURST_WINDOWS is empty/invalid and the legacy path interval remains
+    in control. One IP still has the same VFS request budget; bursting only spends
+    it inside the configured release windows, and the existing 429 rotation/backoff
+    chain remains responsible for exhaustion."""
+    global _BURST_TZ_WARNED, _BURST_WINDOWS_LOGGED
+    if not _BURST_WINDOWS_PARSED:
+        return None
+    if not _BURST_WINDOWS_LOGGED:
+        _BURST_WINDOWS_LOGGED = True
+        log("BURST: windows parsed:", _BURST_WINDOWS_PARSED, "tz=", BURST_TZ,
+            "burst=", BURST_INTERVAL, "idle=", IDLE_INTERVAL)
+    if now is None:
+        try:
+            if ZoneInfo is None:
+                raise RuntimeError("zoneinfo unavailable")
+            now = datetime.now(ZoneInfo(BURST_TZ))
+        except Exception as e:
+            if not _BURST_TZ_WARNED:
+                _BURST_TZ_WARNED = True
+                log(f"BURST: timezone {BURST_TZ!r} unavailable ({str(e)[:80]}) - using local time")
+            now = datetime.now()
+    cur = now.hour * 60 + now.minute
+    for start, end in _BURST_WINDOWS_PARSED:
+        if start <= end:
+            in_window = start <= cur < end
+        else:
+            in_window = cur >= start or cur < end
+        if in_window:
+            return BURST_INTERVAL
+    return IDLE_INTERVAL
 
 
 def _tg_ssl_ctx():
@@ -1061,18 +1139,20 @@ async def _fill_login_field(page, el, selector, value):
     return bool(cur)
 
 
-async def _fill_login_form(page):
+async def _fill_login_form(page, email=None, password=None):
     """Fill email + password, verifying each input holds its value (Angular synced)
     and polling until the Sign In button is enabled (Turnstile passed + form valid).
     Returns True when the button is enabled, False otherwise."""
+    email = EMAIL if email is None else email
+    password = PASSWORD if password is None else password
     email_el = await page.select("#email", timeout=20)
     if not email_el:
         return False
-    ok_email = await _fill_login_field(page, email_el, "#email", EMAIL)
+    ok_email = await _fill_login_field(page, email_el, "#email", email)
     pwd_el = await page.select('#password, input[type="password"]', timeout=15)
     if not pwd_el:
         return False
-    ok_pwd = await _fill_login_field(page, pwd_el, "#password", PASSWORD)
+    ok_pwd = await _fill_login_field(page, pwd_el, "#password", password)
     log(f"LOGIN: filled (email_ok={ok_email} pwd_ok={ok_pwd}); waiting for Turnstile auto-pass + form-valid…")
     # Poll up to ~30s for the Sign In button to enable. If the fields never stuck,
     # re-sync them ONCE so a late-hydrating Angular form picks the values up.
@@ -1085,13 +1165,13 @@ async def _fill_login_form(page):
         if i == 8 and not refilled:
             refilled = True
             log("LOGIN: Sign In still disabled @8s — re-syncing fields once")
-            await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps("#email"), json.dumps(EMAIL)))
-            await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps("#password"), json.dumps(PASSWORD)))
+            await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps("#email"), json.dumps(email)))
+            await jeval(page, "(%s)(%s,%s)" % (_SYNC_FIELD_JS, json.dumps("#password"), json.dumps(password)))
         await asyncio.sleep(1)
     return await sign_in_disabled(page) is False
 
 
-async def _attempt_login(browser, page):
+async def _attempt_login(browser, page, email=None, password=None):
     """ONE login attempt: ensure the email field renders (reload up to 3×), fill +
     verify the form, click Sign In only when enabled, then confirm we left /login.
     Returns True on success, False on this attempt's failure (caller may retry)."""
@@ -1119,7 +1199,7 @@ async def _attempt_login(browser, page):
     if not email_el:
         log("LOGIN: email field never rendered — aborting this attempt")
         return False
-    btn_enabled = await _fill_login_form(page)
+    btn_enabled = await _fill_login_form(page, email=email, password=password)
     await dismiss_consent(page)
     if not btn_enabled:
         # Sign In never enabled (Turnstile not passed yet OR form still invalid /
@@ -1150,14 +1230,14 @@ async def _attempt_login(browser, page):
     return bool(url) and "/login" not in url and "/page-not-found" not in url
 
 
-async def do_login(browser, page):
+async def do_login(browser, page, email=None, password=None):
     """Login with self-heal retry. On the slow VPS a single fill can lose the
     race (email-blank) or the Sign In button never enables; retry up to 3× —
     reload the login page + dismiss consent between attempts — before giving up."""
     for n in range(1, 4):
         log(f"LOGIN attempt {n}/3")
         try:
-            if await _attempt_login(browser, page):
+            if await _attempt_login(browser, page, email=email, password=password):
                 return True
         except Exception as e:
             log(f"LOGIN attempt {n}/3 raised:", str(e)[:90])
@@ -1387,7 +1467,7 @@ async def _scan_for_subcat(page):
     return None, []
 
 
-async def _try_subcat(page, sub_idx, texts):
+async def _try_subcat(page, sub_idx, texts, subcat_re=None):
     """Given the subcat dropdown index + its option texts, pick each Work-D-visa
     option and check whether a slot is available (Continue enabled). Returns the
     chosen subcat text on a hit, None on no slot, or the sentinel string
@@ -1400,7 +1480,8 @@ async def _try_subcat(page, sub_idx, texts):
     scan.  If the found index disagrees with sub_idx we log it and use the live
     one.  If no dropdown currently exposes subcat options we return SUBCAT_NOT_READY
     immediately — the caller handles it as a transient DOM-not-ready state."""
-    work = [t for t in texts if SUBCAT.search(t)]
+    subcat_re = subcat_re or SUBCAT
+    work = [t for t in texts if subcat_re.search(t)]
     if not work:
         log("no Work-D-visa sub-category in list"); return None
     for wt in work:
@@ -1460,7 +1541,7 @@ async def _select_value_text(page, index):
         return ((v&&v.innerText)||s.innerText||'').trim();})(%d)""" % index)) or ""
 
 
-async def select_route(page):
+async def select_route(page, subcat_re=None):
     """Pick centre + category + a Work-D-visa subcat that has slots. Robust to
     VFS's dependent (API-loaded) dropdowns. Returns the chosen subcat if a slot
     is available (Continue enabled), else None.
@@ -1540,7 +1621,7 @@ async def select_route(page):
                 log(f"subcat fast-path: index {fast_idx}; options:", texts)
                 _ROUTE_CACHE["sub_idx"] = fast_idx
                 _ROUTE_CACHE["subcat_texts"] = texts
-                result = await _try_subcat(page, fast_idx, texts)
+                result = await _try_subcat(page, fast_idx, texts, subcat_re=subcat_re)
                 if result == "SUBCAT_NOT_READY":
                     log("subcat select failed (index drifted post-scan) — retry next cycle")
                     return None
@@ -1554,7 +1635,7 @@ async def select_route(page):
     log(f"subcat at index {sub_idx}; options:", texts)
     _ROUTE_CACHE["sub_idx"] = sub_idx
     _ROUTE_CACHE["subcat_texts"] = texts
-    result = await _try_subcat(page, sub_idx, texts)
+    result = await _try_subcat(page, sub_idx, texts, subcat_re=subcat_re)
     if result == "SUBCAT_NOT_READY":
         log("subcat select failed (index drifted post-scan) — retry next cycle")
         return None
@@ -1657,7 +1738,21 @@ async def dump_state(page, label):
         pass
 
 
-async def book(page, subcat):
+def _default_profile():
+    return {
+        "firstName": os.environ.get("PROFILE_FIRST_NAME", os.environ.get("PROFILE_FIRSTNAME", "")),
+        "lastName": os.environ.get("PROFILE_LAST_NAME", os.environ.get("PROFILE_LASTNAME", "")),
+        "dob": os.environ.get("PROFILE_DOB", ""),
+        "nationality": os.environ.get("PROFILE_NATIONALITY", ""),
+        "passport": os.environ.get("PROFILE_PASSPORT", ""),
+        "expiry": os.environ.get("PROFILE_EXPIRY", ""),
+    }
+
+
+async def book(page, subcat, *, email=None, passport=None, profile=None):
+    book_email = email or EMAIL
+    passport_path = passport or PASSPORT_IMAGE
+    profile_data = profile or _default_profile()
     log("BOOK: slot found, starting booking flow")
     # The sub-category dropdown we just picked may leave a CDK overlay backdrop up;
     # close it so the Continue click lands on the button, not the backdrop.
@@ -1677,10 +1772,10 @@ async def book(page, subcat):
     # no name/passport text fields to fill. Set the file input directly (works even
     # when the input is hidden behind a "Browse Files" link), wait for OCR, then Save.
     file_inputs = await page.select_all('input[type=file]')
-    if file_inputs and os.path.exists(PASSPORT_IMAGE):
+    if file_inputs and os.path.exists(passport_path):
         try:
-            await file_inputs[0].send_file(PASSPORT_IMAGE)
-            log("BOOK: uploaded passport image:", PASSPORT_IMAGE)
+            await file_inputs[0].send_file(passport_path)
+            log("BOOK: uploaded passport image:", passport_path)
         except Exception as e:
             log("BOOK: passport upload failed:", e)
         # Wait until upload is reflected (a "Continue" or processing button appears), cap 10s.
@@ -1697,7 +1792,7 @@ async def book(page, subcat):
             timeout=8, interval=0.5)
         await dump_state(page, "2b_after_process")
     else:
-        log("BOOK: no file input or passport image missing", "(inputs=%d, img=%s)" % (len(file_inputs), PASSPORT_IMAGE))
+        log("BOOK: no file input or passport image missing", "(inputs=%d, img=%s)" % (len(file_inputs), passport_path))
     # Save the applicant (footer Save) → applicant Summary page.
     await click_button_text(page, ["save"], timeout=30)
     await asyncio.sleep(3)
@@ -1737,14 +1832,7 @@ async def book(page, subcat):
                     f.get('label',''), f.get('fc',''), f.get('placeholder',''),
                     f.get('value','')[:30] if f.get('value') else '', f.get('required')))
         # Build a profile fallback dict from env (worker passes these for linked profiles)
-        _profile = {
-            "firstName":  os.environ.get("PROFILE_FIRST_NAME", ""),
-            "lastName":   os.environ.get("PROFILE_LAST_NAME", ""),
-            "dob":        os.environ.get("PROFILE_DOB", ""),
-            "nationality":os.environ.get("PROFILE_NATIONALITY", ""),
-            "passport":   os.environ.get("PROFILE_PASSPORT", ""),
-            "expiry":     os.environ.get("PROFILE_EXPIRY", ""),
-        }
+        _profile = profile_data
         # Fill each visible empty input. Prefer the value VFS OCR already placed in the
         # DOM (often in a read-only sibling span) — re-read off the page if value is empty.
         # Fall back to the _profile dict keys matched by label keywords.
@@ -1837,7 +1925,7 @@ async def book(page, subcat):
         log("STEP2b: after detail-save url=%s" % new_url.split('/')[-1].split('?')[0][:30])
     # Summary page → Continue advances to the OTP gate. Snapshot existing Mailsac
     # message ids first so we can distinguish the new OTP email from old mail.
-    pre_ids = set(m.get("_id") for m in mailsac_list(EMAIL))
+    pre_ids = set(m.get("_id") for m in mailsac_list(book_email))
     # The Summary "Continue" is flaky (sometimes needs a second click) and the OTP
     # gate loads slowly — re-click Continue each iteration until the gate appears
     # (≤40s). Re-clicking is safe: the OTP page's Continue is disabled until a code
@@ -1857,8 +1945,8 @@ async def book(page, subcat):
         await asyncio.sleep(3)
         await dump_state(page, "3a2_otp_input")  # reveal the OTP-entry field DOM
         log("OTP: Generate clicked — polling Mailsac for the code…")
-        milestone("otp_requested", email=EMAIL)
-        code = await mailsac_otp_code(EMAIL, pre_ids, timeout=120)
+        milestone("otp_requested", email=book_email)
+        code = await mailsac_otp_code(book_email, pre_ids, timeout=120)
         if code:
             log("OTP: received code", code)
             # Tag the VISIBLE OTP input (generic selectors matched a hidden input
@@ -1883,7 +1971,7 @@ async def book(page, subcat):
                 log("OTP: field value now:", val)
             else:
                 log("OTP: visible input not found")
-            milestone("otp_filled", email=EMAIL)
+            milestone("otp_filled", email=book_email)
             await asyncio.sleep(1)
             await click_button_text(page, ["verify"], timeout=20)  # verify the OTP
             await asyncio.sleep(3)
@@ -1898,9 +1986,9 @@ async def book(page, subcat):
                 await asyncio.sleep(2)
         else:
             log("OTP: no code from Mailsac within timeout — cannot pass the OTP gate")
-            milestone("otp_timeout", email=EMAIL, error="otp_timeout")
+            milestone("otp_timeout", email=book_email, error="otp_timeout")
             await dump_state(page, "3b_after_otp")
-            telegram_photo(shot_path("book_3b_after_otp"), f"⏱ OTP timeout (check MAILSAC_API_KEY) — {EMAIL}")
+            telegram_photo(shot_path("book_3b_after_otp"), f"⏱ OTP timeout (check MAILSAC_API_KEY) — {book_email}")
     # Step 3 — Book Appointment (type → date → slot → continue)
     await asyncio.sleep(2)
     await dump_state(page, "3_book_appointment")
@@ -1965,6 +2053,98 @@ async def main():
         log("WARN: both BOOK_DRY_RUN and BOOK_ENABLED are set — DRY_RUN takes precedence (no actual submit)")
         BOOK_ENABLED = False
     import nodriver as uc
+    slot_q = asyncio.Queue(maxsize=1)
+    stop_event = asyncio.Event()
+    booker_state = {"direct_fallback": False}
+
+    async def booker_task():
+        """Keep a second account logged in at dashboard with zero availability
+        calls; the watcher spends the slot-check budget and signals this session."""
+        if not BOOKER_EMAIL:
+            return
+        booker_browser = None
+        try:
+            log(f"BOOKER: starting second browser for {BOOKER_EMAIL}")
+            booker_browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
+            booker_page = await booker_browser.get(LOGIN_URL)
+            if not await do_login(booker_browser, booker_page, email=BOOKER_EMAIL, password=BOOKER_PASSWORD):
+                log("BOOKER: login failed — watcher will book directly if a slot appears")
+                booker_state["direct_fallback"] = True
+                return
+            log("BOOKER: login OK — parked at dashboard")
+            milestone("logged_in", email=BOOKER_EMAIL)
+            try:
+                await jeval(booker_page, "location.href=%s" % json.dumps(DASHBOARD_URL))
+            except Exception:
+                pass
+            # Same-IP two-session mode shares the IP request budget. Keep-alive is
+            # intentionally minimal and never calls CheckIsSlotAvailable.
+            while not stop_event.is_set():
+                try:
+                    payload = await asyncio.wait_for(slot_q.get(), timeout=9 * 60)
+                except asyncio.TimeoutError:
+                    try:
+                        url = await jeval(booker_page, "location.href") or ""
+                        if "/login" in url:
+                            log("BOOKER: session redirected to login — re-logging")
+                            if not await do_login(booker_browser, booker_page, email=BOOKER_EMAIL, password=BOOKER_PASSWORD):
+                                log("BOOKER: re-login failed — watcher direct fallback enabled")
+                                booker_state["direct_fallback"] = True
+                                return
+                        else:
+                            await jeval(booker_page, "location.href=%s" % json.dumps(DASHBOARD_URL))
+                            log("BOOKER: dashboard keep-alive")
+                    except Exception as e:
+                        log("BOOKER: keep-alive error:", str(e)[:100])
+                    continue
+
+                subcat = payload.get("subcat") or ""
+                log(f"BOOKER: slot signal received — entering wizard for {subcat}")
+                try:
+                    await enter_wizard(booker_page)
+                    exact_subcat = re.compile(r"^%s$" % re.escape(subcat), re.I)
+                    selected = await select_route(booker_page, subcat_re=exact_subcat)
+                    if not selected:
+                        log("BOOKER: exact subcat not selectable/available — watcher direct fallback enabled")
+                        booker_state["direct_fallback"] = True
+                        continue
+                    if not BOOK_DRY_RUN and not BOOK_ENABLED:
+                        log("BOOKER: slot found but BOOK_ENABLED off — stopping for operator")
+                        stop_event.set()
+                        return
+                    outcome, detail = await book(
+                        booker_page,
+                        selected,
+                        email=BOOKER_EMAIL,
+                        passport=BOOKER_PASSPORT_IMAGE or PASSPORT_IMAGE,
+                        profile=BOOKER_PROFILE,
+                    )
+                    if outcome == "confirmed":
+                        milestone("booked", email=BOOKER_EMAIL, slotId=selected, confirmation=detail)
+                        telegram_photo(shot_path("pipe_confirmed"), f"🎉 Booked: {detail} — {BOOKER_EMAIL} ({selected})")
+                    elif outcome == "payment_wall":
+                        milestone("booking_submitted", email=BOOKER_EMAIL, slotId=selected, detail="payment_wall")
+                        telegram_photo(shot_path("pipe_payment_wall"), f"⚠️ Payment wall — manual payment needed — {BOOKER_EMAIL} ({selected})")
+                    elif outcome == "dry_run":
+                        milestone("booking_submitted", email=BOOKER_EMAIL, slotId=selected, detail="dry_run")
+                    else:
+                        milestone("failed", email=BOOKER_EMAIL, error=detail, slotId=selected)
+                        telegram_photo(shot_path("pipe_submit_uncertain"), f"❌ Booking blocked: {detail} — {BOOKER_EMAIL} ({selected})")
+                    stop_event.set()
+                    return
+                except Exception as e:
+                    log("BOOKER: booking flow error:", str(e)[:160])
+                    milestone("failed", email=BOOKER_EMAIL, error=str(e)[:120], slotId=subcat)
+                    stop_event.set()
+                    return
+        finally:
+            if booker_browser is not None:
+                try:
+                    booker_browser.stop()
+                except Exception:
+                    pass
+
+    booker_runner = asyncio.create_task(booker_task()) if BOOKER_EMAIL else None
     browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
     page = await browser.get(LOGIN_URL)
     # Install the lift-api auth-header capture BEFORE login so we sniff authorize/
@@ -1985,7 +2165,15 @@ async def main():
         await shot(page, "pipe_login_failed")
         milestone("failed", email=EMAIL, error=reason_code)
         telegram_photo(shot_path("pipe_login_failed"), f"❌ Login blocked: {reason_code} — {EMAIL}")
-        await asyncio.sleep(5); browser.stop(); return
+        await asyncio.sleep(5)
+        stop_event.set()
+        if booker_runner is not None and not booker_runner.done():
+            booker_runner.cancel()
+            try:
+                await booker_runner
+            except asyncio.CancelledError:
+                pass
+        browser.stop(); return
     log("LOGIN OK")
     milestone("logged_in", email=EMAIL)
     telegram(f"[bot] logged in {EMAIL}, monitoring Work D-visa slots…")
@@ -2013,6 +2201,9 @@ async def main():
     MAX_UI_WALKS = 4     # after this, back off hard so we don't trip 429201
     _ocma_last_report = 0  # epoch-seconds of last OCMA Telegram alert (rate-limit ~10min)
     while True:
+        if stop_event.is_set():
+            log("watcher stopping — booker completed")
+            break
         attempt += 1
         log(f"--- check #{attempt} ---")
 
@@ -2357,6 +2548,13 @@ async def main():
         if slot:
             milestone("slot_found", email=EMAIL, slotId=slot)
             telegram(f"[bot] SLOT FOUND for {EMAIL}: {slot}")
+            if BOOKER_EMAIL and not booker_state["direct_fallback"]:
+                if slot_q.full():
+                    log("BOOKER: slot already queued — continuing watcher loop")
+                else:
+                    await slot_q.put({"subcat": slot})
+                    log(f"BOOKER: queued slot handoff for {slot} — watcher continues")
+                continue
             if BOOK_DRY_RUN:
                 outcome, _ = await book(page, slot)
                 milestone("booking_submitted", email=EMAIL, slotId=slot, detail="dry_run")
@@ -2388,7 +2586,10 @@ async def main():
         # On the API path use API_MONITOR_INTERVAL (default 30s) so a large
         # MONITOR_INTERVAL set for the UI path doesn't stall the fast API cycle.
         interval_for_path = API_MONITOR_INTERVAL if used_api else UI_MONITOR_INTERVAL
-        jitter = random.uniform(0, max(5.0, interval_for_path * 0.4))
+        burst = _burst_interval_now()
+        if burst is not None:
+            interval_for_path = burst
+        jitter = random.uniform(0, 1.0) if burst == BURST_INTERVAL else random.uniform(0, max(5.0, interval_for_path * 0.4))
         path_tag = "api" if used_api else "ui"
         log(f"no slot — re-checking in ~{int(interval_for_path + jitter)}s ({path_tag})")
         # emit a per-check milestone so the backend sends a "no slots" Telegram
@@ -2420,6 +2621,13 @@ async def main():
 
     log("done — keeping browser open 15s")
     await asyncio.sleep(15)
+    stop_event.set()
+    if booker_runner is not None and not booker_runner.done():
+        booker_runner.cancel()
+        try:
+            await booker_runner
+        except asyncio.CancelledError:
+            pass
     browser.stop()
 
 
