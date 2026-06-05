@@ -105,6 +105,12 @@ DIRECT_POLL = os.environ.get("DIRECT_POLL") == "1"
 PROXY_LIST = [p.strip() for p in os.environ.get("PROXY_LIST", "").split(",") if p.strip()]
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
+# TEST_BOOKER_ON_OCMA — routes a detected OCMA slot to the booker queue so the
+# watcher→booker handoff can be exercised without waiting for a rare Work-D slot.
+# SAFETY: only activates when BOTH TEST_BOOKER_ON_OCMA=1 AND BOOK_DRY_RUN=1 are
+# set. If BOOK_DRY_RUN is not on, the code refuses to route and logs a warning.
+# OCMA must NEVER be really booked (it is a client-proof detect-only category).
+TEST_BOOKER_ON_OCMA = os.environ.get("TEST_BOOKER_ON_OCMA") == "1"
 SUBCAT = re.compile(os.environ.get("SUBCAT", r"work\s*\(?\s*(?:visa\s*d|d\s*visa)"), re.I)
 if os.environ.get("PROVE_OCMA") == "1":
     SUBCAT = re.compile(r"work\s*\(?\s*(?:visa\s*d|d\s*visa)|ocma", re.I)
@@ -2200,6 +2206,7 @@ async def main():
     ui_walks = 0         # heavy UI walks done while codes still unconfirmed
     MAX_UI_WALKS = 4     # after this, back off hard so we don't trip 429201
     _ocma_last_report = 0  # epoch-seconds of last OCMA Telegram alert (rate-limit ~10min)
+    _test_ocma_booker_fired = False  # guard: fire TEST_BOOKER_ON_OCMA handoff only once per run
     while True:
         if stop_event.is_set():
             log("watcher stopping — booker completed")
@@ -2488,6 +2495,21 @@ async def main():
                     milestone("ocma_available", email=EMAIL, detail=f"earliestDate={_ed} lists={_cnt}")
                     telegram(f"[bot] ✅ OCMA slots available — {_ed}, {_cnt} lists — bot detection confirmed ({EMAIL})", force=True)
                     log(f"OCMA report sent (earliestDate={_ed}, lists={_cnt})")
+                    # TEST_BOOKER_ON_OCMA: exercise the watcher→booker handoff using
+                    # OCMA (which always has slots) instead of waiting for Work-D.
+                    # OCMA must NEVER be really booked; this path is DRY-RUN-only.
+                    if TEST_BOOKER_ON_OCMA and not _test_ocma_booker_fired:
+                        if not BOOK_DRY_RUN:
+                            log("WARN: TEST_BOOKER_ON_OCMA=1 but BOOK_DRY_RUN is not set — "
+                                "refusing to route OCMA to booker (would risk a real booking)")
+                        elif BOOKER_EMAIL and booker_runner is not None and not booker_state.get("direct_fallback"):
+                            _test_ocma_booker_fired = True
+                            _ocma_subcat = f"OCMA-test:{_ed}"
+                            log(f"TEST: routing OCMA '{_ocma_subcat}' to booker handoff (dry-run test)")
+                            if slot_q.full():
+                                log("TEST: slot_q full — skipping test handoff this cycle")
+                            else:
+                                await slot_q.put({"subcat": _ocma_subcat})
                 else:
                     log("OCMA slots available but report rate-limited (sent <10min ago)")
 
