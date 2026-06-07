@@ -91,6 +91,8 @@ BOOKER_PROFILE = {
     "passport": os.environ.get("BOOKER_PROFILE_PASSPORT", ""),
     "expiry": os.environ.get("BOOKER_PROFILE_EXPIRY", ""),
 }
+BOOKING_OTP_ENABLED = os.environ.get("BOOKING_OTP_ENABLED") == "1"
+BOOKER_READY_MODE = os.environ.get("BOOKER_READY_MODE", "dashboard").strip().lower()
 _BURST_TZ_WARNED = False
 _BURST_WINDOWS_LOGGED = False
 # DIRECT_POLL=1 → monitor by calling CheckIsSlotAvailable as a DIRECT (cookieless,
@@ -1547,6 +1549,68 @@ async def _select_value_text(page, index):
         return ((v&&v.innerText)||s.innerText||'').trim();})(%d)""" % index)) or ""
 
 
+async def prepare_route_form(page):
+    """Preselect centre + Long Stay/Visa D without selecting subcategory.
+    This warms the booker close to the route form while avoiding availability calls."""
+    await enter_wizard(page)
+    for _ in range(20):
+        if await page.select_all("mat-select"):
+            break
+        await asyncio.sleep(1)
+
+    for _ in range(4):
+        opts = await open_select(page, 0, "centre")
+        if opts:
+            await pick_option(opts, lambda t: True, "centre")
+            break
+        await asyncio.sleep(2)
+
+    await wait_until(page,
+        "(()=>{const s=document.querySelectorAll('mat-select'); return s.length>1;})()",
+        timeout=4, interval=0.3)
+
+    for _cat_try in range(3):
+        opts = await open_select(page, 1, "category")
+        if opts:
+            await pick_option(opts, lambda t: re.search("long stay", t, re.I), "category")
+        await asyncio.sleep(1.2)
+        catval = await _select_value_text(page, 1)
+        if re.search(r"long\s*stay|visa\s*d", catval, re.I):
+            log("BOOKER: route prewarmed, category registered:", catval[:40])
+            return True
+        log(f"BOOKER: category not registered (shows '{catval[:30]}') - retry {_cat_try + 1}/3")
+        await asyncio.sleep(1.5)
+
+    log("BOOKER: route prewarm failed - category did not register")
+    return False
+
+
+async def select_prepared_subcat(page, subcat_re=None):
+    """On a prewarmed route form, select only the matching subcategory."""
+    await wait_until(page,
+        "(()=>{const s=document.querySelectorAll('mat-select'); return s.length>=3;})()",
+        timeout=6, interval=0.3)
+    fast_idx = await _subcat_index_by_label(page)
+    if fast_idx < 0:
+        fast_idx = _ROUTE_CACHE["sub_idx"]
+    if fast_idx is not None:
+        texts = []
+        for _ in range(16):
+            texts = await _option_texts(page, fast_idx, "subcat(prewarmed)")
+            if any(SUBCAT_LIST_RE.search(t) for t in texts):
+                break
+            await asyncio.sleep(0.5)
+        if any(SUBCAT_LIST_RE.search(t) for t in texts):
+            log(f"BOOKER: prewarmed subcat index {fast_idx}; options:", texts)
+            _ROUTE_CACHE["sub_idx"] = fast_idx
+            _ROUTE_CACHE["subcat_texts"] = texts
+            result = await _try_subcat(page, fast_idx, texts, subcat_re=subcat_re)
+            if result != "SUBCAT_NOT_READY":
+                return result
+    log("BOOKER: prewarmed subcat selection not ready")
+    return None
+
+
 async def select_route(page, subcat_re=None):
     """Pick centre + category + a Work-D-visa subcat that has slots. Robust to
     VFS's dependent (API-loaded) dropdowns. Returns the chosen subcat if a slot
@@ -1944,6 +2008,18 @@ async def book(page, subcat, *, email=None, passport=None, profile=None):
         await click_button_text(page, ["continue", "proceed"], timeout=4)
         await asyncio.sleep(2)
     await dump_state(page, "3a_otp_gate")
+    if ("one-time password" in body_txt or "generate otp" in body_txt) and not BOOKING_OTP_ENABLED:
+        log("OTP: booking OTP disabled/not used for this route — attempting to advance without Mailsac wait")
+        milestone("otp_skipped", email=book_email)
+        await dump_state(page, "3a2_otp_skipped")
+        for _ in range(6):
+            await click_button_text(page, ["continue", "proceed", "verify"], timeout=3)
+            await asyncio.sleep(1.5)
+            body_txt = (await jeval(page, "(document.body.innerText||'').toLowerCase()")) or ""
+            if "one-time password" not in body_txt and "generate otp" not in body_txt:
+                break
+        await dump_state(page, "3b_after_otp_skip")
+        body_txt = ""
     # OTP step: VFS gates step 3 behind an email/SMS OTP sent to the (Mailsac)
     # account email. Generate → poll Mailsac for the code → fill → Continue.
     if "one-time password" in body_txt or "generate otp" in body_txt:
@@ -2083,6 +2159,12 @@ async def main():
                 await jeval(booker_page, "location.href=%s" % json.dumps(DASHBOARD_URL))
             except Exception:
                 pass
+            booker_prewarmed = False
+            if BOOKER_READY_MODE == "wizard":
+                log("BOOKER: ready mode=wizard — prewarming route form")
+                booker_prewarmed = await prepare_route_form(booker_page)
+                if booker_prewarmed:
+                    await shot(booker_page, "booker_prewarmed")
             # Same-IP two-session mode shares the IP request budget. Keep-alive is
             # intentionally minimal and never calls CheckIsSlotAvailable.
             while not stop_event.is_set():
@@ -2097,9 +2179,18 @@ async def main():
                                 log("BOOKER: re-login failed — watcher direct fallback enabled")
                                 booker_state["direct_fallback"] = True
                                 return
+                            booker_prewarmed = False
+                            if BOOKER_READY_MODE == "wizard":
+                                booker_prewarmed = await prepare_route_form(booker_page)
                         else:
-                            await jeval(booker_page, "location.href=%s" % json.dumps(DASHBOARD_URL))
-                            log("BOOKER: dashboard keep-alive")
+                            if BOOKER_READY_MODE == "wizard":
+                                has_route_form = await jeval(booker_page, "!!document.querySelector('mat-select')")
+                                if not has_route_form:
+                                    booker_prewarmed = await prepare_route_form(booker_page)
+                                log("BOOKER: wizard keep-alive")
+                            else:
+                                await jeval(booker_page, "location.href=%s" % json.dumps(DASHBOARD_URL))
+                                log("BOOKER: dashboard keep-alive")
                     except Exception as e:
                         log("BOOKER: keep-alive error:", str(e)[:100])
                     continue
@@ -2107,9 +2198,15 @@ async def main():
                 subcat = payload.get("subcat") or ""
                 log(f"BOOKER: slot signal received — entering wizard for {subcat}")
                 try:
-                    await enter_wizard(booker_page)
                     exact_subcat = re.compile(r"^%s$" % re.escape(subcat), re.I)
-                    selected = await select_route(booker_page, subcat_re=exact_subcat)
+                    if booker_prewarmed:
+                        selected = await select_prepared_subcat(booker_page, subcat_re=exact_subcat)
+                        if not selected:
+                            log("BOOKER: prewarmed form stale — falling back to full route select")
+                            selected = await select_route(booker_page, subcat_re=exact_subcat)
+                    else:
+                        await enter_wizard(booker_page)
+                        selected = await select_route(booker_page, subcat_re=exact_subcat)
                     if not selected:
                         log("BOOKER: exact subcat not selectable/available — watcher direct fallback enabled")
                         booker_state["direct_fallback"] = True
