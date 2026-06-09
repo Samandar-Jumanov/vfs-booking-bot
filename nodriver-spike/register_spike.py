@@ -46,7 +46,15 @@ def log(*a):
 
 
 def gen_email():
-    return os.environ.get("REG_EMAIL") or f"vfs-{secrets.token_hex(6)}@mailsac.com"
+    if os.environ.get("REG_EMAIL"):
+        return os.environ["REG_EMAIL"]
+    domain = (
+        os.environ.get("REG_EMAIL_DOMAIN")
+        or os.environ.get("EMAIL_DOMAIN")
+        or os.environ.get("CUSTOM_EMAIL_DOMAIN")
+        or "mailsac.com"
+    ).lstrip("@")
+    return f"vfs-{secrets.token_hex(6)}@{domain}"
 
 
 def gen_password():
