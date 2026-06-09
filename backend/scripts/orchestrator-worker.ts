@@ -1418,6 +1418,22 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (process.env.WORKER_DIRECT === '1') {
+    const targetEmail = process.env.TARGET_EMAIL?.trim();
+    if (!targetEmail) {
+      log('WORKER_DIRECT=1 requires TARGET_EMAIL to avoid multi-box account collisions');
+      await prisma.$disconnect();
+      process.exit(1);
+    }
+    log(`Starting in direct mode for TARGET_EMAIL=${targetEmail} BOX_ID=${process.env.BOX_ID ?? 'none'}`);
+    for (;;) {
+      const runId = `direct-${process.env.BOX_ID ?? os.hostname()}-${Date.now()}`;
+      await driveRun(runId).catch((e) => log(`direct run failed: ${(e as Error).message}`));
+      log(`direct run ${runId} ended — retrying in ${POLL_INTERVAL_SEC}s`);
+      await sleep(POLL_INTERVAL_SEC * 1000);
+    }
+  }
+
   for (;;) {
     try {
       // Poll Settings for scenario_run
