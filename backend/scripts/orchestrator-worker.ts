@@ -1247,6 +1247,17 @@ const WORKER_LOCK_HEARTBEAT_MS = 30_000;  // write heartbeat every 30s
 const WORKER_LOCK_STALE_MS = 120_000;    // 120s — 4× heartbeat interval; stale = dead
 const FORCE_START = process.argv.includes('--force');
 
+function directStaggerDelayMs(): number {
+  if (process.env.AUTO_STAGGER !== '1') return 0;
+  const boxMatch = (process.env.BOX_ID ?? '').match(/(\d+)$/);
+  const boxNumber = boxMatch ? Number(boxMatch[1]) : 1;
+  const boxCount = Math.max(1, Number(process.env.BOX_COUNT ?? 1));
+  const burstIntervalSec = Math.max(1, Number(process.env.BURST_INTERVAL ?? 60));
+  if (!Number.isFinite(boxNumber) || boxNumber <= 1 || boxCount <= 1) return 0;
+  const slotSec = burstIntervalSec / boxCount;
+  return Math.round((Math.min(boxNumber, boxCount) - 1) * slotSec * 1000);
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -1426,6 +1437,11 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     log(`Starting in direct mode for TARGET_EMAIL=${targetEmail} BOX_ID=${process.env.BOX_ID ?? 'none'}`);
+    const staggerMs = directStaggerDelayMs();
+    if (staggerMs > 0) {
+      log(`AUTO_STAGGER: waiting ${Math.round(staggerMs / 1000)}s before first direct run`);
+      await sleep(staggerMs);
+    }
     for (;;) {
       const runId = `direct-${process.env.BOX_ID ?? os.hostname()}-${Date.now()}`;
       await driveRun(runId).catch((e) => log(`direct run failed: ${(e as Error).message}`));
