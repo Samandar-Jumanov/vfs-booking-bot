@@ -21,11 +21,17 @@
  *   REGISTER_STAGGER_SEC=120  wait between registrations (throttle pacing)
  *   REGISTER_POLL_SEC=30      (loop mode) how often to check the queue when idle
  *   REGISTER_DRY_RUN=1        show what it'd do, no browser, no DB write
+ *   REGISTER_USE_SMS_PROVIDER=1 reserve a real SMS-provider number and pass it
+ *                             to register_spike.py as REG_PHONE
+ *   SMS_PROVIDER=onlinesim    SMS provider to use when REGISTER_USE_SMS_PROVIDER=1
+ *   SMS_SERVICE_NAME=facebook service name for the SMS provider
+ *   SMS_COUNTRY_CODE=171      Uzbekistan country code for the configured provider
  */
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { prisma } from '../src/config/database';
 import { encrypt } from '../src/utils/crypto';
+import { getSmsProvider } from '../src/modules/accounts/providerFactory';
 
 const SPIKE = path.resolve(__dirname, '..', '..', 'nodriver-spike', 'register_spike.py');
 const COUNT = Number(process.env.REGISTER_COUNT ?? 1);
@@ -34,6 +40,7 @@ const STAGGER_SEC = Number(process.env.REGISTER_STAGGER_SEC ?? 120);
 const POLL_SEC = Number(process.env.REGISTER_POLL_SEC ?? 30);
 const LOOP = process.env.REGISTER_LOOP === '1';
 const DRY_RUN = process.env.REGISTER_DRY_RUN === '1';
+const USE_SMS_PROVIDER = process.env.REGISTER_USE_SMS_PROVIDER === '1';
 
 // Shared with the backend router (accounts.router.ts) — the dashboard bumps this
 // Settings counter; we drain it here.
@@ -69,19 +76,55 @@ interface RegResult {
   error?: string;
 }
 
+interface ReservedPhone {
+  id: string;
+  number: string;
+  local: string;
+}
+
 function log(...a: unknown[]) {
   console.log('[REG-RUNNER]', new Date().toISOString(), ...a);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function toLocalUzPhone(number: string): string {
+  const digits = number.replace(/\D/g, '');
+  if (digits.startsWith('998') && digits.length > 3) return digits.slice(3);
+  if (digits.length === 9) return digits;
+  return digits;
+}
+
+async function reservePhone(): Promise<ReservedPhone> {
+  const providerName = (process.env.SMS_PROVIDER || 'smsactivate').toLowerCase();
+  const service = process.env.SMS_SERVICE_NAME || (providerName === 'onlinesim' ? 'facebook' : 'vfs');
+  const country = process.env.SMS_COUNTRY_CODE || '171';
+  const phone = await getSmsProvider().buyNumber(service, country);
+  const local = toLocalUzPhone(phone.number);
+  if (local.length !== 9) {
+    await getSmsProvider().releaseNumber(phone.id).catch(() => undefined);
+    throw new Error(`SMS provider returned unusable Uzbek phone '${phone.number}' (local='${local}')`);
+  }
+  log(`SMS reserved provider=${providerName} service=${service} country=${country} id=${phone.id} phone=+998${local}`);
+  return { id: phone.id, number: phone.number, local };
+}
+
+async function releasePhone(phone: ReservedPhone): Promise<void> {
+  try {
+    await getSmsProvider().releaseNumber(phone.id);
+    log(`SMS released id=${phone.id}`);
+  } catch (e) {
+    log(`WARN could not release SMS id=${phone.id}:`, (e as Error).message);
+  }
+}
+
 /** Spawn register_spike.py, capture stdout, parse the final `[REG] RESULT: {...}` line. */
-function runSpike(): { result: RegResult | null; crashed: boolean } {
+function runSpike(extraEnv: NodeJS.ProcessEnv = {}): { result: RegResult | null; crashed: boolean } {
   if (!process.env.MAILSAC_API_KEY) {
     log('WARN MAILSAC_API_KEY not set — account will register but not auto-activate (status PENDING)');
   }
   const res = spawnSync('python', [SPIKE], {
-    env: { ...process.env, PYTHONUTF8: '1' },
+    env: { ...process.env, ...extraEnv, PYTHONUTF8: '1' },
     encoding: 'utf-8',
     timeout: 5 * 60 * 1000,
   });
@@ -103,13 +146,14 @@ function runSpike(): { result: RegResult | null; crashed: boolean } {
 }
 
 /** Insert a freshly-registered account. status ACTIVE only if activation confirmed. */
-async function persist(r: RegResult): Promise<void> {
+async function persist(r: RegResult, smsExternalId?: string): Promise<void> {
   const status = r.activated ? 'ACTIVE' : 'PENDING';
   await prisma.vfsAccount.create({
     data: {
       email: r.email,
       encryptedPassword: encrypt(r.password),
       phone: r.phone,
+      smsExternalId,
       status,
       profileIds: [],
     },
@@ -142,21 +186,33 @@ async function registerOne(label: string): Promise<RegOutcome> {
     return 'ok';
   }
   log(`registering ${label}…`);
-  const { result: r, crashed } = runSpike();
+  let reservedPhone: ReservedPhone | null = null;
+  if (USE_SMS_PROVIDER && !process.env.REG_PHONE) {
+    try {
+      reservedPhone = await reservePhone();
+    } catch (e) {
+      log('SMS reservation failed:', (e as Error).message);
+      return 'failed';
+    }
+  }
+  const { result: r, crashed } = runSpike(reservedPhone ? { REG_PHONE: reservedPhone.local } : {});
   if (crashed) {
+    if (reservedPhone) await releasePhone(reservedPhone);
     // a Python bug, not a VFS throttle — don't trigger a 45-min cooldown
     log('register_spike crashed — treating as a (recoverable) failure, no throttle backoff');
     return 'failed';
   }
   if (!r || r.error === 'form_not_rendered') {
+    if (reservedPhone) await releasePhone(reservedPhone);
     log('THROTTLED — VFS withheld the form. Backing off (retry after a 30-60min cooldown).');
     return 'throttled';
   }
   if (!r.registered) {
+    if (reservedPhone) await releasePhone(reservedPhone);
     log(`did NOT register (no POST). result=${JSON.stringify(r)}`);
     return 'failed';
   }
-  await persist(r);
+  await persist({ ...r, phone: r.phone || reservedPhone?.number || '' }, reservedPhone?.id);
   return 'ok';
 }
 
