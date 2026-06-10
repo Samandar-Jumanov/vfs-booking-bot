@@ -2604,6 +2604,9 @@ async def main():
                     log("API: no slots in %s" % (_nm or "work-d"))
 
             # ── OCMA report path (report-only, never book) ────────────────────
+            if _ip_rest_skip:
+                continue
+
             if ocma_avail and not _api_broke:
                 _now = time.time()
                 if _now - _ocma_last_report >= 600:  # at most once per ~10 min
