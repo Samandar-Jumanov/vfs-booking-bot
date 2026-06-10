@@ -9,6 +9,7 @@
  * Apply/reset and write env patches:
  *   $env:ASSIGN_BOXES_APPLY='1'
  *   $env:ASSIGN_BOX_COUNT='10'
+ *   $env:ASSIGN_PAIRS_PER_BOX='2'
  *   $env:ASSIGN_RESET='1'
  *   npx tsx scripts/assign-direct-boxes.ts
  */
@@ -23,6 +24,7 @@ dotenv.config({ path: path.resolve(__dirname, '../.env.worker'), override: true 
 const prisma = new PrismaClient();
 
 const BOX_COUNT = Number(process.env.ASSIGN_BOX_COUNT ?? process.env.BOX_COUNT ?? 10);
+const PAIRS_PER_BOX = Number(process.env.ASSIGN_PAIRS_PER_BOX ?? 1);
 const APPLY = process.env.ASSIGN_BOXES_APPLY === '1';
 const RESET = process.env.ASSIGN_RESET === '1';
 const OUT_DIR = path.resolve(__dirname, '../../ops/vps-env/assignments');
@@ -54,6 +56,9 @@ async function main() {
   if (!Number.isFinite(BOX_COUNT) || BOX_COUNT < 1) {
     throw new Error(`ASSIGN_BOX_COUNT/BOX_COUNT must be positive, got ${BOX_COUNT}`);
   }
+  if (!Number.isFinite(PAIRS_PER_BOX) || PAIRS_PER_BOX < 1) {
+    throw new Error(`ASSIGN_PAIRS_PER_BOX must be positive, got ${PAIRS_PER_BOX}`);
+  }
 
   const profiles = await prisma.profile.findMany({
     where: { isActive: true },
@@ -68,11 +73,12 @@ async function main() {
     orderBy: [{ profileIds: 'asc' }, { createdAt: 'asc' }],
   }) as UsableAccount[];
 
-  const neededAccounts = BOX_COUNT * 2;
+  const neededAccounts = BOX_COUNT * PAIRS_PER_BOX * 2;
   console.log(`\n=== assign-direct-boxes ===`);
   console.log(`Mode      : ${APPLY ? 'APPLY' : 'DRY-RUN'}`);
   console.log(`Reset     : ${RESET ? 'yes' : 'no'}`);
   console.log(`Boxes     : ${BOX_COUNT}`);
+  console.log(`Pairs/box : ${PAIRS_PER_BOX}`);
   console.log(`Profiles  : ${profiles.length}/${BOX_COUNT}`);
   console.log(`Usable accts: ${accounts.length}/${neededAccounts}`);
 
@@ -91,17 +97,22 @@ async function main() {
     );
   }
 
-  const pairs = profiles.map((profile, idx) => {
-    const watcher = available[idx * 2]!;
-    const booker = available[idx * 2 + 1]!;
-    return { box: idx + 1, profile, watcher, booker };
+  const boxes = profiles.map((profile, boxIdx) => {
+    const pairs = Array.from({ length: PAIRS_PER_BOX }, (_, pairIdx) => {
+      const offset = (boxIdx * PAIRS_PER_BOX + pairIdx) * 2;
+      const watcher = available[offset]!;
+      const booker = available[offset + 1]!;
+      return { pair: pairIdx + 1, watcher, booker };
+    });
+    return { box: boxIdx + 1, profile, pairs };
   });
 
   console.log('\nPLAN:');
-  for (const p of pairs) {
-    console.log(
-      `box${p.box}: ${p.profile.fullName} | WATCHER=${p.watcher.email} | BOOKER=${p.booker.email}`,
-    );
+  for (const b of boxes) {
+    console.log(`box${b.box}: ${b.profile.fullName}`);
+    for (const p of b.pairs) {
+      console.log(`  pair${p.pair}: WATCHER=${p.watcher.email} | BOOKER=${p.booker.email}`);
+    }
   }
 
   if (!APPLY) {
@@ -118,11 +129,12 @@ async function main() {
       });
     }
 
-    for (const p of pairs) {
+    for (const b of boxes) {
+      for (const p of b.pairs) {
       await tx.vfsAccount.update({
         where: { id: p.watcher.id },
         data: {
-          profileIds: [p.profile.id],
+          profileIds: [b.profile.id],
           pollingRole: 'WATCHER',
           lastAttemptAt: null,
           cooldownUntil: null,
@@ -133,7 +145,7 @@ async function main() {
       await tx.vfsAccount.update({
         where: { id: p.booker.id },
         data: {
-          profileIds: [p.profile.id],
+          profileIds: [b.profile.id],
           pollingRole: 'BOOKER',
           lastAttemptAt: null,
           cooldownUntil: null,
@@ -141,18 +153,21 @@ async function main() {
           lastError: null,
         },
       });
+      }
     }
   });
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  for (const p of pairs) {
-    const file = path.join(OUT_DIR, `box${p.box}.env.patch`);
+  for (const b of boxes) {
+    const file = path.join(OUT_DIR, `box${b.box}.env.patch`);
+    const watcherEmails = b.pairs.map((p) => p.watcher.email);
     fs.writeFileSync(
       file,
       [
-        `BOX_ID=box${p.box}`,
+        `BOX_ID=box${b.box}`,
         'WORKER_DIRECT=1',
-        `TARGET_EMAIL=${p.watcher.email}`,
+        `TARGET_EMAIL=${watcherEmails[0]}`,
+        `TARGET_EMAILS=${watcherEmails.join(',')}`,
         'AUTO_STAGGER=1',
         `BOX_COUNT=${BOX_COUNT}`,
         '',

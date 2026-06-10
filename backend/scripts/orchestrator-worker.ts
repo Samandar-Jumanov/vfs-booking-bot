@@ -971,8 +971,9 @@ async function driveRun(runId: string): Promise<void> {
   // RUN_LIMIT caps how many accounts a run drives — prevents touching the whole
   // pool at once. 0/unset = no cap.
   const runLimit = Number(process.env.RUN_LIMIT ?? 0);
-  // TARGET_EMAIL pins the run to one specific account.
-  const targetEmail = process.env.TARGET_EMAIL?.trim();
+  // TARGET_EMAIL pins the run to one account; TARGET_EMAILS gives this box a
+  // small local pool for automatic failover when one watcher is cooling/flagged.
+  const targetEmails = directTargetEmails();
   const accounts: DriveAccount[] = await prisma.vfsAccount.findMany({
     // Exclude already-BOOKED accounts so a successful booking is never re-driven
     // (no double-book, no wasted requests on a client that's already done).
@@ -980,8 +981,8 @@ async function driveRun(runId: string): Promise<void> {
     // This keeps idle unlinked spares resting, and auto-rotate continues seamlessly —
     // when a blocked account's profileIds are moved to a spare (rotate logic above),
     // the spare is queued into this same run after the normal stagger.
-    where: targetEmail
-      ? { status: 'ACTIVE', email: targetEmail, lifecycleState: { not: 'BOOKED' } }
+    where: targetEmails.length > 0
+      ? { status: 'ACTIVE', email: { in: targetEmails }, lifecycleState: { notIn: ['BOOKED', 'BLOCKED', 'RESTRICTED'] }, pollingRole: { not: 'BOOKER' } }
       : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false }, pollingRole: { not: 'BOOKER' } },
     select: {
       id: true,
@@ -995,7 +996,7 @@ async function driveRun(runId: string): Promise<void> {
     ...(runLimit > 0 ? { take: runLimit } : {}),
   });
 
-  log(`account selection: mode=${targetEmail ? `pinned(${targetEmail})` : 'linked-profile'} found=${accounts.length}`);
+  log(`account selection: mode=${targetEmails.length > 0 ? `pinned-pool(${targetEmails.length})` : 'linked-profile'} found=${accounts.length}`);
 
   if (accounts.length === 0) {
     log('no ACTIVE accounts to drive — run complete');
@@ -1258,6 +1259,15 @@ function directStaggerDelayMs(): number {
   return Math.round((Math.min(boxNumber, boxCount) - 1) * slotSec * 1000);
 }
 
+function directTargetEmails(): string[] {
+  const targetEmails = (process.env.TARGET_EMAILS ?? '')
+    .split(',')
+    .map((email) => email.trim())
+    .filter(Boolean);
+  const targetEmail = process.env.TARGET_EMAIL?.trim();
+  return targetEmails.length > 0 ? Array.from(new Set(targetEmails)) : (targetEmail ? [targetEmail] : []);
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -1430,13 +1440,13 @@ async function main(): Promise<void> {
   }
 
   if (process.env.WORKER_DIRECT === '1') {
-    const targetEmail = process.env.TARGET_EMAIL?.trim();
-    if (!targetEmail) {
-      log('WORKER_DIRECT=1 requires TARGET_EMAIL to avoid multi-box account collisions');
+    const targetEmails = directTargetEmails();
+    if (targetEmails.length === 0) {
+      log('WORKER_DIRECT=1 requires TARGET_EMAIL or TARGET_EMAILS to avoid multi-box account collisions');
       await prisma.$disconnect();
       process.exit(1);
     }
-    log(`Starting in direct mode for TARGET_EMAIL=${targetEmail} BOX_ID=${process.env.BOX_ID ?? 'none'}`);
+    log(`Starting in direct mode for TARGET_EMAILS=${targetEmails.join(',')} BOX_ID=${process.env.BOX_ID ?? 'none'}`);
     const staggerMs = directStaggerDelayMs();
     if (staggerMs > 0) {
       log(`AUTO_STAGGER: waiting ${Math.round(staggerMs / 1000)}s before first direct run`);
