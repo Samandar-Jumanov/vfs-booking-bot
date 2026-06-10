@@ -155,7 +155,7 @@ async function main() {
       });
       }
     }
-  });
+  }, { timeout: 30_000 });
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const b of boxes) {
