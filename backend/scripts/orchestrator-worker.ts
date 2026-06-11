@@ -1139,7 +1139,12 @@ function makeBudget(maxRequests = MAX_LIFT_REQUESTS): { remaining: () => number;
 // driveRun — main run orchestration
 // ---------------------------------------------------------------------------
 
-async function driveRun(runId: string): Promise<void> {
+interface DriveRunOptions {
+  fleetPartition?: boolean;
+  runLimitOverride?: number;
+}
+
+async function driveRun(runId: string, options: DriveRunOptions = {}): Promise<void> {
   log(`driveRun start. runId=${runId}`);
   await upsertBoxHeartbeat({ status: WorkerBoxStatus.WORKING });
   if (await boxCooldownActive()) {
@@ -1273,11 +1278,11 @@ async function driveRun(runId: string): Promise<void> {
   // 3. Load ACTIVE accounts for login → monitor → book
   // RUN_LIMIT caps how many accounts a run drives — prevents touching the whole
   // pool at once. 0/unset = no cap.
-  const runLimit = Number(process.env.RUN_LIMIT ?? 0);
+  const runLimit = options.runLimitOverride ?? Number(process.env.RUN_LIMIT ?? 0);
   // TARGET_EMAIL pins the run to one account; TARGET_EMAILS gives this box a
   // small local pool for automatic failover when one watcher is cooling/flagged.
   const targetEmails = directTargetEmails();
-  const accounts: DriveAccount[] = await prisma.vfsAccount.findMany({
+  let accounts: DriveAccount[] = await prisma.vfsAccount.findMany({
     // Exclude already-BOOKED accounts so a successful booking is never re-driven
     // (no double-book, no wasted requests on a client that's already done).
     // Default mode: only drive accounts that hold a client profile (profileIds non-empty).
@@ -1286,7 +1291,9 @@ async function driveRun(runId: string): Promise<void> {
     // the spare is queued into this same run after the normal stagger.
     where: targetEmails.length > 0
       ? { status: 'ACTIVE', email: { in: targetEmails }, lifecycleState: { notIn: ['BOOKED', 'BLOCKED', 'RESTRICTED'] }, pollingRole: { not: 'BOOKER' } }
-      : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false }, pollingRole: { not: 'BOOKER' } },
+      : options.fleetPartition
+        ? { status: 'ACTIVE', lifecycleState: { notIn: ['BOOKED', 'BLOCKED', 'RESTRICTED'] }, pollingRole: { not: 'BOOKER' } }
+        : { status: 'ACTIVE', lifecycleState: { not: 'BOOKED' }, profileIds: { isEmpty: false }, pollingRole: { not: 'BOOKER' } },
     select: {
       id: true,
       email: true,
@@ -1296,10 +1303,16 @@ async function driveRun(runId: string): Promise<void> {
       pollingRole: true,
     },
     orderBy: { lastAttemptAt: 'asc' },
-    ...(runLimit > 0 ? { take: runLimit } : {}),
   });
 
-  log(`account selection: mode=${targetEmails.length > 0 ? `pinned-pool(${targetEmails.length})` : 'linked-profile'} found=${accounts.length}`);
+  if (options.fleetPartition && targetEmails.length === 0) {
+    const index = Math.max(0, boxNumber() - 1);
+    const count = Math.max(1, boxCount());
+    accounts = accounts.filter((_account, accountIndex) => accountIndex % count === index);
+  }
+  if (runLimit > 0) accounts = accounts.slice(0, runLimit);
+
+  log(`account selection: mode=${targetEmails.length > 0 ? `pinned-pool(${targetEmails.length})` : options.fleetPartition ? `fleet-partition(box=${boxNumber()}/${boxCount()})` : 'linked-profile'} found=${accounts.length}`);
 
   if (accounts.length === 0) {
     log('no ACTIVE accounts to drive — run complete');
@@ -1575,6 +1588,113 @@ interface ScenarioRun {
   stoppingAt?: string;
 }
 
+const FLEET_WATCH_RUN_KEY = 'fleet_watch_run';
+
+interface FleetWatchRunParticipant {
+  status: 'running' | 'completed' | 'failed' | 'cooldown';
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
+
+interface FleetWatchRun {
+  runId: string;
+  requestedAt: string;
+  status: 'requested' | 'running' | 'completed' | 'stopping' | 'stopped' | 'failed';
+  expectedBoxCount?: number;
+  runLimitPerBox?: number;
+  startedAt?: string;
+  completedAt?: string;
+  participants?: Record<string, FleetWatchRunParticipant>;
+}
+
+function parseFleetWatchRun(value: unknown): FleetWatchRun | null {
+  const run = value as FleetWatchRun | null;
+  if (!run || typeof run !== 'object' || typeof run.runId !== 'string' || typeof run.status !== 'string') return null;
+  return {
+    ...run,
+    participants: run.participants && typeof run.participants === 'object' ? run.participants : {},
+  };
+}
+
+function fleetRunTerminal(run: FleetWatchRun): boolean {
+  return ['completed', 'stopped', 'failed'].includes(run.status);
+}
+
+async function claimFleetWatchRun(run: FleetWatchRun): Promise<FleetWatchRun | null> {
+  if (BOX_ROLE !== WorkerBoxRole.WATCHER || fleetRunTerminal(run) || run.status === 'stopping') return null;
+  const participants = run.participants ?? {};
+  if (participants[BOX_ID]) return null;
+  const now = new Date().toISOString();
+  const next: FleetWatchRun = {
+    ...run,
+    status: 'running',
+    startedAt: run.startedAt ?? now,
+    participants: {
+      ...participants,
+      [BOX_ID]: { status: 'running', startedAt: now },
+    },
+  };
+  await prisma.settings.update({
+    where: { key: FLEET_WATCH_RUN_KEY },
+    data: { value: next as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+  });
+  return next;
+}
+
+async function finishFleetWatchRun(runId: string, status: FleetWatchRunParticipant['status'], error?: string): Promise<void> {
+  const row = await prisma.settings.findUnique({ where: { key: FLEET_WATCH_RUN_KEY } }).catch(() => null);
+  const run = parseFleetWatchRun(row?.value);
+  if (!run || run.runId !== runId) return;
+  const now = new Date().toISOString();
+  const participants = {
+    ...(run.participants ?? {}),
+    [BOX_ID]: {
+      ...(run.participants?.[BOX_ID] ?? {}),
+      status,
+      completedAt: now,
+      ...(error ? { error } : {}),
+    },
+  };
+  const doneCount = Object.values(participants).filter((p) => ['completed', 'failed', 'cooldown'].includes(p.status)).length;
+  const expected = Math.max(1, Number(run.expectedBoxCount ?? boxCount()));
+  const next: FleetWatchRun = {
+    ...run,
+    participants,
+    status: run.status === 'stopping'
+      ? 'stopped'
+      : doneCount >= expected ? 'completed' : 'running',
+    completedAt: doneCount >= expected || run.status === 'stopping' ? now : run.completedAt,
+  };
+  await prisma.settings.update({
+    where: { key: FLEET_WATCH_RUN_KEY },
+    data: { value: next as unknown as Parameters<typeof prisma.settings.update>[0]['data']['value'] },
+  }).catch((e) => log(`WARN: fleet run finish update failed: ${(e as Error).message}`));
+}
+
+async function maybeRunFleetWatch(): Promise<boolean> {
+  const row = await prisma.settings.findUnique({ where: { key: FLEET_WATCH_RUN_KEY } }).catch(() => null);
+  const run = parseFleetWatchRun(row?.value);
+  if (!run || !['requested', 'running'].includes(run.status)) return false;
+  const claimed = await claimFleetWatchRun(run);
+  if (!claimed) return false;
+
+  const perBoxRunId = `fleet-${claimed.runId}-${BOX_ID}`;
+  log(`Claimed fleet watch run ${claimed.runId} as ${BOX_ID}`);
+  try {
+    await driveRun(perBoxRunId, {
+      fleetPartition: true,
+      runLimitOverride: Math.max(1, Number(claimed.runLimitPerBox ?? process.env.RUN_LIMIT ?? 1)),
+    });
+    await finishFleetWatchRun(claimed.runId, 'completed');
+  } catch (e) {
+    const message = (e as Error).message;
+    await finishFleetWatchRun(claimed.runId, isBoxTrustLoss(message) ? 'cooldown' : 'failed', message);
+    throw e;
+  }
+  return true;
+}
+
 // A 'running' run whose claimedAt is older than this with no completion is
 // assumed orphaned (claimer crashed/killed) and is reclaimed by the next worker.
 const STALE_RUN_MS = 90_000;
@@ -1807,6 +1927,11 @@ async function main(): Promise<void> {
 
   for (;;) {
     try {
+      if (await maybeRunFleetWatch()) {
+        await sleep(POLL_INTERVAL_SEC * 1000);
+        continue;
+      }
+
       // Poll Settings for scenario_run
       const row = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
       const run = row?.value as ScenarioRun | null;

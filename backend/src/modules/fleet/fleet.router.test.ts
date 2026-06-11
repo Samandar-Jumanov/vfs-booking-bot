@@ -45,6 +45,7 @@ jest.mock('@config/database', () => ({
     settings: {
       findUnique: jest.fn(),
       upsert: jest.fn(),
+      update: jest.fn(),
     },
     slotCheckAudit: {
       create: jest.fn(),
@@ -76,6 +77,7 @@ const mockPrisma = prisma as unknown as {
   settings: {
     findUnique: jest.Mock;
     upsert: jest.Mock;
+    update: jest.Mock;
   };
   slotCheckAudit: {
     create: jest.Mock;
@@ -136,6 +138,7 @@ describe('fleetRouter', () => {
     mockPrisma.accountLease.upsert.mockImplementation(async (args) => ({ id: 'lease-1', ...args.create, ...args.update }));
     mockPrisma.settings.findUnique.mockResolvedValue(null);
     mockPrisma.settings.upsert.mockResolvedValue({});
+    mockPrisma.settings.update.mockResolvedValue({});
     mockPrisma.slotCheckAudit.create.mockImplementation(async (args) => ({ id: 'audit-1', ...args.data }));
     mockPrisma.slotCheckAudit.findMany.mockResolvedValue([]);
     mockPrisma.slotCheckAudit.count.mockResolvedValue(0);
@@ -516,6 +519,81 @@ describe('fleetRouter', () => {
         update: { value: res.body },
         create: { key: 'fleet_burst_config', value: res.body },
       });
+    });
+  });
+
+  it('starts a fleet-wide watch run for fresh online watcher boxes', async () => {
+    mockPrisma.workerBox.findMany.mockResolvedValue([
+      {
+        boxId: 'box1',
+        role: 'WATCHER',
+        status: 'ONLINE',
+        heartbeatAt: new Date('2026-06-11T08:59:45.000Z'),
+        cooldownUntil: null,
+      },
+      {
+        boxId: 'box2',
+        role: 'WATCHER',
+        status: 'ONLINE',
+        heartbeatAt: new Date('2026-06-11T08:55:00.000Z'),
+        cooldownUntil: null,
+      },
+      {
+        boxId: 'box3',
+        role: 'COOLDOWN',
+        status: 'COOLDOWN',
+        heartbeatAt: new Date('2026-06-11T08:59:45.000Z'),
+        cooldownUntil: new Date('2026-06-11T10:00:00.000Z'),
+      },
+    ]);
+
+    await withApp(async (baseUrl) => {
+      const res = await requestJson(baseUrl, '/api/fleet/watch-run/start', {
+        method: 'POST',
+        body: JSON.stringify({ runLimitPerBox: 1 }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.eligibleBoxes).toEqual(['box1']);
+      expect(res.body.run).toEqual(expect.objectContaining({
+        status: 'requested',
+        expectedBoxCount: 1,
+        runLimitPerBox: 1,
+        participants: {},
+      }));
+      expect(mockPrisma.settings.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { key: 'fleet_watch_run' },
+        update: { value: res.body.run },
+        create: { key: 'fleet_watch_run', value: res.body.run },
+      }));
+    });
+  });
+
+  it('returns and stops the current fleet watch run', async () => {
+    mockPrisma.settings.findUnique.mockResolvedValue({
+      value: {
+        runId: 'run-1',
+        status: 'running',
+        requestedAt: '2026-06-11T08:59:00.000Z',
+        expectedBoxCount: 2,
+        runLimitPerBox: 1,
+        participants: { box1: { status: 'running' } },
+      },
+    });
+
+    await withApp(async (baseUrl) => {
+      const current = await requestJson(baseUrl, '/api/fleet/watch-run');
+      const stopped = await requestJson(baseUrl, '/api/fleet/watch-run/stop', { method: 'POST' });
+
+      expect(current.status).toBe(200);
+      expect(current.body.runId).toBe('run-1');
+      expect(stopped.status).toBe(200);
+      expect(stopped.body.run.status).toBe('stopping');
+      expect(mockPrisma.settings.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { key: 'fleet_watch_run' },
+        update: { value: expect.objectContaining({ status: 'stopping' }) },
+      }));
     });
   });
 });

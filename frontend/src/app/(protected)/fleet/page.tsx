@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Clock, Download, RefreshCw, Save, Server, ShieldAlert, Wifi, WifiOff } from 'lucide-react';
+import { Activity, Clock, Download, Play, RefreshCw, Save, Server, ShieldAlert, Square, Wifi, WifiOff } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -87,6 +87,17 @@ interface SlotCheckAuditResponse {
   items: SlotCheckAudit[];
 }
 
+interface FleetWatchRun {
+  runId: string;
+  status: string;
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  expectedBoxCount: number;
+  runLimitPerBox: number;
+  participants: Record<string, { status: string; startedAt?: string; completedAt?: string; error?: string }>;
+}
+
 const defaultBurst: BurstConfig = {
   timezone: 'Asia/Tashkent',
   windows: [{ start: '11:55', end: '12:15' }],
@@ -118,6 +129,12 @@ export default function FleetPage() {
     refetchInterval: 15000,
   });
 
+  const watchRunQuery = useQuery<FleetWatchRun | null>({
+    queryKey: ['fleet-watch-run'],
+    queryFn: () => api.get<FleetWatchRun | null>('/fleet/watch-run').then((r) => r.data),
+    refetchInterval: 5000,
+  });
+
   useEffect(() => {
     if (burstQuery.data) setDraft(burstQuery.data);
   }, [burstQuery.data]);
@@ -130,11 +147,36 @@ export default function FleetPage() {
     },
   });
 
+  const startWatchRun = useMutation({
+    mutationFn: () => api.post('/fleet/watch-run/start', { runLimitPerBox: 1 }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fleet-watch-run'] });
+      qc.invalidateQueries({ queryKey: ['fleet-status'] });
+    },
+  });
+
+  const stopWatchRun = useMutation({
+    mutationFn: () => api.post('/fleet/watch-run/stop').then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fleet-watch-run'] });
+      qc.invalidateQueries({ queryKey: ['fleet-status'] });
+    },
+  });
+
   const boxes = useMemo(() => statusQuery.data?.boxes ?? [], [statusQuery.data?.boxes]);
   const leases = useMemo(() => statusQuery.data?.leases ?? [], [statusQuery.data?.leases]);
   const summary = statusQuery.data?.summary ?? { total: 0, online: 0, cooldown: 0, offline: 0 };
   const auditSummary = auditQuery.data?.summary ?? {};
   const auditRows = auditQuery.data?.items ?? [];
+  const watchRun = watchRunQuery.data ?? null;
+  const participantCounts = useMemo(() => {
+    const participants = Object.values(watchRun?.participants ?? {});
+    return {
+      running: participants.filter((item) => item.status === 'running').length,
+      done: participants.filter((item) => ['completed', 'failed', 'cooldown'].includes(item.status)).length,
+      failed: participants.filter((item) => ['failed', 'cooldown'].includes(item.status)).length,
+    };
+  }, [watchRun?.participants]);
   const activeBoxes = useMemo(() => boxes.filter((box) => box.status === 'WORKING' || box.status === 'ONLINE'), [boxes]);
 
   const updateWindow = (index: number, key: 'start' | 'end', value: string) => {
@@ -173,6 +215,35 @@ export default function FleetPage() {
         <Stat label="Cooling" value={summary.cooldown} tone="warn" icon={<Clock className="h-4 w-4" />} />
         <Stat label="Offline" value={summary.offline} tone="bad" icon={<WifiOff className="h-4 w-4" />} />
       </div>
+
+      <section className="card mt-6 bg-card/70 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Fleet watch run</p>
+            <h2 className="mt-1 text-lg font-black">{watchRun ? watchRun.status.toUpperCase() : 'IDLE'}</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {watchRun
+                ? `${participantCounts.done}/${watchRun.expectedBoxCount} done, ${participantCounts.running} running, ${participantCounts.failed} failed`
+                : 'No fleet-wide watch run has been requested.'}
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" className="btn-primary h-9 gap-2" onClick={() => startWatchRun.mutate()} disabled={startWatchRun.isPending || watchRun?.status === 'running' || watchRun?.status === 'requested'}>
+              <Play className="h-4 w-4" />
+              Start Fleet Watch
+            </button>
+            <button type="button" className="btn-secondary h-9 gap-2" onClick={() => stopWatchRun.mutate()} disabled={stopWatchRun.isPending || !watchRun || !['requested', 'running'].includes(watchRun.status)}>
+              <Square className="h-4 w-4" />
+              Stop
+            </button>
+          </div>
+        </div>
+        {watchRun && (
+          <div className="mt-3 truncate font-mono text-xs text-muted-foreground">
+            run {watchRun.runId} · requested {new Date(watchRun.requestedAt).toLocaleString()} · limit {watchRun.runLimitPerBox}/box
+          </div>
+        )}
+      </section>
 
       <section className="card mt-6 bg-card/70 p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">

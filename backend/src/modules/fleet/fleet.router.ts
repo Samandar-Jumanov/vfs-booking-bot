@@ -5,6 +5,7 @@ import { env } from '@config/env';
 import { requireAuth } from '@middleware/auth.middleware';
 import { AppError } from '@middleware/errorHandler';
 import { WorkerBoxRole, WorkerBoxStatus } from '@prisma/client';
+import crypto from 'crypto';
 
 export const fleetRouter = Router();
 
@@ -12,6 +13,7 @@ const HEARTBEAT_STALE_MS = 120_000;
 const DEFAULT_LEASE_TTL_SEC = 15 * 60;
 const DEFAULT_COOLDOWN_MIN = 120;
 const BURST_CONFIG_KEY = 'fleet_burst_config';
+const WATCH_RUN_KEY = 'fleet_watch_run';
 
 function workerAuth(req: Request, _res: Response, next: NextFunction): void {
   const workerToken = env.WORKER_TOKEN;
@@ -128,6 +130,43 @@ const burstConfigSchema = z.object({
   staggerSeconds: z.number().int().min(0).max(300).default(0),
   maxChecksPerRun: z.number().int().min(1).max(100).default(10),
 });
+
+const watchRunStartSchema = z.object({
+  runLimitPerBox: z.number().int().min(1).max(10).default(1),
+});
+
+type FleetWatchRunParticipant = {
+  status: 'running' | 'completed' | 'failed' | 'cooldown';
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+};
+
+type FleetWatchRun = {
+  runId: string;
+  status: 'requested' | 'running' | 'completed' | 'stopping' | 'stopped' | 'failed';
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  expectedBoxCount: number;
+  runLimitPerBox: number;
+  participants: Record<string, FleetWatchRunParticipant>;
+};
+
+function parseWatchRun(value: unknown): FleetWatchRun | null {
+  const run = value as Partial<FleetWatchRun> | null;
+  if (!run || typeof run !== 'object' || typeof run.runId !== 'string' || typeof run.status !== 'string') return null;
+  return {
+    runId: run.runId,
+    status: run.status as FleetWatchRun['status'],
+    requestedAt: typeof run.requestedAt === 'string' ? run.requestedAt : new Date().toISOString(),
+    startedAt: typeof run.startedAt === 'string' ? run.startedAt : undefined,
+    completedAt: typeof run.completedAt === 'string' ? run.completedAt : undefined,
+    expectedBoxCount: typeof run.expectedBoxCount === 'number' ? run.expectedBoxCount : 0,
+    runLimitPerBox: typeof run.runLimitPerBox === 'number' ? run.runLimitPerBox : 1,
+    participants: run.participants && typeof run.participants === 'object' ? run.participants as Record<string, FleetWatchRunParticipant> : {},
+  };
+}
 
 fleetRouter.get('/status', requireAuth, async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -456,6 +495,71 @@ fleetRouter.put('/burst-config', requireAuth, async (req: Request, res: Response
       create: { key: BURST_CONFIG_KEY, value: body as never },
     });
     res.json(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fleetRouter.get('/watch-run', requireAuth, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: WATCH_RUN_KEY } });
+    res.json(parseWatchRun(row?.value) ?? null);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fleetRouter.post('/watch-run/start', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = watchRunStartSchema.parse(req.body ?? {});
+    const now = new Date();
+    const boxes = await prisma.workerBox.findMany({
+      where: {
+        role: WorkerBoxRole.WATCHER,
+        status: { in: [WorkerBoxStatus.ONLINE, WorkerBoxStatus.WORKING] },
+        OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }],
+      },
+      orderBy: { boxId: 'asc' },
+    });
+    const eligibleBoxes = boxes.filter((box) => publicStatus(box.status, box.heartbeatAt, box.cooldownUntil) === WorkerBoxStatus.ONLINE);
+    const run: FleetWatchRun = {
+      runId: crypto.randomUUID(),
+      status: 'requested',
+      requestedAt: now.toISOString(),
+      expectedBoxCount: eligibleBoxes.length,
+      runLimitPerBox: body.runLimitPerBox,
+      participants: {},
+    };
+    await prisma.settings.upsert({
+      where: { key: WATCH_RUN_KEY },
+      update: { value: run as never },
+      create: { key: WATCH_RUN_KEY, value: run as never },
+    });
+    res.json({ ok: true, run, eligibleBoxes: eligibleBoxes.map((box) => box.boxId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+fleetRouter.post('/watch-run/stop', requireAuth, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: WATCH_RUN_KEY } });
+    const existing = parseWatchRun(row?.value);
+    if (!existing) {
+      res.json({ ok: true, run: null });
+      return;
+    }
+    const run: FleetWatchRun = {
+      ...existing,
+      status: existing.status === 'completed' ? 'completed' : 'stopping',
+      completedAt: existing.completedAt ?? new Date().toISOString(),
+    };
+    await prisma.settings.upsert({
+      where: { key: WATCH_RUN_KEY },
+      update: { value: run as never },
+      create: { key: WATCH_RUN_KEY, value: run as never },
+    });
+    res.json({ ok: true, run });
   } catch (err) {
     next(err);
   }

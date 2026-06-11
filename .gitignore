@@ -47,3 +47,6 @@ frontend/package-lock.json
 # captured live lift-api token (never commit)
 nodriver-spike/.lift-creds.json
 .lift-creds.json
+
+# Local VPS credentials / RDP access notes (never commit)
+ops/local-vps-credentials.txt
