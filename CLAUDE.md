@@ -228,7 +228,7 @@ PUT    /api/settings/captcha
 
 ---
 
-## Current State & Known Issues (updated 2026-06-05)
+## Current State & Known Issues (updated 2026-06-11)
 
 Scope: **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer accounts. Architecture: Node/TS backend + Next.js dashboard on **Railway**; **nodriver** Python engine (`nodriver-spike/auto_pipeline.py`) for hands-off register/login/monitor/book, driven by `backend/scripts/orchestrator-worker.ts`. Package manager is **npm**.
 
@@ -254,6 +254,17 @@ Scope: **UZ → Latvia D-visa (work/cargo)**, Model-A per-customer accounts. Arc
 **SLOT BEHAVIOR (observed 2026-06-05 — first real data):** a real **Work-D UZ→LVA slot DOES appear** (opened ~**12:00 Tashkent**, lasted **< ~5 min**). The bot was watching on the VPS but checked every ~5 min (11:59 → 12:04) and the slot opened+closed inside that gap → **MISSED.** ⟹ to catch a sub-5-min slot you need **dense checks AT the release window** (burst, every few sec) + **multiple staggered UZ IPs** (one IP's ~10-call budget can't densely cover the window). Release cadence (daily vs specific days) still unconfirmed — ask the client.
 
 **Remaining blockers:**
+
+**2026-06-11 live ops update - multi-VPS account factory / activation / CSV export:**
+- **Dashboard CSV export was implemented and pushed** in commit `470587b` (`Add account pool CSV export`). The protected account pool page has a **Download CSV** action, backed by `GET /api/accounts/export-csv`, exporting account email, decrypted password, phone, status, role, cookie metadata, timestamps, linked profile count, and tab URL. Treat this endpoint as high-sensitivity: it exposes usable credentials and must remain authenticated/admin-only.
+- **Last observed production account pool after manual updates:** `ACTIVE=108`, `PENDING=7`, `BLOCKED=1`. Treat this as a session snapshot, not a source of truth; query the DB before making decisions.
+- **Account creation across Eskiz VPSs is throttle-sensitive.** Running `REGISTER_COUNT=50` caused several boxes to hit `form_not_rendered`, `/page-not-found`, or "Register never enabled". The safer pattern is: test each box with `REGISTER_COUNT=1`; if good, run batches of `REGISTER_COUNT=10` (max 15) with `REGISTER_STAGGER_SEC=120`; then cool the IP for 1-2h after a throttle/page-not-found.
+- **Main root cause of creator failures:** VFS/Datadome per-IP/session throttling and page withholding, not missing npm/python installs. Symptoms: no register form fields, `/page-not-found`, Turnstile never enabling submit, consent overlay covering submit, or no `register/user` POST. Do not keep hammering a box after those symptoms.
+- **Pending activation workflow exists locally:** `backend/scripts/export-pending-activation-report.ts` exports PENDING accounts with inbox links, activation link status, phone, and decrypted password into `ops/pending-activation-accounts.csv` / `.md`; `backend/scripts/mark-activation-report-active.ts` marks manually confirmed rows ACTIVE; `backend/scripts/bulk-trigger-recover.ts` asks the deployed backend to trigger recovery for pending Mailsac/elite accounts. Generated reports contain passwords and must not be committed or shared.
+- **Do not mark PENDING accounts ACTIVE unless VFS confirms activation/login.** Some PENDING rows are recoverable via "inactive/resend activation"; others may return "email id is not registered", meaning the registration POST never happened and the DB row is not usable.
+- **Local reconciliation limitation:** running `reconcile-pending.ts` locally can query DB/Mailsac, but activation through the extension socket only works where the production backend has a connected extension/Chrome session. Use the production recovery endpoint when the extension is live, or manually open the Mailsac activation links.
+- **RDP/VPS session fragility remains:** visible Chrome automation can pause or disconnect when RDP drops. Use VMmanager VNC or the always-on/console-session setup for long runs; do not restart/reconnect boxes that are already working unless necessary.
+
 1. **Catch + book a live Work-D slot — STILL UNPROVEN, but reframed (2026-06-05):** slots are real (see SLOT BEHAVIOR); the blocker is now CATCHING one (need noon-burst + multi-IP density) and then BOOKING it before VFS voids it. ⚠️ VFS states **bookings via "automated systems" are deleted** — so until auto-booking is proven to survive detection, lean on the instant Telegram alert + **manual booking**. Booking Steps 1–5 are coded + walked but never completed on a live Work-D slot.
 2. **Multi-box coordination not built** — per-box lock (`BOX_ID`) exists, but running N boxes still needs work-partitioning (Model 1) or monitor-fan-out (Model 2) so they don't double-drive an account. Today: manual partition via `TARGET_EMAIL` per box.
 3. **Mailsac free tier 429s** on activation/OTP → paid tier for reliable hands-off.
