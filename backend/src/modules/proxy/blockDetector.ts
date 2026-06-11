@@ -6,6 +6,11 @@ const BLOCK_STATUS_CODES = [403, 429, 503];
 
 export function detectBlockFromResponse(response: PlaywrightResponse): BlockSignal | null {
   const status = response.status();
+  const url = response.url().toLowerCase();
+
+  if (url.includes('429001')) {
+    return { type: 'account_flag' };
+  }
 
   if (BLOCK_STATUS_CODES.includes(status)) {
     return {
@@ -13,7 +18,6 @@ export function detectBlockFromResponse(response: PlaywrightResponse): BlockSign
     };
   }
 
-  const url = response.url().toLowerCase();
   if (BLOCK_URL_PATTERNS.some((p) => url.includes(p))) {
     return { type: 'ip_block' };
   }
@@ -34,6 +38,9 @@ export async function detectBlockFromPage(page: Page): Promise<BlockSignal | nul
     const bodyText = await page.evaluate(() => document.body?.innerText ?? '');
     const lower = bodyText.toLowerCase();
 
+    if (lower.includes('429001') || lower.includes('account locked')) {
+      return { type: 'account_flag' };
+    }
     if (lower.includes('access denied') || lower.includes('your ip')) {
       return { type: 'ip_block' };
     }

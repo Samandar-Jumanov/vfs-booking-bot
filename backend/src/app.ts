@@ -23,6 +23,7 @@ import { bootstrapRouter } from '@modules/auth/bootstrap.router';
 import { statusRouter } from '@modules/status/status.router';
 import { scenarioRouter } from '@modules/scenario/scenario.router';
 import { pipelineRouter } from '@modules/pipeline/pipeline.router';
+import { fleetRouter } from '@modules/fleet/fleet.router';
 
 export function createApp() {
   const app = express();
@@ -147,6 +148,7 @@ export function createApp() {
   app.use('/api/vendor', vendorRouter);
   app.use('/api/scenario', scenarioRouter);
   app.use('/api/pipeline', pipelineRouter);
+  app.use('/api/fleet', fleetRouter);
 
   // ── Error handler (must be last) ─────────────────────────────────────────
   app.use(errorHandler);

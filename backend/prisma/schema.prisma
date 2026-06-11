@@ -200,6 +200,21 @@ enum PollingRole {
   BOTH
 }
 
+enum WorkerBoxRole {
+  CREATOR
+  WATCHER
+  BOOKER
+  COOLDOWN
+  OFFLINE
+}
+
+enum WorkerBoxStatus {
+  ONLINE
+  WORKING
+  COOLDOWN
+  OFFLINE
+}
+
 enum LifecycleStateEnum {
   NEW
   REGISTERING
@@ -237,6 +252,46 @@ model VfsAccount {
   bookedAt          DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
+
+  leases            AccountLease[]
+}
+
+model WorkerBox {
+  boxId                String          @id
+  role                 WorkerBoxRole   @default(OFFLINE)
+  status               WorkerBoxStatus @default(OFFLINE)
+  heartbeatAt          DateTime?
+  pid                  Int?
+  hostname             String?
+  assignedAccountId    String?
+  assignedAccountEmail String?
+  currentUrl           String?
+  pageState            Json?
+  lastSuccessfulCheckAt DateTime?
+  lastError            String?
+  lastBlockReason      String?
+  cooldownUntil        DateTime?
+  creationSuccessCount Int             @default(0)
+  creationFailureCount Int             @default(0)
+  startedAt            DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+}
+
+model AccountLease {
+  id          String    @id @default(cuid())
+  account    VfsAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  accountId   String
+  boxId       String
+  role        WorkerBoxRole
+  runId       String?
+  acquiredAt  DateTime  @default(now())
+  heartbeatAt DateTime  @default(now())
+  expiresAt   DateTime
+
+  @@unique([accountId])
+  @@index([boxId])
+  @@index([expiresAt])
 }
 
 model ReceivedEmail {

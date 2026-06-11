@@ -16,7 +16,7 @@ import fs from 'fs';
 import os from 'os';
 import { spawn, spawnSync } from 'child_process';
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, WorkerBoxRole, WorkerBoxStatus } from '@prisma/client';
 import { isDue, permitsGlobalAction, pickNextDue } from '../src/modules/lifecycle/pacer';
 import type { AccountTiming, PacerConfig } from '../src/modules/lifecycle/types';
 import type { LifecycleState } from '../src/modules/lifecycle/types';
@@ -26,7 +26,6 @@ import type { LifecycleState } from '../src/modules/lifecycle/types';
 import {
   classifyThrottle,
   isThrottled,
-  nextBackoffMs,
   canRegisterNow,
   recordRegistration,
   type DailyRegState,
@@ -57,6 +56,13 @@ const BOOKING_ONLY = process.env.BOOKING_ONLY === '1';
 // pool_builder: continuously top up the account pool at REG_INTERVAL_MIN minutes/account,
 // never drives/books. Run separately from the booking worker.
 const WORKER_MODE = (process.env.WORKER_MODE ?? 'book') as 'book' | 'pool_builder';
+const BOX_ID = process.env.BOX_ID?.trim() || os.hostname();
+const BOX_COOLDOWN_MIN = Number(process.env.BOX_COOLDOWN_MIN ?? 120);
+const ACCOUNT_LEASE_TTL_SEC = Number(process.env.ACCOUNT_LEASE_TTL_SEC ?? 15 * 60);
+const BOX_ROLE: WorkerBoxRole =
+  WORKER_MODE === 'pool_builder'
+    ? WorkerBoxRole.CREATOR
+    : (process.env.BOX_ROLE?.toUpperCase() === 'BOOKER' ? WorkerBoxRole.BOOKER : WorkerBoxRole.WATCHER);
 // REG_INTERVAL_MIN: minutes between registrations in pool_builder mode (default: 10)
 const REG_INTERVAL_MIN = Number(process.env.REG_INTERVAL_MIN ?? 10);
 // Per-run lift-api request budget. Default is conservative (50/run).
@@ -135,6 +141,150 @@ function log(...a: unknown[]): void {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function isBoxTrustLoss(reason: string): boolean {
+  return /429201|429202|403|403201|rate_limit|rate-limited|rate_limited|datadome|page_not_found|page-not-found|form_not_rendered|register never enabled|turnstile|login_failed|budget_rate_limit|budget_exhausted|session_invalid/i.test(reason);
+}
+
+async function upsertBoxHeartbeat(data: {
+  status?: WorkerBoxStatus;
+  role?: WorkerBoxRole;
+  assignedAccountId?: string | null;
+  assignedAccountEmail?: string | null;
+  currentUrl?: string | null;
+  pageState?: unknown;
+  lastSuccessfulCheckAt?: Date | null;
+  lastError?: string | null;
+} = {}): Promise<void> {
+  const now = new Date();
+  await prisma.workerBox.upsert({
+    where: { boxId: BOX_ID },
+    update: {
+      role: data.role ?? BOX_ROLE,
+      status: data.status ?? WorkerBoxStatus.ONLINE,
+      heartbeatAt: now,
+      pid: process.pid,
+      hostname: os.hostname(),
+      assignedAccountId: data.assignedAccountId ?? undefined,
+      assignedAccountEmail: data.assignedAccountEmail ?? undefined,
+      currentUrl: data.currentUrl ?? undefined,
+      pageState: data.pageState === undefined ? undefined : data.pageState as never,
+      lastSuccessfulCheckAt: data.lastSuccessfulCheckAt ?? undefined,
+      lastError: data.lastError ?? undefined,
+      startedAt: undefined,
+    },
+    create: {
+      boxId: BOX_ID,
+      role: data.role ?? BOX_ROLE,
+      status: data.status ?? WorkerBoxStatus.ONLINE,
+      heartbeatAt: now,
+      pid: process.pid,
+      hostname: os.hostname(),
+      assignedAccountId: data.assignedAccountId ?? null,
+      assignedAccountEmail: data.assignedAccountEmail ?? null,
+      currentUrl: data.currentUrl ?? null,
+      pageState: data.pageState as never,
+      lastSuccessfulCheckAt: data.lastSuccessfulCheckAt ?? null,
+      lastError: data.lastError ?? null,
+      startedAt: now,
+    },
+  }).catch((e) => log(`WARN: box heartbeat failed: ${(e as Error).message}`));
+}
+
+async function markBoxCooldown(reason: string, account?: { id: string; email: string }): Promise<Date> {
+  const cooldownUntil = new Date(Date.now() + BOX_COOLDOWN_MIN * 60_000);
+  await prisma.workerBox.upsert({
+    where: { boxId: BOX_ID },
+    update: {
+      role: WorkerBoxRole.COOLDOWN,
+      status: WorkerBoxStatus.COOLDOWN,
+      heartbeatAt: new Date(),
+      assignedAccountId: account?.id ?? null,
+      assignedAccountEmail: account?.email ?? null,
+      lastError: reason,
+      lastBlockReason: reason,
+      cooldownUntil,
+    },
+    create: {
+      boxId: BOX_ID,
+      role: WorkerBoxRole.COOLDOWN,
+      status: WorkerBoxStatus.COOLDOWN,
+      heartbeatAt: new Date(),
+      pid: process.pid,
+      hostname: os.hostname(),
+      assignedAccountId: account?.id ?? null,
+      assignedAccountEmail: account?.email ?? null,
+      lastError: reason,
+      lastBlockReason: reason,
+      cooldownUntil,
+      startedAt: new Date(),
+    },
+  }).catch((e) => log(`WARN: mark box cooldown failed: ${(e as Error).message}`));
+  await prisma.accountLease.deleteMany({ where: { boxId: BOX_ID } }).catch(() => {});
+  log(`BOX COOLDOWN: ${BOX_ID} until=${cooldownUntil.toISOString()} reason=${reason}`);
+  return cooldownUntil;
+}
+
+async function boxCooldownActive(): Promise<boolean> {
+  const box = await prisma.workerBox.findUnique({ where: { boxId: BOX_ID }, select: { cooldownUntil: true, lastBlockReason: true } });
+  if (box?.cooldownUntil && box.cooldownUntil.getTime() > Date.now()) {
+    log(`box ${BOX_ID} is cooling down until ${box.cooldownUntil.toISOString()} (${box.lastBlockReason ?? 'unknown'})`);
+    return true;
+  }
+  return false;
+}
+
+async function acquireAccountLease(account: DriveAccount, runId: string, role: WorkerBoxRole): Promise<boolean> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ACCOUNT_LEASE_TTL_SEC * 1000);
+  const acquired = await prisma.$transaction(async (tx) => {
+    await tx.accountLease.deleteMany({ where: { expiresAt: { lt: now } } });
+    const existing = await tx.accountLease.findUnique({ where: { accountId: account.id } });
+    if (existing && existing.boxId !== BOX_ID && existing.expiresAt > now) return false;
+    await tx.accountLease.upsert({
+      where: { accountId: account.id },
+      update: { boxId: BOX_ID, role, runId, heartbeatAt: now, expiresAt },
+      create: { accountId: account.id, boxId: BOX_ID, role, runId, heartbeatAt: now, expiresAt },
+    });
+    return true;
+  });
+  if (!acquired) log(`skip ${account.email}: leased by another box`);
+  return acquired;
+}
+
+async function releaseAccountLease(accountId: string): Promise<void> {
+  await prisma.accountLease.deleteMany({ where: { accountId, boxId: BOX_ID } }).catch(() => {});
+}
+
+async function extendBoxLeases(): Promise<void> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ACCOUNT_LEASE_TTL_SEC * 1000);
+  await prisma.accountLease.updateMany({
+    where: { boxId: BOX_ID },
+    data: { heartbeatAt: now, expiresAt },
+  }).catch(() => {});
+}
+
+async function recordCreationEvent(ok: boolean, reason?: string): Promise<void> {
+  await prisma.workerBox.upsert({
+    where: { boxId: BOX_ID },
+    update: ok
+      ? { creationSuccessCount: { increment: 1 }, lastError: null }
+      : { creationFailureCount: { increment: 1 }, lastError: reason ?? 'creation_failed' },
+    create: {
+      boxId: BOX_ID,
+      role: WorkerBoxRole.CREATOR,
+      status: WorkerBoxStatus.ONLINE,
+      heartbeatAt: new Date(),
+      pid: process.pid,
+      hostname: os.hostname(),
+      creationSuccessCount: ok ? 1 : 0,
+      creationFailureCount: ok ? 0 : 1,
+      lastError: ok ? null : reason ?? 'creation_failed',
+      startedAt: new Date(),
+    },
+  }).catch((e) => log(`WARN: creation event failed: ${(e as Error).message}`));
+}
 
 // ---------------------------------------------------------------------------
 // Milestone POST
@@ -469,6 +619,30 @@ async function loadAccountTimings(): Promise<AccountTiming[]> {
   }));
 }
 
+async function loadBurstEnv(): Promise<Record<string, string>> {
+  if (process.env.BURST_WINDOWS || process.env.BURST_TZ || process.env.BURST_INTERVAL || process.env.IDLE_INTERVAL) {
+    return {};
+  }
+  const row = await prisma.settings.findUnique({ where: { key: 'fleet_burst_config' } }).catch(() => null);
+  const value = row?.value as {
+    timezone?: unknown;
+    windows?: Array<{ start?: unknown; end?: unknown }>;
+    burstIntervalSeconds?: unknown;
+    idleIntervalSeconds?: unknown;
+  } | null;
+  if (!value || !Array.isArray(value.windows) || value.windows.length === 0) return {};
+  const windows = value.windows
+    .map((window) => `${String(window.start ?? '').trim()}-${String(window.end ?? '').trim()}`)
+    .filter((window) => /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(window));
+  if (windows.length === 0) return {};
+  return {
+    BURST_WINDOWS: windows.join(','),
+    BURST_TZ: String(value.timezone ?? 'Asia/Tashkent'),
+    BURST_INTERVAL: String(value.burstIntervalSeconds ?? 3),
+    IDLE_INTERVAL: String(value.idleIntervalSeconds ?? 300),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // driveAccountReal — spawns auto_pipeline.py (exact env from local-runner.ts)
 // ---------------------------------------------------------------------------
@@ -523,6 +697,7 @@ async function driveAccountReal(
   if (process.env.PROVE_OCMA) {
     spawnEnv['PROVE_OCMA'] = process.env.PROVE_OCMA;
   }
+  Object.assign(spawnEnv, await loadBurstEnv());
 
   if (profile) {
     addProfileEnv(spawnEnv, profile);
@@ -544,11 +719,18 @@ async function driveAccountReal(
     }
   }
 
+  let leasedBookerId: string | null = null;
   const booker = await findBookerPeer(acct);
   if (booker) {
     try {
-      const bookerPassword = decryptField(booker.encryptedPassword);
-      const bookerProfile = await loadDriveProfile(booker.profileIds.length > 0 ? booker.profileIds : acct.profileIds);
+      const leaseOk = await acquireAccountLease(booker, runId, WorkerBoxRole.BOOKER);
+      if (!leaseOk) {
+        log(`BOOKER: ${booker.email} leased elsewhere - watcher-only`);
+      } else {
+        leasedBookerId = booker.id;
+      }
+      const bookerPassword = leasedBookerId ? decryptField(booker.encryptedPassword) : '';
+      const bookerProfile = leasedBookerId ? await loadDriveProfile(booker.profileIds.length > 0 ? booker.profileIds : acct.profileIds) : null;
       if (bookerPassword && bookerProfile) {
         spawnEnv['BOOKER_EMAIL'] = booker.email;
         spawnEnv['BOOKER_PASSWORD'] = bookerPassword;
@@ -573,12 +755,14 @@ async function driveAccountReal(
 
   const budget = makeBudget();
   log(`request budget: max=${MAX_LIFT_REQUESTS}/run, rate=${RATE_WINDOW_MAX}/${RATE_WINDOW_MS / 1000}s`);
-  return spawnAndWatch(PYTHON_BIN, [...PYTHON_EXTRA_ARGS, PIPELINE_SPIKE], spawnEnv, {
+  const outcome = await spawnAndWatch(PYTHON_BIN, [...PYTHON_EXTRA_ARGS, PIPELINE_SPIKE], spawnEnv, {
     runId,
     email: acct.email,
     accountId: acct.id,
     fromState: acct.lifecycleState,
   }, budget);
+  if (leasedBookerId) await releaseAccountLease(leasedBookerId);
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -844,6 +1028,11 @@ function makeBudget(): { remaining: () => number; spend: () => void; rateOk: () 
 
 async function driveRun(runId: string): Promise<void> {
   log(`driveRun start. runId=${runId}`);
+  await upsertBoxHeartbeat({ status: WorkerBoxStatus.WORKING });
+  if (await boxCooldownActive()) {
+    log('driveRun skipped: box cooldown active');
+    return;
+  }
 
   // Let previously cooled accounts recover without relying on a separate backend
   // sweep; the live VPS worker owns this path.
@@ -889,6 +1078,7 @@ async function driveRun(runId: string): Promise<void> {
         const reg = await registerOne(runId);
         if (reg.ok) {
           registered.push(reg.ok);
+          await recordCreationEvent(true);
           dailyReg = recordRegistration(dailyReg, new Date());
           consecutiveThrottles = 0; // success resets the backoff ramp
         }
@@ -898,10 +1088,10 @@ async function driveRun(runId: string): Promise<void> {
         const kind = classifyThrottle(reg.signals);
         if (isThrottled(kind)) {
           consecutiveThrottles += 1;
-          const backoff = nextBackoffMs(consecutiveThrottles - 1, 60_000, 3_600_000, 0.2, Math.random);
-          log(`register: THROTTLED (${kind}, streak=${consecutiveThrottles}) — backing off ${Math.ceil(backoff / 1000)}s before next attempt`);
-          await sleep(backoff);
-          continue; // skip the fixed stagger; backoff already waited
+          await recordCreationEvent(false, kind);
+          await markBoxCooldown(`register_${kind}`);
+          log(`register: THROTTLED (${kind}, streak=${consecutiveThrottles}); stopping this box immediately`);
+          return;
         }
 
         // Normal (non-throttled) stagger between registrations.
@@ -1042,6 +1232,16 @@ async function driveRun(runId: string): Promise<void> {
     lastAction = Date.now();
     lastGlobalAction = Date.now();
 
+    const leaseRole = acct.pollingRole === 'BOOKER' ? WorkerBoxRole.BOOKER : WorkerBoxRole.WATCHER;
+    const leaseAcquired = await acquireAccountLease(acct, runId, leaseRole);
+    if (!leaseAcquired) continue;
+    await upsertBoxHeartbeat({
+      status: WorkerBoxStatus.WORKING,
+      role: leaseRole,
+      assignedAccountId: acct.id,
+      assignedAccountEmail: acct.email,
+    });
+
     // Check stop signal before driving each account (catches stop between accounts).
     {
       const stopRow = await prisma.settings.findUnique({ where: { key: 'scenario_run' } });
@@ -1060,6 +1260,7 @@ async function driveRun(runId: string): Promise<void> {
       profileIds: acct.profileIds,
       pollingRole: acct.pollingRole,
     });
+    await releaseAccountLease(acct.id);
 
     // Auto-quarantine: record the run outcome on the account so the pacer and
     // account selection skip it until cooldownUntil passes. No manual TARGET_EMAIL
@@ -1078,6 +1279,16 @@ async function driveRun(runId: string): Promise<void> {
       } else if (err && /session_expired|datadome|turnstile|login_failed|page_not_found|block/i.test(err)) {
         cooldownUntil = new Date(at + 30 * 60 * 1000); // short 30-min backoff, recovers soon
         reason = err;
+      }
+
+      if (reason && reason !== '429001' && isBoxTrustLoss(reason)) {
+        await prisma.vfsAccount.update({
+          where: { id: acct.id },
+          data: { lastAttemptAt: new Date(at), cooldownUntil },
+        }).catch(() => {});
+        await markBoxCooldown(reason, { id: acct.id, email: acct.email });
+        log(`stop-on-throttle: ${reason} from ${acct.email}; ending active flow for box ${BOX_ID}`);
+        return;
       }
 
       // ---------------------------------------------------------------------------
@@ -1166,6 +1377,7 @@ async function driveRun(runId: string): Promise<void> {
   }
 
   log(`driveRun complete. runId=${runId}`);
+  await upsertBoxHeartbeat({ status: WorkerBoxStatus.ONLINE, assignedAccountId: null, assignedAccountEmail: null, lastError: null });
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,9 +1388,15 @@ async function driveRun(runId: string): Promise<void> {
 
 async function runPoolBuilder(): Promise<void> {
   log(`Pool-builder mode: target POOL_MIN=${process.env.POOL_MIN ?? 2}, interval=${REG_INTERVAL_MIN}min/account`);
+  await upsertBoxHeartbeat({ status: WorkerBoxStatus.ONLINE, role: WorkerBoxRole.CREATOR });
   const poolMin = Number(process.env.POOL_MIN ?? 2);
   let dailyReg: DailyRegState = { dayKey: new Date().toISOString().slice(0, 10), count: 0 };
   for (;;) {
+    if (await boxCooldownActive()) {
+      await sleep(60_000);
+      continue;
+    }
+    await upsertBoxHeartbeat({ status: WorkerBoxStatus.WORKING, role: WorkerBoxRole.CREATOR });
     const spare = await spareCount();
     log(`pool-builder: spare=${spare} ACTIVE+unlinked (target=${poolMin})`);
     if (spare >= poolMin) {
@@ -1195,9 +1413,18 @@ async function runPoolBuilder(): Promise<void> {
     }
     const reg = await registerOne('pool-builder');
     if (reg.ok) {
+      await recordCreationEvent(true);
       dailyReg = recordRegistration(dailyReg, new Date());
       log(`pool-builder: registered ${reg.ok.email} (status=${reg.ok.status})`);
     } else {
+      const kind = classifyThrottle(reg.signals);
+      await recordCreationEvent(false, kind);
+      if (isThrottled(kind)) {
+        await markBoxCooldown(`register_${kind}`);
+        log(`pool-builder: throttled (${kind}); stopping registration attempts until cooldown expires`);
+        await sleep(60_000);
+        continue;
+      }
       log(`pool-builder: registration failed — backing off 5min`);
       await sleep(5 * 60 * 1000);
       continue;
@@ -1412,8 +1639,14 @@ async function main(): Promise<void> {
     create: { key: 'worker_heartbeat', value: { at: new Date().toISOString() } as unknown as Parameters<typeof prisma.settings.create>[0]['data']['value'] },
   }).catch(() => { /* heartbeat write must never crash the worker */ });
   await writeHeartbeat();
+  await upsertBoxHeartbeat({ status: WorkerBoxStatus.ONLINE });
   const heartbeatTimer = setInterval(() => { void writeHeartbeat(); }, POLL_INTERVAL_SEC * 1000);
+  const boxHeartbeatTimer = setInterval(() => {
+    void upsertBoxHeartbeat({ status: WorkerBoxStatus.ONLINE });
+    void extendBoxLeases();
+  }, WORKER_LOCK_HEARTBEAT_MS);
   process.on('exit', () => clearInterval(heartbeatTimer));
+  process.on('exit', () => clearInterval(boxHeartbeatTimer));
 
   const writeLockHeartbeat = () => prisma.settings.findUnique({ where: { key: WORKER_LOCK_KEY } }).then((row) => {
     const existing = row?.value as WorkerLock | null;

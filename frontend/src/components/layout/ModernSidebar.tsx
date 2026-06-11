@@ -15,6 +15,7 @@ import {
   Wallet,
   Cookie,
   CalendarClock,
+  Server,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -33,6 +34,7 @@ const menuItems = [
     { label: 'Extension Setup', href: '/extension-setup', icon: Puzzle },
   ]},
   { group: 'System', items: [
+    { label: 'Fleet Status', href: '/fleet', icon: Server },
     { label: 'Vendor Costs', href: '/vendors', icon: Wallet },
   ]},
 ];

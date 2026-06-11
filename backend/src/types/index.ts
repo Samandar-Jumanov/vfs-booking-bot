@@ -58,6 +58,6 @@ export interface NotificationPayload {
 }
 
 export interface BlockSignal {
-  type: 'rate_limit' | 'ip_block' | 'session_expired' | 'unknown';
+  type: 'rate_limit' | 'account_flag' | 'ip_block' | 'session_expired' | 'unknown';
   proxyId?: string;
 }
