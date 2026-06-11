@@ -38,11 +38,19 @@ jest.mock('@config/database', () => ({
       deleteMany: jest.fn(),
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      updateMany: jest.fn(),
+      create: jest.fn(),
       upsert: jest.fn(),
     },
     settings: {
       findUnique: jest.fn(),
       upsert: jest.fn(),
+    },
+    slotCheckAudit: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+      groupBy: jest.fn(),
     },
     $transaction: jest.fn(),
   },
@@ -61,11 +69,19 @@ const mockPrisma = prisma as unknown as {
     deleteMany: jest.Mock;
     findMany: jest.Mock;
     findUnique: jest.Mock;
+    updateMany: jest.Mock;
+    create: jest.Mock;
     upsert: jest.Mock;
   };
   settings: {
     findUnique: jest.Mock;
     upsert: jest.Mock;
+  };
+  slotCheckAudit: {
+    create: jest.Mock;
+    findMany: jest.Mock;
+    count: jest.Mock;
+    groupBy: jest.Mock;
   };
   $transaction: jest.Mock;
 };
@@ -115,9 +131,15 @@ describe('fleetRouter', () => {
     mockPrisma.accountLease.deleteMany.mockResolvedValue({ count: 0 });
     mockPrisma.accountLease.findMany.mockResolvedValue([]);
     mockPrisma.accountLease.findUnique.mockResolvedValue(null);
+    mockPrisma.accountLease.updateMany.mockResolvedValue({ count: 0 });
+    mockPrisma.accountLease.create.mockImplementation(async (args) => ({ id: 'lease-1', ...args.data }));
     mockPrisma.accountLease.upsert.mockImplementation(async (args) => ({ id: 'lease-1', ...args.create, ...args.update }));
     mockPrisma.settings.findUnique.mockResolvedValue(null);
     mockPrisma.settings.upsert.mockResolvedValue({});
+    mockPrisma.slotCheckAudit.create.mockImplementation(async (args) => ({ id: 'audit-1', ...args.data }));
+    mockPrisma.slotCheckAudit.findMany.mockResolvedValue([]);
+    mockPrisma.slotCheckAudit.count.mockResolvedValue(0);
+    mockPrisma.slotCheckAudit.groupBy.mockResolvedValue([]);
     mockPrisma.$transaction.mockImplementation(async (cb) => cb({
       accountLease: mockPrisma.accountLease,
     }));
@@ -249,11 +271,7 @@ describe('fleetRouter', () => {
   });
 
   it('prevents another box from acquiring an active account lease', async () => {
-    mockPrisma.accountLease.findUnique.mockResolvedValue({
-      accountId: '11111111-1111-4111-8111-111111111111',
-      boxId: 'box1',
-      expiresAt: new Date('2026-06-11T09:10:00.000Z'),
-    });
+    mockPrisma.accountLease.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint'), { code: 'P2002' }));
 
     await withApp(async (baseUrl) => {
       const res = await requestJson(baseUrl, '/api/fleet/worker/leases/acquire', {
@@ -273,6 +291,7 @@ describe('fleetRouter', () => {
   });
 
   it('allows the owning box to refresh a lease and applies the requested TTL', async () => {
+    mockPrisma.accountLease.updateMany.mockResolvedValueOnce({ count: 1 });
     mockPrisma.accountLease.findUnique.mockResolvedValue({
       accountId: '22222222-2222-4222-8222-222222222222',
       boxId: 'box1',
@@ -296,9 +315,9 @@ describe('fleetRouter', () => {
       expect(mockPrisma.accountLease.deleteMany).toHaveBeenCalledWith({
         where: { expiresAt: { lt: new Date('2026-06-11T09:00:00.000Z') } },
       });
-      expect(mockPrisma.accountLease.upsert).toHaveBeenCalledWith(expect.objectContaining({
-        where: { accountId: '22222222-2222-4222-8222-222222222222' },
-        update: expect.objectContaining({
+      expect(mockPrisma.accountLease.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { accountId: '22222222-2222-4222-8222-222222222222', boxId: 'box1' },
+        data: expect.objectContaining({
           boxId: 'box1',
           role: 'BOOKER',
           runId: 'run-abc',
@@ -306,6 +325,7 @@ describe('fleetRouter', () => {
           expiresAt: new Date('2026-06-11T09:01:00.000Z'),
         }),
       }));
+      expect(mockPrisma.accountLease.create).not.toHaveBeenCalled();
     });
   });
 
@@ -354,6 +374,109 @@ describe('fleetRouter', () => {
     });
   });
 
+  it('records worker slot-check audit rows', async () => {
+    await withApp(async (baseUrl) => {
+      const res = await requestJson(baseUrl, '/api/fleet/worker/slot-check-audit', {
+        method: 'POST',
+        headers: { authorization: 'Bearer worker-token' },
+        body: JSON.stringify({
+          checkedAt: '2026-06-11T08:59:58.000Z',
+          boxId: 'box1',
+          accountId: 'acc-1',
+          accountEmail: 'vfs@example.test',
+          role: 'WATCHER',
+          runId: 'run-1',
+          route: 'uzb/lva',
+          countryCode: 'uzb',
+          missionCode: 'lva',
+          vacCode: 'TAS',
+          visaCategoryCode: 'WDVUZ',
+          subcategoryName: 'Work D Uzbek',
+          httpStatus: 200,
+          errorCode: 1035,
+          result: 'NO_SLOT',
+          slotCount: 0,
+          durationMs: 421,
+          rawSummary: { error: { code: 1035 } },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockPrisma.slotCheckAudit.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          checkedAt: new Date('2026-06-11T08:59:58.000Z'),
+          boxId: 'box1',
+          accountId: 'acc-1',
+          accountEmail: 'vfs@example.test',
+          role: 'WATCHER',
+          result: 'NO_SLOT',
+          errorCode: '1035',
+          rawSummary: { error: { code: 1035 } },
+        }),
+      });
+    });
+  });
+
+  it('lists slot-check audits with result summary', async () => {
+    mockPrisma.slotCheckAudit.findMany.mockResolvedValue([
+      { id: 'audit-1', boxId: 'box1', result: 'NO_SLOT', checkedAt: new Date('2026-06-11T08:59:00.000Z') },
+    ]);
+    mockPrisma.slotCheckAudit.count.mockResolvedValue(2);
+    mockPrisma.slotCheckAudit.groupBy.mockResolvedValue([
+      { result: 'NO_SLOT', _count: { result: 1 } },
+      { result: 'RATE_LIMIT', _count: { result: 1 } },
+    ]);
+
+    await withApp(async (baseUrl) => {
+      const res = await requestJson(baseUrl, '/api/fleet/slot-checks?boxId=box1&from=2026-06-11T00:00:00.000Z&limit=50');
+
+      expect(res.status).toBe(200);
+      expect(res.body.total).toBe(2);
+      expect(res.body.summary).toEqual({ NO_SLOT: 1, RATE_LIMIT: 1 });
+      expect(mockPrisma.slotCheckAudit.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          boxId: 'box1',
+          checkedAt: { gte: new Date('2026-06-11T00:00:00.000Z') },
+        },
+        take: 50,
+      }));
+    });
+  });
+
+  it('exports slot-check audits as CSV', async () => {
+    mockPrisma.slotCheckAudit.findMany.mockResolvedValue([
+      {
+        checkedAt: new Date('2026-06-11T08:59:00.000Z'),
+        boxId: 'box1',
+        accountEmail: 'vfs@example.test',
+        role: 'WATCHER',
+        runId: 'run-1',
+        result: 'SLOT_FOUND',
+        httpStatus: 200,
+        errorCode: null,
+        countryCode: 'uzb',
+        missionCode: 'lva',
+        vacCode: 'TAS',
+        visaCategoryCode: 'WDVUZ',
+        subcategoryName: 'Work D Uzbek',
+        earliestDate: '2026-06-20',
+        slotCount: 1,
+        durationMs: 320,
+      },
+    ]);
+
+    await withApp(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/fleet/slot-checks/export.csv?limit=10`);
+      const text = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/csv');
+      expect(text).toContain('checkedAt,boxId,accountEmail');
+      expect(text).toContain('"box1","vfs@example.test","WATCHER"');
+      expect(mockPrisma.slotCheckAudit.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10 }));
+    });
+  });
+
   it('returns default burst config when stored settings are missing or invalid', async () => {
     mockPrisma.settings.findUnique.mockResolvedValue({ value: { timezone: '', windows: [{ start: 'bad', end: '12:15' }] } });
 
@@ -364,9 +487,11 @@ describe('fleetRouter', () => {
       expect(res.body).toEqual({
         timezone: 'Asia/Tashkent',
         windows: [{ start: '11:55', end: '12:15' }],
+        aggregateIntervalSeconds: 3,
         burstIntervalSeconds: 3,
         idleIntervalSeconds: 300,
         staggerSeconds: 0,
+        maxChecksPerRun: 10,
       });
     });
   });

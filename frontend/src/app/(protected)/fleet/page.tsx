@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Clock, RefreshCw, Save, Server, ShieldAlert, Wifi, WifiOff } from 'lucide-react';
+import { Activity, Clock, Download, RefreshCw, Save, Server, ShieldAlert, Wifi, WifiOff } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -57,17 +57,44 @@ interface FleetStatus {
 interface BurstConfig {
   timezone: string;
   windows: Array<{ start: string; end: string }>;
+  aggregateIntervalSeconds: number;
   burstIntervalSeconds: number;
   idleIntervalSeconds: number;
   staggerSeconds: number;
+  maxChecksPerRun: number;
+}
+
+interface SlotCheckAudit {
+  id: string;
+  checkedAt: string;
+  boxId: string | null;
+  accountEmail: string | null;
+  role: BoxRole | null;
+  result: string;
+  httpStatus: number | null;
+  errorCode: string | null;
+  visaCategoryCode: string | null;
+  subcategoryName: string | null;
+  earliestDate: string | null;
+  slotCount: number | null;
+  durationMs: number | null;
+}
+
+interface SlotCheckAuditResponse {
+  generatedAt: string;
+  total: number;
+  summary: Record<string, number>;
+  items: SlotCheckAudit[];
 }
 
 const defaultBurst: BurstConfig = {
   timezone: 'Asia/Tashkent',
   windows: [{ start: '11:55', end: '12:15' }],
+  aggregateIntervalSeconds: 3,
   burstIntervalSeconds: 3,
   idleIntervalSeconds: 300,
   staggerSeconds: 0,
+  maxChecksPerRun: 10,
 };
 
 export default function FleetPage() {
@@ -85,6 +112,12 @@ export default function FleetPage() {
     queryFn: () => api.get<BurstConfig>('/fleet/burst-config').then((r) => r.data),
   });
 
+  const auditQuery = useQuery<SlotCheckAuditResponse>({
+    queryKey: ['fleet-slot-checks'],
+    queryFn: () => api.get<SlotCheckAuditResponse>('/fleet/slot-checks?limit=100').then((r) => r.data),
+    refetchInterval: 15000,
+  });
+
   useEffect(() => {
     if (burstQuery.data) setDraft(burstQuery.data);
   }, [burstQuery.data]);
@@ -100,6 +133,8 @@ export default function FleetPage() {
   const boxes = useMemo(() => statusQuery.data?.boxes ?? [], [statusQuery.data?.boxes]);
   const leases = useMemo(() => statusQuery.data?.leases ?? [], [statusQuery.data?.leases]);
   const summary = statusQuery.data?.summary ?? { total: 0, online: 0, cooldown: 0, offline: 0 };
+  const auditSummary = auditQuery.data?.summary ?? {};
+  const auditRows = auditQuery.data?.items ?? [];
   const activeBoxes = useMemo(() => boxes.filter((box) => box.status === 'WORKING' || box.status === 'ONLINE'), [boxes]);
 
   const updateWindow = (index: number, key: 'start' | 'end', value: string) => {
@@ -107,6 +142,18 @@ export default function FleetPage() {
       ...current,
       windows: current.windows.map((window, i) => i === index ? { ...window, [key]: value } : window),
     }));
+  };
+
+  const downloadAuditCsv = async () => {
+    const response = await api.get('/fleet/slot-checks/export.csv?limit=1000', { responseType: 'blob' });
+    const url = URL.createObjectURL(response.data);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `slot-check-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -138,14 +185,15 @@ export default function FleetPage() {
             Save
           </button>
         </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-5">
+        <div className="mt-4 grid gap-3 md:grid-cols-6">
           <Field label="Timezone" value={draft.timezone} onChange={(value) => setDraft((c) => ({ ...c, timezone: value }))} />
-          <Field label="Burst seconds" type="number" value={draft.burstIntervalSeconds} onChange={(value) => setDraft((c) => ({ ...c, burstIntervalSeconds: Number(value) || 3 }))} />
+          <Field label="Fleet target sec" type="number" value={draft.aggregateIntervalSeconds} onChange={(value) => setDraft((c) => ({ ...c, aggregateIntervalSeconds: Number(value) || 3 }))} />
           <Field label="Idle seconds" type="number" value={draft.idleIntervalSeconds} onChange={(value) => setDraft((c) => ({ ...c, idleIntervalSeconds: Number(value) || 300 }))} />
           <Field label="Stagger seconds" type="number" value={draft.staggerSeconds} onChange={(value) => setDraft((c) => ({ ...c, staggerSeconds: Number(value) || 0 }))} />
+          <Field label="Max checks" type="number" value={draft.maxChecksPerRun} onChange={(value) => setDraft((c) => ({ ...c, maxChecksPerRun: Number(value) || 10 }))} />
           <div className="rounded-md border bg-muted/30 p-3 text-sm">
             <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Effective cadence</p>
-            <p className="mt-2 font-mono">{activeBoxes.length || 1} box(es), target {draft.burstIntervalSeconds}s</p>
+            <p className="mt-2 font-mono">{activeBoxes.length || 1} box(es), ~{Math.max(1, (activeBoxes.length || 1) * draft.aggregateIntervalSeconds)}s/box</p>
           </div>
         </div>
         <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -232,6 +280,59 @@ export default function FleetPage() {
           </tbody>
         </table>
       </section>
+
+      <section className="card mt-6 overflow-hidden bg-card/70 p-0">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            <h2 className="text-sm font-black">Slot-check audit</h2>
+          </div>
+          <button type="button" className="btn-secondary h-9 gap-2" onClick={downloadAuditCsv}>
+            <Download className="h-4 w-4" />
+            CSV
+          </button>
+        </div>
+        <div className="grid gap-3 border-b bg-muted/20 p-4 md:grid-cols-5">
+          {['NO_SLOT', 'SLOT_FOUND', 'RATE_LIMIT', 'BLOCKED', 'ERROR'].map((key) => (
+            <AuditSummaryCell key={key} label={key.replace('_', ' ')} value={auditSummary[key] ?? 0} />
+          ))}
+        </div>
+        <table className="w-full text-sm">
+          <thead className="bg-muted/50 text-muted-foreground">
+            <tr>
+              <Th>Time</Th>
+              <Th>Box</Th>
+              <Th>Result</Th>
+              <Th>HTTP</Th>
+              <Th>Category</Th>
+              <Th>Slot</Th>
+              <Th>Latency</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {auditRows.length === 0 && (
+              <tr><td className="px-4 py-6 text-center text-muted-foreground" colSpan={7}>No slot-check audit rows yet.</td></tr>
+            )}
+            {auditRows.map((row) => (
+              <tr key={row.id} className="border-t border-border/60 align-top">
+                <td className="px-4 py-3 text-muted-foreground">{new Date(row.checkedAt).toLocaleString()}</td>
+                <td className="px-4 py-3">
+                  <div className="font-bold">{row.boxId ?? '-'}</div>
+                  <div className="max-w-[220px] truncate font-mono text-[10px] text-muted-foreground">{row.accountEmail ?? '-'}</div>
+                </td>
+                <td className="px-4 py-3"><AuditBadge result={row.result} /></td>
+                <td className="px-4 py-3 font-mono text-xs">{row.httpStatus ?? '-'} {row.errorCode ? `/${row.errorCode}` : ''}</td>
+                <td className="max-w-[260px] px-4 py-3">
+                  <div className="font-mono text-xs">{row.visaCategoryCode ?? '-'}</div>
+                  <div className="truncate text-xs text-muted-foreground">{row.subcategoryName ?? '-'}</div>
+                </td>
+                <td className="px-4 py-3 text-xs">{row.earliestDate ?? '-'} {row.slotCount !== null && row.slotCount !== undefined ? `(${row.slotCount})` : ''}</td>
+                <td className="px-4 py-3 font-mono text-xs">{row.durationMs ?? '-'}ms</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
     </DashboardShell>
   );
 }
@@ -281,6 +382,26 @@ function RoleBadge({ role }: { role: BoxRole }) {
     OFFLINE: 'bg-red-500/15 text-red-500',
   } as const;
   return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', map[role])}>{role}</span>;
+}
+
+function AuditBadge({ result }: { result: string }) {
+  const tone = result === 'SLOT_FOUND'
+    ? 'bg-green-500/15 text-green-500'
+    : result === 'NO_SLOT'
+      ? 'bg-zinc-500/15 text-zinc-400'
+      : result === 'RATE_LIMIT' || result === 'BLOCKED'
+        ? 'bg-amber-500/15 text-amber-500'
+        : 'bg-red-500/15 text-red-500';
+  return <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold', tone)}>{result}</span>;
+}
+
+function AuditSummaryCell({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border bg-background/40 p-3">
+      <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{label}</p>
+      <p className="mt-1 font-mono text-xl font-black">{value}</p>
+    </div>
+  );
 }
 
 function relativeTime(value?: string | null) {

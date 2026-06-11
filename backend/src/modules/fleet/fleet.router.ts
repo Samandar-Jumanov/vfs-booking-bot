@@ -83,15 +83,50 @@ const creationEventSchema = z.object({
   reason: z.string().optional(),
 });
 
+const slotCheckAuditSchema = z.object({
+  checkedAt: z.string().optional(),
+  boxId: z.string().min(1).optional(),
+  accountId: z.string().optional(),
+  accountEmail: z.string().optional(),
+  role: z.nativeEnum(WorkerBoxRole).optional(),
+  runId: z.string().optional(),
+  source: z.string().optional(),
+  route: z.string().optional(),
+  countryCode: z.string().optional(),
+  missionCode: z.string().optional(),
+  vacCode: z.string().optional(),
+  visaCategoryCode: z.string().optional(),
+  subcategoryName: z.string().optional(),
+  httpStatus: z.number().int().optional(),
+  errorCode: z.union([z.string(), z.number()]).optional(),
+  result: z.string().min(1),
+  earliestDate: z.string().optional().nullable(),
+  slotCount: z.number().int().optional(),
+  durationMs: z.number().int().optional(),
+  rawSummary: z.unknown().optional(),
+});
+
+const slotCheckQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(1000).default(200),
+  boxId: z.string().optional(),
+  result: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+});
+
 const burstConfigSchema = z.object({
   timezone: z.string().min(1).default('Asia/Tashkent'),
   windows: z.array(z.object({
     start: z.string().regex(/^\d{2}:\d{2}$/),
     end: z.string().regex(/^\d{2}:\d{2}$/),
   })).default([{ start: '11:55', end: '12:15' }]),
+  // Fleet-wide target cadence. Workers convert this to per-box interval:
+  // perBoxInterval = aggregateIntervalSeconds * BOX_COUNT.
+  aggregateIntervalSeconds: z.number().int().min(1).max(60).default(3),
   burstIntervalSeconds: z.number().int().min(1).max(300).default(3),
   idleIntervalSeconds: z.number().int().min(30).max(3600).default(300),
   staggerSeconds: z.number().int().min(0).max(300).default(0),
+  maxChecksPerRun: z.number().int().min(1).max(100).default(10),
 });
 
 fleetRouter.get('/status', requireAuth, async (_req: Request, res: Response, next: NextFunction) => {
@@ -222,19 +257,9 @@ fleetRouter.post('/worker/leases/acquire', workerAuth, async (req: Request, res:
 
     const lease = await prisma.$transaction(async (tx) => {
       await tx.accountLease.deleteMany({ where: { expiresAt: { lt: now } } });
-      const existing = await tx.accountLease.findUnique({ where: { accountId: body.accountId } });
-      if (existing && existing.boxId !== body.boxId && existing.expiresAt > now) return null;
-      return tx.accountLease.upsert({
-        where: { accountId: body.accountId },
-        update: {
-          boxId: body.boxId,
-          role: body.role,
-          runId: body.runId,
-          heartbeatAt: now,
-          expiresAt,
-        },
-        create: {
-          accountId: body.accountId,
+      const refreshed = await tx.accountLease.updateMany({
+        where: { accountId: body.accountId, boxId: body.boxId },
+        data: {
           boxId: body.boxId,
           role: body.role,
           runId: body.runId,
@@ -242,6 +267,23 @@ fleetRouter.post('/worker/leases/acquire', workerAuth, async (req: Request, res:
           expiresAt,
         },
       });
+      if (refreshed.count > 0) {
+        return tx.accountLease.findUnique({ where: { accountId: body.accountId } });
+      }
+      try {
+        return await tx.accountLease.create({
+          data: {
+            accountId: body.accountId,
+            boxId: body.boxId,
+            role: body.role,
+            runId: body.runId,
+            heartbeatAt: now,
+            expiresAt,
+          },
+        });
+      } catch {
+        return null;
+      }
     });
 
     if (!lease) {
@@ -285,6 +327,111 @@ fleetRouter.post('/worker/creation-event', workerAuth, async (req: Request, res:
       },
     });
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+fleetRouter.post('/worker/slot-check-audit', workerAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = slotCheckAuditSchema.parse(req.body ?? {});
+    const checkedAt = parseDate(body.checkedAt) ?? new Date();
+    const audit = await prisma.slotCheckAudit.create({
+      data: {
+        checkedAt,
+        boxId: body.boxId ?? null,
+        accountId: body.accountId ?? null,
+        accountEmail: body.accountEmail ?? null,
+        role: body.role ?? null,
+        runId: body.runId ?? null,
+        source: body.source ?? 'worker',
+        route: body.route ?? null,
+        countryCode: body.countryCode ?? null,
+        missionCode: body.missionCode ?? null,
+        vacCode: body.vacCode ?? null,
+        visaCategoryCode: body.visaCategoryCode ?? null,
+        subcategoryName: body.subcategoryName ?? null,
+        httpStatus: body.httpStatus ?? null,
+        errorCode: body.errorCode === undefined ? null : String(body.errorCode),
+        result: body.result,
+        earliestDate: body.earliestDate ?? null,
+        slotCount: body.slotCount ?? null,
+        durationMs: body.durationMs ?? null,
+        rawSummary: body.rawSummary as never,
+      },
+    });
+    res.json({ ok: true, audit });
+  } catch (err) {
+    next(err);
+  }
+});
+
+function slotCheckWhere(query: z.infer<typeof slotCheckQuerySchema>) {
+  const checkedAt: { gte?: Date; lte?: Date } = {};
+  const from = parseDate(query.from);
+  const to = parseDate(query.to);
+  if (from) checkedAt.gte = from;
+  if (to) checkedAt.lte = to;
+  return {
+    ...(query.boxId ? { boxId: query.boxId } : {}),
+    ...(query.result ? { result: query.result } : {}),
+    ...(Object.keys(checkedAt).length > 0 ? { checkedAt } : {}),
+  };
+}
+
+fleetRouter.get('/slot-checks', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const query = slotCheckQuerySchema.parse(req.query ?? {});
+    const where = slotCheckWhere(query);
+    const [items, total, grouped] = await Promise.all([
+      prisma.slotCheckAudit.findMany({
+        where,
+        orderBy: { checkedAt: 'desc' },
+        take: query.limit,
+      }),
+      prisma.slotCheckAudit.count({ where }),
+      prisma.slotCheckAudit.groupBy({
+        by: ['result'],
+        where,
+        _count: { result: true },
+      }),
+    ]);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      total,
+      summary: Object.fromEntries(grouped.map((row) => [row.result, row._count.result])),
+      items,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? '' : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+fleetRouter.get('/slot-checks/export.csv', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const query = slotCheckQuerySchema.parse({ ...(req.query ?? {}), limit: req.query.limit ?? 1000 });
+    const rows = await prisma.slotCheckAudit.findMany({
+      where: slotCheckWhere(query),
+      orderBy: { checkedAt: 'desc' },
+      take: query.limit,
+    });
+    const headers = [
+      'checkedAt', 'boxId', 'accountEmail', 'role', 'runId', 'result', 'httpStatus',
+      'errorCode', 'countryCode', 'missionCode', 'vacCode', 'visaCategoryCode',
+      'subcategoryName', 'earliestDate', 'slotCount', 'durationMs',
+    ];
+    const csv = [
+      headers.join(','),
+      ...rows.map((row) => headers.map((key) => csvCell((row as unknown as Record<string, unknown>)[key])).join(',')),
+    ].join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="slot-check-audit-${Date.now()}.csv"`);
+    res.send(csv);
   } catch (err) {
     next(err);
   }

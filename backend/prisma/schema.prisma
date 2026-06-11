@@ -294,6 +294,36 @@ model AccountLease {
   @@index([expiresAt])
 }
 
+model SlotCheckAudit {
+  id               String         @id @default(cuid())
+  checkedAt        DateTime       @default(now())
+  boxId            String?
+  accountId        String?
+  accountEmail     String?
+  role             WorkerBoxRole?
+  runId            String?
+  source           String         @default("worker")
+  route            String?
+  countryCode      String?
+  missionCode      String?
+  vacCode          String?
+  visaCategoryCode String?
+  subcategoryName  String?
+  httpStatus       Int?
+  errorCode        String?
+  result           String
+  earliestDate     String?
+  slotCount        Int?
+  durationMs       Int?
+  rawSummary       Json?
+  createdAt        DateTime       @default(now())
+
+  @@index([checkedAt])
+  @@index([boxId, checkedAt])
+  @@index([result, checkedAt])
+  @@index([visaCategoryCode, checkedAt])
+}
+
 model ReceivedEmail {
   id          String   @id @default(cuid())
   toAddress   String

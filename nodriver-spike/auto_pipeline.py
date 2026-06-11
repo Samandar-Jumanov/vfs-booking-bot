@@ -80,6 +80,7 @@ BURST_WINDOWS = os.environ.get("BURST_WINDOWS", "")
 BURST_INTERVAL = int(os.environ.get("BURST_INTERVAL", "3"))
 IDLE_INTERVAL = int(os.environ.get("IDLE_INTERVAL", "300"))
 BURST_TZ = os.environ.get("BURST_TZ", "Asia/Tashkent")
+BURST_PHASE_OFFSET_MS = int(os.environ.get("BURST_PHASE_OFFSET_MS", "0"))
 BOOKER_EMAIL = os.environ.get("BOOKER_EMAIL", "")
 BOOKER_PASSWORD = os.environ.get("BOOKER_PASSWORD", "")
 BOOKER_PASSPORT_IMAGE = os.environ.get("BOOKER_PASSPORT_IMAGE", "")
@@ -253,6 +254,46 @@ def milestone(step, **kw):
     print(f"MILESTONE {json.dumps(data)}", flush=True)
 
 
+def slot_check_milestone(
+    *,
+    attempt,
+    subcategory_name=None,
+    visa_category_code=None,
+    api=None,
+    result="UNKNOWN",
+    duration_ms=None,
+):
+    api = api or {}
+    err = api.get("error")
+    err_code = (err or {}).get("code") if isinstance(err, dict) else None
+    slot_lists = api.get("earliestSlotLists") or []
+    raw_summary = {
+        "status": api.get("_status"),
+        "error": err,
+        "earliestDate": api.get("earliestDate"),
+        "slotCount": len(slot_lists),
+    }
+    milestone(
+        "slot_check",
+        checkedAt=datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        email=EMAIL,
+        route=f"{VFS_COUNTRY}/{VFS_MISSION}",
+        countryCode=_LIFT_BODY.get("countryCode") or VFS_COUNTRY,
+        missionCode=_LIFT_BODY.get("missionCode") or VFS_MISSION,
+        vacCode=_LIFT_BODY.get("vacCode") or VFS_VAC,
+        visaCategoryCode=visa_category_code or _LIFT_BODY.get("visaCategoryCode") or VFS_VISACAT,
+        subcategoryName=subcategory_name or "work-d",
+        httpStatus=api.get("_status"),
+        errorCode=err_code,
+        result=result,
+        earliestDate=api.get("earliestDate"),
+        slotCount=len(slot_lists),
+        durationMs=duration_ms,
+        rawSummary=raw_summary,
+        detail=f"check #{attempt}",
+    )
+
+
 def log(*a):
     print("[PIPE]", *a, flush=True)
 
@@ -277,6 +318,7 @@ def _parse_burst_windows(raw=None):
 
 
 _BURST_WINDOWS_PARSED = _parse_burst_windows()
+_BURST_PHASE_APPLIED_KEY = None
 
 
 def _burst_interval_now(now=None):
@@ -311,6 +353,36 @@ def _burst_interval_now(now=None):
         if in_window:
             return BURST_INTERVAL
     return IDLE_INTERVAL
+
+
+def _burst_phase_delay_now(now=None):
+    """Return a one-time phase delay when entering a burst window.
+    The orchestrator computes BURST_PHASE_OFFSET_MS from BOX_ID/BOX_COUNT so
+    each box checks in an interleaved fleet cadence instead of all at once."""
+    global _BURST_PHASE_APPLIED_KEY
+    if not _BURST_WINDOWS_PARSED or BURST_PHASE_OFFSET_MS <= 0:
+        return 0.0
+    if now is None:
+        try:
+            if ZoneInfo is None:
+                raise RuntimeError("zoneinfo unavailable")
+            now = datetime.now(ZoneInfo(BURST_TZ))
+        except Exception:
+            now = datetime.now()
+    cur = now.hour * 60 + now.minute
+    for start, end in _BURST_WINDOWS_PARSED:
+        if start <= end:
+            in_window = start <= cur < end
+        else:
+            in_window = cur >= start or cur < end
+        if not in_window:
+            continue
+        key = f"{now.date().isoformat()}:{start}-{end}"
+        if _BURST_PHASE_APPLIED_KEY == key:
+            return 0.0
+        _BURST_PHASE_APPLIED_KEY = key
+        return BURST_PHASE_OFFSET_MS / 1000.0
+    return 0.0
 
 
 def _tg_ssl_ctx():
@@ -2308,6 +2380,10 @@ async def main():
         if stop_event.is_set():
             log("watcher stopping — booker completed")
             break
+        phase_delay = _burst_phase_delay_now()
+        if phase_delay > 0:
+            log(f"BURST: phase offset sleep {phase_delay:.2f}s before first in-window check")
+            await asyncio.sleep(phase_delay)
         attempt += 1
         log(f"--- check #{attempt} ---")
 
@@ -2342,6 +2418,7 @@ async def main():
             _api_broke = False  # true if any API call errored → fall through to UI
             for _nm, _cd in checks:
                 is_ocma = bool(re.search(r"ocma", _nm or "", re.I))
+                _check_started = time.time()
                 if DIRECT_POLL:
                     proxy = _next_proxy(attempt)
                     if proxy:
@@ -2349,7 +2426,16 @@ async def main():
                     api = await api_check_direct(proxy)
                 else:
                     api = await api_check_availability(page, code_override=_cd)
+                _check_duration_ms = int((time.time() - _check_started) * 1000)
                 if api is None:
+                    slot_check_milestone(
+                        attempt=attempt,
+                        subcategory_name=_nm or "work-d",
+                        visa_category_code=_cd,
+                        api={"_status": 0, "error": {"code": "TRANSPORT_FAILURE"}},
+                        result="ERROR",
+                        duration_ms=_check_duration_ms,
+                    )
                     api_fail_streak += 1
                     log(f"API: call failed (streak={api_fail_streak})")
                     _api_broke = True
@@ -2357,6 +2443,30 @@ async def main():
                 status = api.get("_status", 0)
                 err = api.get("error")
                 err_code = (err or {}).get("code") if isinstance(err, dict) else None
+                _slot_count = len(api.get("earliestSlotLists") or [])
+                _audit_result = "UNKNOWN"
+                if err_code == 1035:
+                    _audit_result = "NO_SLOT"
+                elif status == 429 or err_code in (429201, 429202):
+                    _audit_result = "RATE_LIMIT"
+                elif err_code == 429001:
+                    _audit_result = "ACCOUNT_RESTRICTED"
+                elif status in (401, 403) or err_code in (403, 403201):
+                    _audit_result = "BLOCKED"
+                elif status != 200 or err:
+                    _audit_result = "ERROR"
+                elif api.get("earliestDate") or _slot_count:
+                    _audit_result = "SLOT_FOUND"
+                else:
+                    _audit_result = "NO_SLOT"
+                slot_check_milestone(
+                    attempt=attempt,
+                    subcategory_name=_nm or "work-d",
+                    visa_category_code=_cd,
+                    api=api,
+                    result=_audit_result,
+                    duration_ms=_check_duration_ms,
+                )
                 # error.code 1035 means "No slots available" — a legitimate negative
                 # result from VFS's own API.  Treat it as a clean no-slot, NOT a
                 # transport/block failure; keep scanning the remaining subcategories.

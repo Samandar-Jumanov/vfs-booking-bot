@@ -65,10 +65,12 @@ const BOX_ROLE: WorkerBoxRole =
     : (process.env.BOX_ROLE?.toUpperCase() === 'BOOKER' ? WorkerBoxRole.BOOKER : WorkerBoxRole.WATCHER);
 // REG_INTERVAL_MIN: minutes between registrations in pool_builder mode (default: 10)
 const REG_INTERVAL_MIN = Number(process.env.REG_INTERVAL_MIN ?? 10);
-// Per-run lift-api request budget. Default is conservative (50/run).
+// Per-run lift-api request budget. Default matches the measured VFS ceiling
+// (~10 CheckIsSlotAvailable calls per IP per ~2h). Override only for controlled
+// diagnostics; the scheduler should spend budget inside the narrow burst window.
 // On budget exhaustion the Python child is killed and the account is cooled down.
 // Set higher once you've confirmed your IP has more headroom.
-const MAX_LIFT_REQUESTS = Number(process.env.MAX_LIFT_REQUESTS ?? 50);
+const MAX_LIFT_REQUESTS = Number(process.env.MAX_LIFT_REQUESTS ?? 10);
 // Rolling-window request rate limit: max requests in RATE_WINDOW_MS. Default 12/60s.
 const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS ?? 60_000);
 const RATE_WINDOW_MAX = Number(process.env.RATE_WINDOW_MAX ?? 12);
@@ -80,6 +82,17 @@ const PROFILE_ENCRYPTION_KEY = (() => {
 // Auto-rotate: max 429001 swaps per driveRun() call. If we hit the cap,
 // multiple accounts blocked quickly = likely an IP issue, not account issue.
 const MAX_SWAPS_PER_RUN = Number(process.env.MAX_SWAPS_PER_RUN ?? 2);
+
+function boxNumber(): number {
+  const boxMatch = BOX_ID.match(/(\d+)$/);
+  const parsed = boxMatch ? Number(boxMatch[1]) : 1;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function boxCount(): number {
+  const parsed = Number(process.env.BOX_COUNT ?? 1);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
 
 // ---------------------------------------------------------------------------
 // Inline AES-256-GCM decrypt (avoids importing backend env chain)
@@ -157,16 +170,21 @@ async function upsertBoxHeartbeat(data: {
   lastError?: string | null;
 } = {}): Promise<void> {
   const now = new Date();
+  const existing = await prisma.workerBox.findUnique({
+    where: { boxId: BOX_ID },
+    select: { cooldownUntil: true, role: true, status: true },
+  }).catch(() => null);
+  const cooldownActive = existing?.cooldownUntil && existing.cooldownUntil.getTime() > Date.now();
   await prisma.workerBox.upsert({
     where: { boxId: BOX_ID },
     update: {
-      role: data.role ?? BOX_ROLE,
-      status: data.status ?? WorkerBoxStatus.ONLINE,
+      role: cooldownActive ? WorkerBoxRole.COOLDOWN : (data.role ?? BOX_ROLE),
+      status: cooldownActive ? WorkerBoxStatus.COOLDOWN : (data.status ?? WorkerBoxStatus.ONLINE),
       heartbeatAt: now,
       pid: process.pid,
       hostname: os.hostname(),
-      assignedAccountId: data.assignedAccountId ?? undefined,
-      assignedAccountEmail: data.assignedAccountEmail ?? undefined,
+      assignedAccountId: data.assignedAccountId === undefined ? undefined : data.assignedAccountId,
+      assignedAccountEmail: data.assignedAccountEmail === undefined ? undefined : data.assignedAccountEmail,
       currentUrl: data.currentUrl ?? undefined,
       pageState: data.pageState === undefined ? undefined : data.pageState as never,
       lastSuccessfulCheckAt: data.lastSuccessfulCheckAt ?? undefined,
@@ -239,14 +257,22 @@ async function acquireAccountLease(account: DriveAccount, runId: string, role: W
   const expiresAt = new Date(now.getTime() + ACCOUNT_LEASE_TTL_SEC * 1000);
   const acquired = await prisma.$transaction(async (tx) => {
     await tx.accountLease.deleteMany({ where: { expiresAt: { lt: now } } });
-    const existing = await tx.accountLease.findUnique({ where: { accountId: account.id } });
-    if (existing && existing.boxId !== BOX_ID && existing.expiresAt > now) return false;
-    await tx.accountLease.upsert({
-      where: { accountId: account.id },
-      update: { boxId: BOX_ID, role, runId, heartbeatAt: now, expiresAt },
-      create: { accountId: account.id, boxId: BOX_ID, role, runId, heartbeatAt: now, expiresAt },
+    const refreshed = await tx.accountLease.updateMany({
+      where: { accountId: account.id, boxId: BOX_ID },
+      data: { role, runId, heartbeatAt: now, expiresAt },
     });
-    return true;
+    if (refreshed.count > 0) return true;
+
+    try {
+      await tx.accountLease.create({
+        data: { accountId: account.id, boxId: BOX_ID, role, runId, heartbeatAt: now, expiresAt },
+      });
+      return true;
+    } catch (e) {
+      // Unique(accountId) means another live worker won the race. Do not upsert:
+      // upsert would steal the lease from that worker.
+      return false;
+    }
   });
   if (!acquired) log(`skip ${account.email}: leased by another box`);
   return acquired;
@@ -304,6 +330,29 @@ interface MilestoneBody {
   detail?: string;
 }
 
+interface SlotCheckAuditBody {
+  checkedAt?: string;
+  boxId?: string;
+  accountId?: string;
+  accountEmail?: string;
+  role?: string;
+  runId?: string;
+  source?: string;
+  route?: string;
+  countryCode?: string;
+  missionCode?: string;
+  vacCode?: string;
+  visaCategoryCode?: string;
+  subcategoryName?: string;
+  httpStatus?: number;
+  errorCode?: string | number;
+  result: string;
+  earliestDate?: string | null;
+  slotCount?: number;
+  durationMs?: number;
+  rawSummary?: unknown;
+}
+
 async function postMilestone(body: MilestoneBody): Promise<void> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (WORKER_TOKEN) headers['Authorization'] = `Bearer ${WORKER_TOKEN}`;
@@ -327,6 +376,21 @@ async function postMilestone(body: MilestoneBody): Promise<void> {
       if (last) return;
       await sleep(2 ** (attempt - 1) * 1000);
     }
+  }
+}
+
+async function postSlotCheckAudit(body: SlotCheckAuditBody): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (WORKER_TOKEN) headers.Authorization = `Bearer ${WORKER_TOKEN}`;
+  try {
+    const resp = await fetch(`${BACKEND_URL}/api/fleet/worker/slot-check-audit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) log(`slot-check audit POST -> HTTP ${resp.status}`);
+  } catch (e) {
+    log(`WARN: slot-check audit failed: ${(e as Error).message}`);
   }
 }
 
@@ -497,6 +561,7 @@ function spawnAndWatch(
     // On win32 taskkill /T kills inherited Chrome children, freeing the stdio pipe.
     function killChild(reason: string): void {
       if (settled) return; // already done, nothing to kill
+      lastError = lastError ?? reason;
       try { child.kill('SIGTERM'); } catch { /* already dead */ }
 
       // Hard tree-kill after ~3s if child is still alive
@@ -527,20 +592,45 @@ function spawnAndWatch(
         const m = line.match(/^MILESTONE\s+(\{.*\})\s*$/);
         if (m) {
           try {
-            const ms = JSON.parse(m[1]) as Record<string, string>;
-            if (ms['error']) lastError = ms['error'];
+            const ms = JSON.parse(m[1]) as Record<string, unknown>;
+            if (ms['step'] === 'slot_check') {
+              void postSlotCheckAudit({
+                checkedAt: typeof ms['checkedAt'] === 'string' ? ms['checkedAt'] : undefined,
+                boxId: BOX_ID,
+                accountId: ctx.accountId,
+                accountEmail: typeof ms['email'] === 'string' ? ms['email'] : ctx.email,
+                role: BOX_ROLE,
+                runId: ctx.runId,
+                source: 'orchestrator-worker',
+                route: typeof ms['route'] === 'string' ? ms['route'] : 'uzb/lva',
+                countryCode: typeof ms['countryCode'] === 'string' ? ms['countryCode'] : undefined,
+                missionCode: typeof ms['missionCode'] === 'string' ? ms['missionCode'] : undefined,
+                vacCode: typeof ms['vacCode'] === 'string' ? ms['vacCode'] : undefined,
+                visaCategoryCode: typeof ms['visaCategoryCode'] === 'string' ? ms['visaCategoryCode'] : undefined,
+                subcategoryName: typeof ms['subcategoryName'] === 'string' ? ms['subcategoryName'] : undefined,
+                httpStatus: typeof ms['httpStatus'] === 'number' ? ms['httpStatus'] : undefined,
+                errorCode: typeof ms['errorCode'] === 'string' || typeof ms['errorCode'] === 'number' ? ms['errorCode'] : undefined,
+                result: typeof ms['result'] === 'string' ? ms['result'] : 'UNKNOWN',
+                earliestDate: typeof ms['earliestDate'] === 'string' ? ms['earliestDate'] : null,
+                slotCount: typeof ms['slotCount'] === 'number' ? ms['slotCount'] : undefined,
+                durationMs: typeof ms['durationMs'] === 'number' ? ms['durationMs'] : undefined,
+                rawSummary: ms['rawSummary'],
+              });
+              continue;
+            }
+            if (typeof ms['error'] === 'string') lastError = ms['error'];
             void postMilestone({
               runId: ctx.runId,
               email: ctx.email,
               accountId: ctx.accountId,
               fromState: ctx.fromState,
               status: ms['error'] ? 'fail' : 'ok',
-              step: ms['step'] ?? 'unknown',
-              toState: ms['toState'],
-              slotId: ms['slotId'],
-              confirmation: ms['confirmation'],
-              error: ms['error'],
-              detail: ms['detail'],
+              step: typeof ms['step'] === 'string' ? ms['step'] : 'unknown',
+              toState: typeof ms['toState'] === 'string' ? ms['toState'] : undefined,
+              slotId: typeof ms['slotId'] === 'string' ? ms['slotId'] : undefined,
+              confirmation: typeof ms['confirmation'] === 'string' ? ms['confirmation'] : undefined,
+              error: typeof ms['error'] === 'string' ? ms['error'] : undefined,
+              detail: typeof ms['detail'] === 'string' ? ms['detail'] : undefined,
             });
           } catch { /* ignore parse errors */ }
         }
@@ -563,6 +653,11 @@ function spawnAndWatch(
         if (line.includes('MILESTONE') && (line.includes('rate_limit') || line.includes('datadome_block') || line.includes('login_failed'))) {
           process.stdout.write('  [CIRCUIT-BREAKER] block/rate-limit detected — killing child immediately\n');
           killChild(lastError ?? 'circuit_breaker');
+        }
+        if (/IP-level rate-limit|429201|429202|403201|page-not-found|page_not_found|form_not_rendered/i.test(line)) {
+          lastError = lastError ?? 'ip_trust_loss';
+          process.stdout.write('  [CIRCUIT-BREAKER] IP/session trust loss detected - killing child immediately\n');
+          killChild(lastError);
         }
       }
     });
@@ -627,20 +722,37 @@ async function loadBurstEnv(): Promise<Record<string, string>> {
   const value = row?.value as {
     timezone?: unknown;
     windows?: Array<{ start?: unknown; end?: unknown }>;
+    aggregateIntervalSeconds?: unknown;
     burstIntervalSeconds?: unknown;
     idleIntervalSeconds?: unknown;
+    staggerSeconds?: unknown;
+    maxChecksPerRun?: unknown;
   } | null;
   if (!value || !Array.isArray(value.windows) || value.windows.length === 0) return {};
   const windows = value.windows
     .map((window) => `${String(window.start ?? '').trim()}-${String(window.end ?? '').trim()}`)
     .filter((window) => /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(window));
   if (windows.length === 0) return {};
-  return {
+  const aggregateInterval = Number(value.aggregateIntervalSeconds ?? value.burstIntervalSeconds ?? 3);
+  const fleetSize = boxCount();
+  const phaseIndex = Math.max(0, Math.min(boxNumber(), fleetSize) - 1);
+  const perBoxBurstInterval = Math.max(1, Math.round((Number.isFinite(aggregateInterval) ? aggregateInterval : 3) * fleetSize));
+  const configuredStagger = Number(value.staggerSeconds ?? 0);
+  const phaseOffsetMs = Math.max(0, Math.round(phaseIndex * (Number.isFinite(aggregateInterval) ? aggregateInterval : 3) * 1000));
+  const manualStaggerMs = Number.isFinite(configuredStagger) ? Math.round(configuredStagger * 1000) : 0;
+  const env: Record<string, string> = {
     BURST_WINDOWS: windows.join(','),
     BURST_TZ: String(value.timezone ?? 'Asia/Tashkent'),
-    BURST_INTERVAL: String(value.burstIntervalSeconds ?? 3),
+    BURST_INTERVAL: String(perBoxBurstInterval),
     IDLE_INTERVAL: String(value.idleIntervalSeconds ?? 300),
   };
+  if (!process.env.MAX_LIFT_REQUESTS && value.maxChecksPerRun !== undefined) {
+    const maxChecks = Number(value.maxChecksPerRun);
+    if (Number.isFinite(maxChecks) && maxChecks > 0) env.MAX_LIFT_REQUESTS = String(Math.floor(maxChecks));
+  }
+  env.BURST_AGGREGATE_INTERVAL = String(Number.isFinite(aggregateInterval) ? aggregateInterval : 3);
+  env.BURST_PHASE_OFFSET_MS = String(phaseOffsetMs + manualStaggerMs);
+  return env;
 }
 
 // ---------------------------------------------------------------------------
@@ -753,8 +865,9 @@ async function driveAccountReal(
 
   log(`driving ${acct.email} (role=${acct.pollingRole}, profile=${profile?.fullName ?? 'NONE'}, book=${bookEnabled === '1'})`);
 
-  const budget = makeBudget();
-  log(`request budget: max=${MAX_LIFT_REQUESTS}/run, rate=${RATE_WINDOW_MAX}/${RATE_WINDOW_MS / 1000}s`);
+  const runMaxLiftRequests = Math.max(1, Number(spawnEnv['MAX_LIFT_REQUESTS'] ?? MAX_LIFT_REQUESTS));
+  const budget = makeBudget(runMaxLiftRequests);
+  log(`request budget: max=${runMaxLiftRequests}/run, rate=${RATE_WINDOW_MAX}/${RATE_WINDOW_MS / 1000}s`);
   const outcome = await spawnAndWatch(PYTHON_BIN, [...PYTHON_EXTRA_ARGS, PIPELINE_SPIKE], spawnEnv, {
     runId,
     email: acct.email,
@@ -1000,11 +1113,11 @@ async function writeSpareCredentials(): Promise<void> {
 // Per-run request budget factory
 // ---------------------------------------------------------------------------
 
-function makeBudget(): { remaining: () => number; spend: () => void; rateOk: () => boolean } {
+function makeBudget(maxRequests = MAX_LIFT_REQUESTS): { remaining: () => number; spend: () => void; rateOk: () => boolean } {
   let spent = 0;
   const windowTimestamps: number[] = [];
   return {
-    remaining: () => Math.max(0, MAX_LIFT_REQUESTS - spent),
+    remaining: () => Math.max(0, maxRequests - spent),
     spend: () => {
       spent++;
       const now = Date.now();
@@ -1477,13 +1590,12 @@ const FORCE_START = process.argv.includes('--force');
 
 function directStaggerDelayMs(): number {
   if (process.env.AUTO_STAGGER !== '1') return 0;
-  const boxMatch = (process.env.BOX_ID ?? '').match(/(\d+)$/);
-  const boxNumber = boxMatch ? Number(boxMatch[1]) : 1;
-  const boxCount = Math.max(1, Number(process.env.BOX_COUNT ?? 1));
+  const index = boxNumber();
+  const count = boxCount();
   const burstIntervalSec = Math.max(1, Number(process.env.BURST_INTERVAL ?? 60));
-  if (!Number.isFinite(boxNumber) || boxNumber <= 1 || boxCount <= 1) return 0;
-  const slotSec = burstIntervalSec / boxCount;
-  return Math.round((Math.min(boxNumber, boxCount) - 1) * slotSec * 1000);
+  if (index <= 1 || count <= 1) return 0;
+  const slotSec = burstIntervalSec / count;
+  return Math.round((Math.min(index, count) - 1) * slotSec * 1000);
 }
 
 function directTargetEmails(): string[] {
