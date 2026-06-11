@@ -38,6 +38,11 @@ const autoCreateBatchSchema = z.object({
   countryCode: z.string().min(1).default('171'),
 });
 
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? '' : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 const pollingRoleSchema = z.object({
   role: z.nativeEnum(PollingRole),
 });
@@ -237,6 +242,76 @@ accountsRouter.patch('/:id/polling-role', async (req: Request, res: Response, ne
 });
 
 // ── DELETE /api/accounts/:id ──────────────────────────────────────────────────
+
+accountsRouter.get('/export-csv', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const accounts = await prisma.vfsAccount.findMany({
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        email: true,
+        encryptedPassword: true,
+        phone: true,
+        status: true,
+        pollingRole: true,
+        lastUsedAt: true,
+        lastWarmedAt: true,
+        cookieStore: true,
+        cooldownUntil: true,
+        profileIds: true,
+        tabUrl: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    const headers = [
+      'id',
+      'email',
+      'password',
+      'phone',
+      'status',
+      'role',
+      'cookie_fresh',
+      'last_warmed_at',
+      'last_used_at',
+      'cooldown_until',
+      'profile_count',
+      'tab_url',
+      'created_at',
+      'updated_at',
+    ];
+
+    const rows = accounts.map((account) => [
+      account.id,
+      account.email,
+      decrypt(account.encryptedPassword),
+      account.phone ?? '',
+      account.status,
+      account.pollingRole,
+      cookieStoreHasDatadome(account.cookieStore) && !!account.lastWarmedAt && Date.now() - account.lastWarmedAt.getTime() < 12 * 60 * 60 * 1000 ? 'yes' : 'no',
+      account.lastWarmedAt?.toISOString() ?? '',
+      account.lastUsedAt?.toISOString() ?? '',
+      account.cooldownUntil?.toISOString() ?? '',
+      account.profileIds.length,
+      account.tabUrl ?? '',
+      account.createdAt.toISOString(),
+      account.updatedAt.toISOString(),
+    ]);
+
+    const csv = [
+      headers.map(csvCell).join(','),
+      ...rows.map((row) => row.map(csvCell).join(',')),
+    ].join('\r\n') + '\r\n';
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="vfs-account-pool-${stamp}.csv"`);
+    res.status(200).send(csv);
+  } catch (err) {
+    next(err);
+  }
+});
 
 accountsRouter.get('/:id/password', async (req: Request, res: Response, next: NextFunction) => {
   try {

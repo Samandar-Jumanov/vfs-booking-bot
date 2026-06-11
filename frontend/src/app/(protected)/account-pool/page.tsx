@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2, RefreshCw, Eye, Copy, X } from 'lucide-react';
+import { CheckCircle2, ExternalLink, AlertTriangle, ShieldOff, Plus, Clock, Snowflake, Loader2, RefreshCw, Eye, Copy, X, Download } from 'lucide-react';
 import { DashboardShell } from '@/components/layout/DashboardShell';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -265,6 +265,20 @@ export default function AccountPoolPage() {
     }
   };
 
+  const downloadAccountsCsv = async () => {
+    const response = await api.get('/accounts/export-csv', { responseType: 'blob' });
+    const blob = new Blob([response.data], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    link.href = url;
+    link.download = `vfs-account-pool-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <DashboardShell
       title="Account pool"
@@ -324,6 +338,15 @@ export default function AccountPoolPage() {
         >
           <ExternalLink className="h-4 w-4" />
           Open {staleAccounts.length} stale login tab{staleAccounts.length === 1 ? '' : 's'}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary h-10 gap-2"
+          onClick={downloadAccountsCsv}
+          disabled={items.length === 0}
+        >
+          <Download className="h-4 w-4" />
+          Download CSV
         </button>
         <button
           type="button"
