@@ -240,6 +240,19 @@ async function markBoxCooldown(reason: string, account?: { id: string; email: st
   }).catch((e) => log(`WARN: mark box cooldown failed: ${(e as Error).message}`));
   await prisma.accountLease.deleteMany({ where: { boxId: BOX_ID } }).catch(() => {});
   log(`BOX COOLDOWN: ${BOX_ID} until=${cooldownUntil.toISOString()} reason=${reason}`);
+  try {
+    const { sendTelegram: tg } = await import('../src/modules/notifications/telegram.bot');
+    const lines = [
+      `⚠️ VPS cooldown`,
+      `Box: <b>${BOX_ID}</b>`,
+      `Reason: <code>${reason}</code>`,
+      account?.email ? `Account: <code>${account.email}</code>` : null,
+      `Until: <code>${cooldownUntil.toISOString()}</code>`,
+    ].filter(Boolean);
+    await tg(lines.join('\n')).catch((e: Error) => log(`WARN: cooldown Telegram failed: ${e.message}`));
+  } catch (e) {
+    log(`WARN: cooldown Telegram import failed: ${(e as Error).message}`);
+  }
   return cooldownUntil;
 }
 
@@ -762,6 +775,7 @@ async function loadBurstEnv(): Promise<Record<string, string>> {
 async function driveAccountReal(
   runId: string,
   acct: DriveAccount,
+  options: { watcherOnly?: boolean } = {},
 ): Promise<DriveOutcome> {
   let password = '';
   try {
@@ -832,7 +846,10 @@ async function driveAccountReal(
   }
 
   let leasedBookerId: string | null = null;
-  const booker = await findBookerPeer(acct);
+  const booker = options.watcherOnly ? null : await findBookerPeer(acct);
+  if (options.watcherOnly) {
+    log('BOOKER: disabled for fleet watch observation — watcher-only');
+  }
   if (booker) {
     try {
       const leaseOk = await acquireAccountLease(booker, runId, WorkerBoxRole.BOOKER);
@@ -1385,7 +1402,7 @@ async function driveRun(runId: string, options: DriveRunOptions = {}): Promise<v
       lifecycleState: acct.lifecycleState as string,
       profileIds: acct.profileIds,
       pollingRole: acct.pollingRole,
-    });
+    }, { watcherOnly: options.fleetPartition });
     await releaseAccountLease(acct.id);
 
     // Auto-quarantine: record the run outcome on the account so the pacer and
