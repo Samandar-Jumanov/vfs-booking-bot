@@ -112,6 +112,7 @@ SESSION_REPLAY_MODE = os.environ.get("SESSION_REPLAY_MODE", "direct").strip().lo
 SESSION_REPLAY_PROXY = os.environ.get("SESSION_REPLAY_PROXY", os.environ.get("REPLAY_PROXY", BROWSER_PROXY_SERVER)).strip()
 SESSION_REPLAY_INTERVAL_SEC = float(os.environ.get("SESSION_REPLAY_INTERVAL_SEC", "30"))
 SESSION_REPLAY_MAX_CHECKS = int(os.environ.get("SESSION_REPLAY_MAX_CHECKS", "20"))
+LOGIN_FIELD_TIMEOUT_SEC = float(os.environ.get("LOGIN_FIELD_TIMEOUT_SEC", "20"))
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
 # TEST_BOOKER_ON_OCMA — routes a detected OCMA slot to the booker queue so the
@@ -567,6 +568,36 @@ async def shot(page, name):
         pass
 
 
+async def login_debug(page, label):
+    try:
+        info = await jeval(page, """(()=> {
+            const text = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 500);
+            const app = document.querySelector('app-root');
+            const scripts = [...document.scripts].map(s => s.src || s.type || '').filter(Boolean).slice(-8);
+            const inputs = [...document.querySelectorAll('input')].map(i => ({
+                id: i.id || '',
+                name: i.name || '',
+                type: i.type || '',
+                form: i.getAttribute('formcontrolname') || ''
+            })).slice(0, 20);
+            return JSON.stringify({
+                url: location.href,
+                title: document.title || '',
+                readyState: document.readyState,
+                online: navigator.onLine,
+                bodyLen: (document.body && document.body.innerText || '').length,
+                appTextLen: app ? (app.innerText || '').length : null,
+                inputs,
+                scripts,
+                text
+            });
+        })()""")
+        log(f"LOGIN-DEBUG[{label}]:", info)
+    except Exception as e:
+        log(f"LOGIN-DEBUG[{label}] failed:", str(e)[:120])
+    await shot(page, f"login_{label}")
+
+
 async def dismiss_consent(page):
     await jeval(page, """(()=>{const e=document.getElementById('onetrust-accept-btn-handler'); if(e){e.click(); return 1;}
         const b=[...document.querySelectorAll('button,a')].find(x=>/accept all|accept cookies|i agree/i.test(x.innerText||'')); if(b){b.click(); return 1;} return 0;})()""")
@@ -663,6 +694,56 @@ async def _install_auth_capture(page):
     except Exception as e:
         log("AUTH-CAPTURE: setup failed (UI fallback will be used):", str(e)[:80])
         return False
+
+
+async def _install_page_diagnostics(page):
+    try:
+        from nodriver import cdp
+
+        async def on_console(evt):
+            try:
+                args = []
+                for arg in getattr(evt, "args", []) or []:
+                    val = getattr(arg, "value", None)
+                    desc = getattr(arg, "description", None)
+                    args.append(str(val if val is not None else desc)[:200])
+                if args:
+                    log("BROWSER-CONSOLE:", " | ".join(args)[:600])
+            except Exception:
+                pass
+
+        async def on_exception(evt):
+            try:
+                details = getattr(evt, "exception_details", None)
+                text = getattr(details, "text", "") if details else ""
+                url = getattr(details, "url", "") if details else ""
+                line = getattr(details, "line_number", "") if details else ""
+                log("BROWSER-EXCEPTION:", str(text)[:300], str(url)[-80:], line)
+            except Exception:
+                pass
+
+        async def on_log(evt):
+            try:
+                entry = getattr(evt, "entry", None)
+                text = getattr(entry, "text", "") if entry else ""
+                level = getattr(entry, "level", "") if entry else ""
+                url = getattr(entry, "url", "") if entry else ""
+                if text:
+                    log("BROWSER-LOG:", str(level), str(text)[:500], str(url)[-80:])
+            except Exception:
+                pass
+
+        page.add_handler(cdp.runtime.ConsoleAPICalled, on_console)
+        page.add_handler(cdp.runtime.ExceptionThrown, on_exception)
+        page.add_handler(cdp.log.EntryAdded, on_log)
+        try:
+            await page.send(cdp.runtime.enable())
+            await page.send(cdp.log.enable())
+        except Exception:
+            pass
+        log("BROWSER-DIAG: console/runtime capture enabled")
+    except Exception as e:
+        log("BROWSER-DIAG: setup failed:", str(e)[:80])
 
 
 def auth_captured():
@@ -1357,20 +1438,23 @@ async def _attempt_login(browser, page, email=None, password=None):
     verify the form, click Sign In only when enabled, then confirm we left /login.
     Returns True on success, False on this attempt's failure (caller may retry)."""
     log("LOGIN: navigating")
-    # Wait until any login-form element appears (cap 10s; faster on good connections).
+    # Wait until any login-form element appears. Proxy sessions can be slow while
+    # VFS/Cloudflare/Dynatrace scripts initialize; keep this configurable.
+    log(f"LOGIN: waiting up to {int(LOGIN_FIELD_TIMEOUT_SEC)}s for email field")
     await wait_until(page,
         "(()=>{return !!document.querySelector('#email,input[type=email],[formcontrolname=emailid]');})()",
-        timeout=10, interval=0.5)
+        timeout=LOGIN_FIELD_TIMEOUT_SEC, interval=0.5)
     await dismiss_consent(page)
     # The first load is flaky (transient page-not-found / slow hydration). Wait for
     # the email field, reloading up to 2× before giving up.
     email_el = None
     for attempt in range(3):
-        email_el = await page.select("#email", timeout=20)
+        email_el = await page.select("#email", timeout=LOGIN_FIELD_TIMEOUT_SEC)
         if email_el:
             break
         url = await jeval(page, "location.href") or ""
         log(f"LOGIN: email field absent (attempt {attempt+1}), url={url.split('/')[-1]} — reloading")
+        await login_debug(page, f"email_absent_{attempt+1}")
         try:
             await page.get(LOGIN_URL)
         except Exception:
@@ -1379,6 +1463,7 @@ async def _attempt_login(browser, page, email=None, password=None):
         await dismiss_consent(page)
     if not email_el:
         log("LOGIN: email field never rendered — aborting this attempt")
+        await login_debug(page, "email_never_rendered")
         return False
     btn_enabled = await _fill_login_form(page, email=email, password=password)
     await dismiss_consent(page)
@@ -2425,6 +2510,7 @@ async def main():
         log(f"BROWSER PROXY: {BROWSER_PROXY_SERVER}")
     browser = await uc.start(headless=False, browser_args=browser_args())
     page = await browser.get(LOGIN_URL)
+    await _install_page_diagnostics(page)
     # Install the lift-api auth-header capture BEFORE login so we sniff authorize/
     # clientsource off the browser's first authed lift-api request (fires once the
     # dashboard/wizard loads). Enables the cheap API monitor; if it never captures,

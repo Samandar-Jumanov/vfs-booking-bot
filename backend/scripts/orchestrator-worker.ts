@@ -56,6 +56,7 @@ const BOOKING_ONLY = process.env.BOOKING_ONLY === '1';
 // pool_builder: continuously top up the account pool at REG_INTERVAL_MIN minutes/account,
 // never drives/books. Run separately from the booking worker.
 const WORKER_MODE = (process.env.WORKER_MODE ?? 'book') as 'book' | 'pool_builder';
+const DIRECT_RUN_ONCE = process.env.DIRECT_RUN_ONCE === '1' || process.env.SESSION_REPLAY_TEST === '1';
 const BOX_ID = process.env.BOX_ID?.trim() || os.hostname();
 const BOX_COOLDOWN_MIN = Number(process.env.BOX_COOLDOWN_MIN ?? 120);
 const ACCOUNT_LEASE_TTL_SEC = Number(process.env.ACCOUNT_LEASE_TTL_SEC ?? 15 * 60);
@@ -1933,6 +1934,14 @@ async function main(): Promise<void> {
     if (staggerMs > 0) {
       log(`AUTO_STAGGER: waiting ${Math.round(staggerMs / 1000)}s before first direct run`);
       await sleep(staggerMs);
+    }
+    if (DIRECT_RUN_ONCE) {
+      const runId = `direct-${process.env.BOX_ID ?? os.hostname()}-${Date.now()}`;
+      await driveRun(runId).catch((e) => log(`direct run failed: ${(e as Error).message}`));
+      log(`direct run ${runId} ended — DIRECT_RUN_ONCE=1, exiting`);
+      await releaseWorkerLock();
+      await prisma.$disconnect();
+      process.exit(0);
     }
     for (;;) {
       const runId = `direct-${process.env.BOX_ID ?? os.hostname()}-${Date.now()}`;
