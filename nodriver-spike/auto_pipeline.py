@@ -107,6 +107,11 @@ DIRECT_POLL = os.environ.get("DIRECT_POLL") == "1"
 # the next one so no single IP exceeds the per-IP limit. Empty = direct VPS IP.
 PROXY_LIST = [p.strip() for p in os.environ.get("PROXY_LIST", "").split(",") if p.strip()]
 BROWSER_PROXY_SERVER = os.environ.get("BROWSER_PROXY_SERVER", "").strip()
+SESSION_REPLAY_TEST = os.environ.get("SESSION_REPLAY_TEST") == "1"
+SESSION_REPLAY_MODE = os.environ.get("SESSION_REPLAY_MODE", "direct").strip().lower()
+SESSION_REPLAY_PROXY = os.environ.get("SESSION_REPLAY_PROXY", os.environ.get("REPLAY_PROXY", BROWSER_PROXY_SERVER)).strip()
+SESSION_REPLAY_INTERVAL_SEC = float(os.environ.get("SESSION_REPLAY_INTERVAL_SEC", "30"))
+SESSION_REPLAY_MAX_CHECKS = int(os.environ.get("SESSION_REPLAY_MAX_CHECKS", "20"))
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
 # TEST_BOOKER_ON_OCMA — routes a detected OCMA slot to the booker queue so the
@@ -1182,6 +1187,95 @@ async def api_check_direct(proxy=None):
         "error": (data or {}).get("error"),
         "_status": status,
     }
+
+
+def _slot_result(api):
+    if api is None:
+        return "ERROR", 0, None, 0
+    status = api.get("_status", 0)
+    err = api.get("error")
+    err_code = (err or {}).get("code") if isinstance(err, dict) else None
+    slot_count = len(api.get("earliestSlotLists") or [])
+    if err_code == 1035:
+        return "NO_SLOT", status, err_code, slot_count
+    if status == 429 or err_code in (429201, 429202):
+        return "RATE_LIMIT", status, err_code, slot_count
+    if err_code == 429001:
+        return "ACCOUNT_RESTRICTED", status, err_code, slot_count
+    if status in (401, 403) or err_code in (403, 403201):
+        return "BLOCKED", status, err_code, slot_count
+    if status != 200 or err:
+        return "ERROR", status, err_code, slot_count
+    if api.get("earliestDate") or slot_count:
+        return "SLOT_FOUND", status, err_code, slot_count
+    return "NO_SLOT", status, err_code, slot_count
+
+
+async def run_session_replay_test(page):
+    """One-login watcher test. Captures Work-D tokens once, then repeatedly checks
+    availability without re-login/wizard loops. Use SESSION_REPLAY_MODE=direct to
+    test plain HTTP replay via SESSION_REPLAY_PROXY; use browser to test in-page
+    fetch against the warm Chrome session."""
+    mode = SESSION_REPLAY_MODE if SESSION_REPLAY_MODE in ("direct", "browser") else "direct"
+    log(
+        "SESSION-REPLAY: starting mode=%s interval=%.2fs max=%s proxy=%s" % (
+            mode,
+            SESSION_REPLAY_INTERVAL_SEC,
+            SESSION_REPLAY_MAX_CHECKS,
+            SESSION_REPLAY_PROXY if mode == "direct" else "(browser-session)",
+        )
+    )
+
+    for i in range(1, 6):
+        if auth_captured() and codes_confirmed():
+            break
+        try:
+            await load_workd_codes(page)
+        except Exception as e:
+            log(f"SESSION-REPLAY: code capture attempt {i}/5 failed:", str(e)[:120])
+        if auth_captured() and codes_confirmed():
+            break
+        await asyncio.sleep(2)
+
+    if not auth_captured() or not codes_confirmed():
+        log(
+            "SESSION-REPLAY: cannot start checks; auth=%s codes=%s body=%s"
+            % (auth_captured(), codes_confirmed(), json.dumps(_lift_body()))
+        )
+        milestone("failed", email=EMAIL, error="session_replay_codes_not_confirmed")
+        return
+
+    checks_done = 0
+    for attempt in range(1, SESSION_REPLAY_MAX_CHECKS + 1):
+        checks_done = attempt
+        started = time.time()
+        if mode == "direct":
+            api = await api_check_direct(SESSION_REPLAY_PROXY or None)
+        else:
+            api = await api_check_availability(page)
+        duration_ms = int((time.time() - started) * 1000)
+        result, status, err_code, slot_count = _slot_result(api)
+
+        slot_check_milestone(
+            attempt=attempt,
+            subcategory_name="Work (Visa D) Uzbek, Turkmen",
+            visa_category_code=_lift_body().get("visaCategoryCode"),
+            api=api or {"_status": status, "error": {"code": err_code or "TRANSPORT_FAILURE"}},
+            result=result,
+            duration_ms=duration_ms,
+        )
+        log(
+            "SESSION-REPLAY #%s: mode=%s result=%s http=%s code=%s slots=%s duration=%sms"
+            % (attempt, mode, result, status, err_code or "", slot_count, duration_ms)
+        )
+
+        if result in ("SLOT_FOUND", "BLOCKED", "RATE_LIMIT", "ACCOUNT_RESTRICTED"):
+            log(f"SESSION-REPLAY: stopping on {result}")
+            break
+        if attempt < SESSION_REPLAY_MAX_CHECKS:
+            await asyncio.sleep(max(0.1, SESSION_REPLAY_INTERVAL_SEC))
+
+    log(f"SESSION-REPLAY: complete checks={checks_done}")
 
 
 # ── LOGIN ──────────────────────────────────────────────────────────────────
@@ -2372,6 +2466,20 @@ async def main():
     await enter_wizard(page)
     await shot(page, "pipe_wizard")
     milestone("monitoring", email=EMAIL)
+
+    if SESSION_REPLAY_TEST:
+        await run_session_replay_test(page)
+        log("SESSION-REPLAY: keeping browser open 15s")
+        await asyncio.sleep(15)
+        stop_event.set()
+        if booker_runner is not None and not booker_runner.done():
+            booker_runner.cancel()
+            try:
+                await booker_runner
+            except asyncio.CancelledError:
+                pass
+        browser.stop()
+        return
 
     # ── Monitor loop ─────────────────────────────────────────────────────────
     # PRIMARY path: poll VFS's authed CheckIsSlotAvailable endpoint (cheap, fast,
