@@ -106,6 +106,7 @@ DIRECT_POLL = os.environ.get("DIRECT_POLL") == "1"
 # Optional comma-separated proxy URLs; in DIRECT_POLL mode each cycle rotates to
 # the next one so no single IP exceeds the per-IP limit. Empty = direct VPS IP.
 PROXY_LIST = [p.strip() for p in os.environ.get("PROXY_LIST", "").split(",") if p.strip()]
+BROWSER_PROXY_SERVER = os.environ.get("BROWSER_PROXY_SERVER", "").strip()
 BOOK_ENABLED = os.environ.get("BOOK_ENABLED") == "1"
 BOOK_DRY_RUN = os.environ.get("BOOK_DRY_RUN") == "1"
 # TEST_BOOKER_ON_OCMA — routes a detected OCMA slot to the booker queue so the
@@ -119,6 +120,12 @@ if os.environ.get("PROVE_OCMA") == "1":
     SUBCAT = re.compile(r"work\s*\(?\s*(?:visa\s*d|d\s*visa)|ocma", re.I)
 SHOTS = pathlib.Path(__file__).parent / "shots"
 SHOTS.mkdir(exist_ok=True)
+
+def browser_args():
+    args = ["--lang=en-US"]
+    if BROWSER_PROXY_SERVER:
+        args.append(f"--proxy-server={BROWSER_PROXY_SERVER}")
+    return args
 
 WORKER_BRIDGED = os.environ.get("WORKER_BRIDGED") == "1"
 MAILSAC_KEY = os.environ.get("MAILSAC_API_KEY", "")
@@ -2219,7 +2226,7 @@ async def main():
         booker_browser = None
         try:
             log(f"BOOKER: starting second browser for {BOOKER_EMAIL}")
-            booker_browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
+            booker_browser = await uc.start(headless=False, browser_args=browser_args())
             booker_page = await booker_browser.get(LOGIN_URL)
             if not await do_login(booker_browser, booker_page, email=BOOKER_EMAIL, password=BOOKER_PASSWORD):
                 log("BOOKER: login failed — watcher will book directly if a slot appears")
@@ -2320,7 +2327,9 @@ async def main():
                     pass
 
     booker_runner = asyncio.create_task(booker_task()) if BOOKER_EMAIL else None
-    browser = await uc.start(headless=False, browser_args=["--lang=en-US"])
+    if BROWSER_PROXY_SERVER:
+        log(f"BROWSER PROXY: {BROWSER_PROXY_SERVER}")
+    browser = await uc.start(headless=False, browser_args=browser_args())
     page = await browser.get(LOGIN_URL)
     # Install the lift-api auth-header capture BEFORE login so we sniff authorize/
     # clientsource off the browser's first authed lift-api request (fires once the
